@@ -63,19 +63,7 @@ else:
 PY
 identity="$(/usr/bin/python3 "$work/profile.py" "$bundle" "$work")"
 
-/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $bundle" "$app/Info.plist"
-
-# 先签里面的库，再签 app
-find "$app/Frameworks" -maxdepth 1 \( -name '*.framework' -o -name '*.dylib' \) -print0 2>/dev/null |
-  while IFS= read -r -d '' f; do codesign -f -s "$identity" "$f"; done
-codesign -f -s "$identity" --entitlements "$work/ent.plist" "$app"
-codesign --verify --deep --strict "$app"
-mkdir -p "$work/Payload" && ditto "$app" "$work/Payload/iosApp.app"
-ipa="$HOME/Downloads/Raft-signed.ipa"
-(cd "$work" && rm -f "$ipa" && zip -qry "$ipa" Payload)
-echo "签名完成：$ipa"
-
-# 找用线连着的 iPhone，装上去
+# 先确定装到哪台 iPhone，并确认签名文件里有它
 xcrun devicectl list devices --json-output "$work/devices.json" >/dev/null
 cat > "$work/device.py" <<'PY'
 import json, os, sys
@@ -96,11 +84,27 @@ d = picked[0]
 if udids and d["hardwareProperties"].get("udid") not in udids:
     sys.exit(f"签名文件里没有 {name(d)} 这台手机。在 Xcode 里选这台手机按一次 ⌘B（或 ⌘R），让 Xcode 把它登记上，再跑脚本。")
 print(f"装到：{name(d)}", file=sys.stderr)
-print(d["identifier"])
+print(d["identifier"], d["hardwareProperties"].get("udid", ""))
 PY
-device="$(/usr/bin/python3 "$work/device.py" "$work/devices.json" "$work/udids.txt")"
-xcrun devicectl device install app --device "$device" "$app" || {
-  echo "直接安装失败。打开 Finder，左边点你的 iPhone，把 $ipa 拖进右边的窗口里装。"
-  exit 1
-}
+read -r device udid < <(/usr/bin/python3 "$work/device.py" "$work/devices.json" "$work/udids.txt"; echo)
+[ -n "$device" ] || exit 1
+
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $bundle" "$app/Info.plist"
+
+# 先签里面的库，再签 app
+find "$app/Frameworks" -maxdepth 1 \( -name '*.framework' -o -name '*.dylib' \) -print0 2>/dev/null |
+  while IFS= read -r -d '' f; do codesign -f -s "$identity" "$f"; done
+codesign -f -s "$identity" --entitlements "$work/ent.plist" "$app"
+codesign --verify --deep --strict "$app"
+mkdir -p "$work/Payload" && ditto "$app" "$work/Payload/iosApp.app"
+ipa="$HOME/Downloads/Raft-signed.ipa"
+(cd "$work" && rm -f "$ipa" && zip -qry "$ipa" Payload)
+echo "签名完成：$ipa"
+
+# 装上去。devicectl 要往手机上挂调试镜像，Xcode 太老时会失败，就换 ideviceinstaller（不需要调试镜像）
+if ! xcrun devicectl device install app --device "$device" "$app"; then
+  command -v ideviceinstaller >/dev/null || { echo "devicectl 装不上。brew install ideviceinstaller 以后再跑一次。"; exit 1; }
+  echo "devicectl 装不上，换 ideviceinstaller"
+  ideviceinstaller -u "$udid" -i "$ipa" || ideviceinstaller -u "$udid" install "$ipa"
+fi
 echo "装好了。第一次打开前：iPhone 设置 → 通用 → VPN 与设备管理 → 信任你的 Apple ID。"
