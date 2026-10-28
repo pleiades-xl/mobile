@@ -3,6 +3,8 @@
 # 用你自己的免费签名重新签名，装到用线连着的 iPhone 上。
 #
 # 用法: bash install-on-iphone.sh Raft-Debug.zip [包名，默认 dev.vgent.raft]
+# 连着好几台 iPhone 时，用 IPHONE=手机名或 Identifier 指定，例如
+#   IPHONE=1F3F2623-6A98-5ABC-ADAA-5C6B0A90F99C bash install-on-iphone.sh Raft-Debug.zip
 #
 # 先决条件：用 Xcode 建过一个同包名的空项目，并往这台 iPhone 上装过一次
 # （这样 Xcode 才会生成你的签名证书和签名文件）。
@@ -41,6 +43,8 @@ if not best:
 path, d = best
 team = d["TeamIdentifier"][0]
 shutil.copy(path, os.path.join(work, "iosApp.app", "embedded.mobileprovision"))
+with open(os.path.join(work, "udids.txt"), "w") as f:
+    f.write("\n".join(d.get("ProvisionedDevices", [])))
 with open(os.path.join(work, "ent.plist"), "wb") as f:
     plistlib.dump({
         "application-identifier": f"{team}.{bundle}",
@@ -74,15 +78,27 @@ echo "签名完成：$ipa"
 # 找用线连着的 iPhone，装上去
 xcrun devicectl list devices --json-output "$work/devices.json" >/dev/null
 cat > "$work/device.py" <<'PY'
-import json, sys
-for d in json.load(open(sys.argv[1]))["result"]["devices"]:
-    if d["hardwareProperties"].get("platform") == "iOS" and d["connectionProperties"].get("pairingState") == "paired":
-        print(d["identifier"])
-        break
+import json, os, sys
+devices, udids_file, want = sys.argv[1], sys.argv[2], os.environ.get("IPHONE", "")
+udids = open(udids_file).read().split()
+phones = [d for d in json.load(open(devices))["result"]["devices"]
+          if d["hardwareProperties"].get("platform") == "iOS"
+          and d["connectionProperties"].get("pairingState") == "paired"]
+name = lambda d: d["deviceProperties"].get("name", "?")
+if want:
+    picked = [d for d in phones if want in (d["identifier"], name(d))]
 else:
-    sys.exit("没找到 iPhone。用线连上 Mac，在手机上点“信任”，再试一次。")
+    picked = [d for d in phones if d["connectionProperties"].get("tunnelState") == "connected"] or phones
+if len(picked) != 1:
+    listing = "\n".join(f"  {name(d)}  {d['identifier']}" for d in phones) or "  （一台都没有）"
+    sys.exit(f"不确定装到哪台 iPhone。现在连着的：\n{listing}\n用 IPHONE=<Identifier> bash install-on-iphone.sh ... 指定一台。")
+d = picked[0]
+if udids and d["hardwareProperties"].get("udid") not in udids:
+    sys.exit(f"签名文件里没有 {name(d)} 这台手机。在 Xcode 里选这台手机按一次 ⌘B（或 ⌘R），让 Xcode 把它登记上，再跑脚本。")
+print(f"装到：{name(d)}", file=sys.stderr)
+print(d["identifier"])
 PY
-device="$(/usr/bin/python3 "$work/device.py" "$work/devices.json")"
+device="$(/usr/bin/python3 "$work/device.py" "$work/devices.json" "$work/udids.txt")"
 xcrun devicectl device install app --device "$device" "$app" || {
   echo "直接安装失败。打开 Finder，左边点你的 iPhone，把 $ipa 拖进右边的窗口里装。"
   exit 1
