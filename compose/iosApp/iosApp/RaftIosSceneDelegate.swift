@@ -4,6 +4,7 @@ import shared
 import SwiftUI
 import UIKit
 import UIKit.UIGestureRecognizerSubclass
+import CoreMotion
 
 // task #471: scene plumbing for iPad multi-window.
 //
@@ -55,6 +56,7 @@ final class RaftIosSceneDelegate: UIResponder, UIWindowSceneDelegate {
                 rawValue: Int(RaftAppAppearanceRuntime.shared.hostStyleCode)
             ) ?? .unspecified
             window.addGestureRecognizer(RaftTouchProbe(target: nil, action: nil))
+            RaftShakeDetector.shared.start()
             self.window = window
             RaftIosAppearanceHost.attach()
             window.makeKeyAndVisible()
@@ -261,6 +263,32 @@ final class RaftShakeWindow: UIWindow {
         guard motion == .motionShake else { return super.motionEnded(motion, with: event) }
         RaftIosDiagnosticsRecord("info", "RaftShakeShare", "shake_share")
         RaftLogShare.present()
+    }
+}
+
+/// iOS hands the shake gesture to the first responder only, which Raft's views never pass on (and
+/// with nothing focused there is none), so the accelerometer detects the shake itself: three
+/// readings over 2.2 g within 0.8 s.
+final class RaftShakeDetector {
+    static let shared = RaftShakeDetector()
+    private let motion = CMMotionManager()
+    private var peaks: [TimeInterval] = []
+    private var lastShare: TimeInterval = 0
+
+    func start() {
+        guard motion.isAccelerometerAvailable, !motion.isAccelerometerActive else { return }
+        motion.accelerometerUpdateInterval = 1.0 / 30.0
+        motion.startAccelerometerUpdates(to: .main) { [weak self] data, _ in
+            guard let self, let a = data?.acceleration else { return }
+            guard (a.x * a.x + a.y * a.y + a.z * a.z).squareRoot() > 2.2 else { return }
+            let now = Date().timeIntervalSince1970
+            self.peaks = self.peaks.filter { now - $0 < 0.8 } + [now]
+            guard self.peaks.count >= 3, now - self.lastShare > 3 else { return }
+            self.peaks.removeAll()
+            self.lastShare = now
+            RaftIosDiagnosticsRecord("info", "RaftShakeShare", "shake_share source=accelerometer")
+            RaftLogShare.present()
+        }
     }
 }
 
