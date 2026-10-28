@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       configurations:
-        default: '["Debug","Release"]'
+        default: '["Release"]'
       heap:
         description: Gradle -Xmx, e.g. 12g (relies on swap on the 7 GB runner)
         default: ""
@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        configuration: ${{ fromJSON(inputs.configurations || '["Debug","Release"]') }}
+        configuration: ${{ fromJSON(inputs.configurations || '["Release"]') }}
     steps:
       - uses: actions/checkout@v7
 
@@ -35,10 +35,11 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
 
       - name: Gradle heap
-        if: inputs.heap != ''
+        env:
+          HEAP: ${{ inputs.heap || '12g' }}
         run: |
           mkdir -p ~/.gradle
-          echo "org.gradle.jvmargs=-Xmx${{ inputs.heap }} -Xss4m -Dfile.encoding=UTF-8 -Dkotlin.daemon.jvm.options\\=\"-Xmx${{ inputs.heap }},-Xss4m\"" >> ~/.gradle/gradle.properties
+          echo "org.gradle.jvmargs=-Xmx$HEAP -Xss4m -Dfile.encoding=UTF-8 -Dkotlin.daemon.jvm.options\\=\"-Xmx$HEAP,-Xss4m\"" >> ~/.gradle/gradle.properties
           cat ~/.gradle/gradle.properties
 
       - name: Shared framework placeholder
