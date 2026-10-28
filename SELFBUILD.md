@@ -37,15 +37,15 @@ Xcode 里：
 
 Xcode 27.1 要 macOS Tahoe 26.6 以上。系统更老的话，用云上编好的 app，自己签名安装：
 
-1. 从 Releases 下载 Raft-Release.zip（卡的话换 Raft-Debug.zip 试试）。
+1. 从 Releases 下载 Raft-Debug.zip（正式版云上内存不够，暂时编不出来）。
 2. 生成免费签名：Xcode → File → New → Project → iOS App，Team 选 Personal Team，
    Organization Identifier 填 dev.vgent，Product Name 填 raft（包名就是 dev.vgent.raft）。
    iPhone 连上 Mac、打开开发者模式，选 iPhone，⌘R 装一次。
 3. 终端里：
 
-       ./install-on-iphone.sh ~/Downloads/Raft-Release.zip
+       ./install-on-iphone.sh ~/Downloads/Raft-Debug.zip
 
-   包名改过的话加在后面：`./install-on-iphone.sh ~/Downloads/Raft-Release.zip dev.vgent.raft.xl`
+   包名改过的话加在后面：`./install-on-iphone.sh ~/Downloads/Raft-Debug.zip dev.vgent.raft.xl`
 4. 第一次打开前：iPhone 设置 → 通用 → VPN 与设备管理 → 信任。
 
 7 天后过期：先在 Xcode 里把那个空项目再装一次（续签名），再跑一次脚本。
