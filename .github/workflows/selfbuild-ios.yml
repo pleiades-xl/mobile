@@ -3,6 +3,12 @@ name: Self-build iOS (Xcode 27.1, unsigned)
 on:
   push:
   workflow_dispatch:
+    inputs:
+      configurations:
+        default: '["Debug","Release"]'
+      heap:
+        description: Gradle -Xmx, e.g. 12g (relies on swap on the 7 GB runner)
+        default: ""
 
 jobs:
   build:
@@ -11,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        configuration: [Debug, Release]
+        configuration: ${{ fromJSON(inputs.configurations || '["Debug","Release"]') }}
     steps:
       - uses: actions/checkout@v7
 
@@ -27,6 +33,13 @@ jobs:
           java-version: "17"
 
       - uses: gradle/actions/setup-gradle@v6
+
+      - name: Gradle heap
+        if: inputs.heap != ''
+        run: |
+          mkdir -p ~/.gradle
+          echo "org.gradle.jvmargs=-Xmx${{ inputs.heap }} -Xss4m -Dfile.encoding=UTF-8 -Dkotlin.daemon.jvm.options\\=\"-Xmx${{ inputs.heap }},-Xss4m\"" >> ~/.gradle/gradle.properties
+          cat ~/.gradle/gradle.properties
 
       - name: Shared framework placeholder
         working-directory: compose
