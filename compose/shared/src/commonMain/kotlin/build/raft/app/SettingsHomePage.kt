@@ -5986,6 +5986,8 @@ private fun RaftAppShellReadyContent(
     // stdrc 2026-10-21: Settings is the More tab's root on the phone bar and the pinned rail entry
     // on the wide layout; a selection made for the other layout moves to this layout's root.
     LaunchedEffect(selectedTab, navRailActive) {
+        // The inline Search / Saved belongs to the wide layout; it must not outlive it.
+        if (!navRailActive) railInlineSecondaryDestination = null
         if (appShellSearchTabMovesToRailSearch(selectedTab, navRailActive)) {
             // The rail has no Search tab: a phone Search tab left open when the window widens
             // becomes the rail's inline Search over Home.
@@ -6677,6 +6679,8 @@ private fun RaftAppShellReadyContent(
     // belong to no tab; Back returns to the page that showed when the panel opened them.
     fun openServerMenuEntry(entry: RaftServerMenuEntry) {
         serverMenuState.dismiss()
+        // The inline Search / Saved covers the content pane; a server-panel page must replace it.
+        railInlineSecondaryDestination = null
         prewarmAdmissionGate.invalidate("server_menu_open:${entry.key}")
         bridge.log("app_shell_server_menu_open row=${entry.key} from=$selectedTab")
         if (!navRailActive) serverPageOrigin = appShellServerPageOrigin(selectedTab, serverPageOrigin)
@@ -6857,8 +6861,12 @@ private fun RaftAppShellReadyContent(
                                 RaftProductEvents.navEntrySelected(
                                     destination = appShellNavDestination(key),
                                     surface = RaftNavSurface.Rail,
-                                    wasActive = retainedAppShellSelectedTab(selectedTab) == key,
+                                    wasActive =
+                                        railInlineSecondaryDestination == null &&
+                                            retainedAppShellSelectedTab(selectedTab) == key,
                                 )
+                                // Same as the top items: Search -> Settings must land on Settings.
+                                railInlineSecondaryDestination = null
                                 onAppShellTabSelected(key)
                             },
                             // The top bar above the rail clears the status bar.
@@ -7451,10 +7459,10 @@ private fun RaftAppShellReadyContent(
                                                 RaftNavSurface.MobileHomeShortcuts
                                             },
                                         wasActive =
-                                            desktopModeOnLargeScreen &&
+                                            navRailActive &&
                                                 railInlineSecondaryDestination == AppShellRailSavedKey,
                                     )
-                                    if (desktopModeOnLargeScreen) {
+                                    if (navRailActive) {
                                         // Large screens keep the rail and open Saved as the
                                         // list pane with the shared detail beside it.
                                         railInlineSecondaryDestination = AppShellRailSavedKey
@@ -7828,7 +7836,7 @@ private fun RaftAppShellReadyContent(
                             AppShellRailSavedKey -> HomeDestinationSaved
                             else -> null
                         }
-                    if (railInlineDestination != null) {
+                    if (railInlineDestination != null && navRailActive) {
                         val searchListPane: @Composable (Boolean) -> Unit = { listActive ->
                             HomeSecondaryRouterContent(
                                 destination = railInlineDestination,
