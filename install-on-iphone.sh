@@ -66,7 +66,10 @@ find "$app/Frameworks" -maxdepth 1 \( -name '*.framework' -o -name '*.dylib' \) 
   while IFS= read -r -d '' f; do codesign -f -s "$identity" "$f"; done
 codesign -f -s "$identity" --entitlements "$work/ent.plist" "$app"
 codesign --verify --deep --strict "$app"
-echo "签名完成"
+mkdir -p "$work/Payload" && ditto "$app" "$work/Payload/iosApp.app"
+ipa="$HOME/Downloads/Raft-signed.ipa"
+(cd "$work" && rm -f "$ipa" && zip -qry "$ipa" Payload)
+echo "签名完成：$ipa"
 
 # 找用线连着的 iPhone，装上去
 xcrun devicectl list devices --json-output "$work/devices.json" >/dev/null
@@ -80,5 +83,8 @@ else:
     sys.exit("没找到 iPhone。用线连上 Mac，在手机上点“信任”，再试一次。")
 PY
 device="$(/usr/bin/python3 "$work/device.py" "$work/devices.json")"
-xcrun devicectl device install app --device "$device" "$app"
+xcrun devicectl device install app --device "$device" "$app" || {
+  echo "直接安装失败。打开 Finder，左边点你的 iPhone，把 $ipa 拖进右边的窗口里装。"
+  exit 1
+}
 echo "装好了。第一次打开前：iPhone 设置 → 通用 → VPN 与设备管理 → 信任你的 Apple ID。"
