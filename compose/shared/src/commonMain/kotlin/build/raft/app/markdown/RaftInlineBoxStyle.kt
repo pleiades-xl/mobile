@@ -17,6 +17,9 @@ import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
@@ -196,7 +199,7 @@ internal fun raftInlineGapWidth(id: String): Dp? =
  * chip's link, and [raftInlineDecorations] paints the chip box over them. Without this a tap on the
  * painted padding of a chip (a self @mention's yellow sticker, a #channel or task chip, a permalink
  * or App link chip) hit no link and fell through to the message body, which opens the thread. Each
- * gap glued (by a word joiner) to the start or end of a link gets an unstyled copy of that link, so
+ * gap glued (by a word joiner) to the start or end of a link gets a copy of that link without its styles, so
  * the whole visible chip dispatches the chip's action and only that. The link ranges over the
  * chip's own characters, and their styles, are unchanged.
  */
@@ -240,10 +243,23 @@ internal fun AnnotatedString.withRaftInlineChipGapLinks(): AnnotatedString {
         .toAnnotatedString()
 }
 
+// Explicit, decoration-free styles: a link with no styles gets the runtime's default link look,
+// an underline, which Skia (iOS) draws under the gap placeholders on either side of a chip.
+private val RaftInlineGapLinkStyle = SpanStyle(textDecoration = TextDecoration.None)
+private val RaftInlineGapLinkStyles =
+    TextLinkStyles(
+        style = RaftInlineGapLinkStyle,
+        focusedStyle = RaftInlineGapLinkStyle,
+        hoveredStyle = RaftInlineGapLinkStyle,
+        pressedStyle = RaftInlineGapLinkStyle,
+    )
+
 private fun LinkAnnotation.withoutRaftLinkStyles(): LinkAnnotation =
     when (this) {
-        is LinkAnnotation.Url -> LinkAnnotation.Url(url = url, linkInteractionListener = linkInteractionListener)
-        is LinkAnnotation.Clickable -> LinkAnnotation.Clickable(tag = tag, linkInteractionListener = linkInteractionListener)
+        is LinkAnnotation.Url ->
+            LinkAnnotation.Url(url = url, styles = RaftInlineGapLinkStyles, linkInteractionListener = linkInteractionListener)
+        is LinkAnnotation.Clickable ->
+            LinkAnnotation.Clickable(tag = tag, styles = RaftInlineGapLinkStyles, linkInteractionListener = linkInteractionListener)
         else -> this
     }
 
