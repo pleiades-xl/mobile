@@ -105,6 +105,6 @@ echo "签名完成：$ipa"
 if ! xcrun devicectl device install app --device "$device" "$app"; then
   command -v ideviceinstaller >/dev/null || { echo "devicectl 装不上。brew install ideviceinstaller 以后再跑一次。"; exit 1; }
   echo "devicectl 装不上，换 ideviceinstaller"
-  ideviceinstaller -u "$udid" -i "$ipa" || ideviceinstaller -u "$udid" install "$ipa"
+  ideviceinstaller -u "$udid" install "$ipa"
 fi
 echo "装好了。第一次打开前：iPhone 设置 → 通用 → VPN 与设备管理 → 信任你的 Apple ID。"
