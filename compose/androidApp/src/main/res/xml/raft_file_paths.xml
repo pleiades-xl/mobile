@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path
+        name="raft_feedback"
+        path="raft-feedback/" />
+    <cache-path
+        name="slock_attachments"
+        path="slock-attachments/" />
+    <cache-path
+        name="slock_camera_captures"
+        path="slock-camera-captures/" />
+    <cache-path
+        name="slock_share_images"
+        path="slock-share-images/" />
+    <external-files-path
+        name="slock_hands_updates"
+        path="Download/" />
+</paths>

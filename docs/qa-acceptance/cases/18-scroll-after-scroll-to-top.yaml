@@ -1,0 +1,45 @@
+id: scroll-after-scroll-to-top
+title: "滚动-双击回顶后向下滑动不回弹"
+goal: "验证在ReplyThread中双击回顶后，向下滑动不回弹到顶部"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+require_markers: "thread_header_scroll_to_top|1|1"
+assertions:
+  - id: scroll-follows-input
+    goal: "回顶后向下滑动跟随输入，不回弹"
+    type: visual_check
+    severity: critical
+  - id: no-infinite-bounce
+    goal: "不无限回弹到顶部"
+    type: visual_check
+    severity: critical
+android:
+  device: { type: emulator, api_level: 34 }
+  steps:
+    - goal: "打开有reply chip的消息，进入ReplyThread"
+      capture: [screenshot]
+    - goal: "向下滚动几屏"
+      capture: [screenshot]
+    - goal: "双击thread header触发scroll-to-top"
+      capture: [screenshot]
+    - goal: "等待回顶完成"
+      hint: "wait 2s"
+    - goal: "手动向上滑动向下滚动"
+      capture: [screenshot]
+    - goal: "继续滑动2-3次确认不回弹"
+      capture: [screenshot]
+ios:
+  device: { type: ios-simulator, device_name: "iPhone 14" }
+  steps:
+    - goal: "打开有reply chip的消息，进入ReplyThread"
+      capture: [screenshot]
+    - goal: "向下滚动几屏"
+      capture: [screenshot]
+    - goal: "双击thread header回顶"
+      capture: [screenshot]
+    - goal: "等待回顶"
+      hint: "wait 2s"
+    - goal: "向下滑动确认不回弹"
+      capture: [screenshot]

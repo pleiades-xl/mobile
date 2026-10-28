@@ -1,0 +1,39 @@
+id: channel-delete
+title: "频道管理-删除频道"
+goal: "验证删除频道功能，频道永久移除"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+verdict_before_cleanup: true
+assertions:
+  - id: channel-deleted
+    goal: "删除后频道不在列表"
+    type: visual_check
+    severity: critical
+android:
+  device: { type: emulator, api_level: 34 }
+  steps:
+    - goal: "创建或打开一个qa-test频道"
+      capture: [screenshot]
+    - goal: "点击右上角齿轮设置"
+      capture: [screenshot]
+    - goal: "找到Delete Channel选项"
+      capture: [screenshot]
+    - goal: "确认删除"
+      capture: [screenshot]
+    - goal: "返回验证频道不在列表"
+      capture: [screenshot]
+ios:
+  device: { type: ios-simulator, device_name: "iPhone 14" }
+  steps:
+    - goal: "创建或打开一个qa-test频道"
+      capture: [screenshot]
+    - goal: "点击右上角设置图标"
+      capture: [screenshot]
+    - goal: "找到Delete Channel"
+      capture: [screenshot]
+    - goal: "确认删除"
+      capture: [screenshot]
+    - goal: "验证频道不在列表"
+      capture: [screenshot]

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- Google Play builds never sideload APKs. Keep this out of the Play merged manifest. -->
+    <uses-permission
+        android:name="android.permission.REQUEST_INSTALL_PACKAGES"
+        tools:node="remove" />
+    <!--
+        The no-Play-services background connection only runs where FCM is impossible, i.e. never on a device
+        that installs from Google Play. Keep its remoteMessaging foreground service and the battery-optimization
+        prompt out of the Play build (both need Play Console declarations).
+    -->
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+        tools:node="remove" />
+    <!-- The download centre's dataSync foreground service: Play builds post plain download notifications. -->
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"
+        tools:node="remove" />
+    <application>
+        <service
+            android:name="build.raft.app.shared.RaftBackgroundConnectionService"
+            tools:node="remove" />
+        <service
+            android:name="build.raft.app.shared.RaftDownloadForegroundService"
+            tools:node="remove" />
+    </application>
+</manifest>

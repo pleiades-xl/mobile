@@ -1,0 +1,39 @@
+id: joint-channel-load-time
+title: "性能-Joint频道首开时间"
+goal: "验证joint频道首开内容在合理时间内可见"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+assertions:
+  - id: content-visible
+    goal: "Joint频道内容可见"
+    type: visual_check
+    severity: critical
+  - id: load-time-acceptable
+    goal: "首开时间在可接受范围"
+    type: visual_check
+    severity: major
+android:
+  device: { type: emulator, api_level: 34 }
+  steps:
+    - goal: "打开 app home"
+      capture: [screenshot]
+    - goal: "找到并点击 joint channel"
+      hint: "带跨服务器标识的频道"
+      capture: [screenshot]
+    - goal: "等待内容加载"
+      hint: "wait 15s"
+    - goal: "截图验证内容可见"
+      capture: [screenshot]
+ios:
+  device: { type: ios-simulator, device_name: "iPhone 14" }
+  steps:
+    - goal: "打开 app home"
+      capture: [screenshot]
+    - goal: "找到并点击 joint channel"
+      capture: [screenshot]
+    - goal: "等待内容加载"
+      hint: "wait 15s"
+    - goal: "截图验证内容可见"
+      capture: [screenshot]

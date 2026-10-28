@@ -1,0 +1,52 @@
+id: task-flow-create-and-claim
+title: "任务流-创建任务"
+goal: "验证用户能将消息转换为任务，任务badge出现且状态为todo"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+assertions:
+  - id: task-badge-visible
+    goal: "消息上出现task badge带编号"
+    type: text_present
+    params:
+      text_match_regex: "(?i)task\\s*#?\\d+"
+    severity: critical
+  - id: task-status-todo
+    goal: "任务状态初始为todo"
+    type: text_present
+    params:
+      text_match_regex: "(?i)(todo|to-do)"
+    severity: major
+android:
+  device: { type: emulator, api_level: 34 }
+  steps:
+    - goal: "打开 #all 频道"
+      capture: [screenshot]
+    - goal: "输入并发送一条消息"
+      capture: [screenshot]
+    - goal: "长按刚发送的消息"
+      capture: [screenshot]
+    - goal: "在菜单中点击 Convert to Task"
+      hint: "用tap_text精确点击"
+      capture: [screenshot]
+    - goal: "等待任务创建"
+      hint: "wait 2s"
+    - goal: "截图验证task badge"
+      capture: [screenshot, dump_layout]
+ios:
+  device: { type: ios-simulator, device_name: "iPhone 14" }
+  steps:
+    - goal: "打开 #all 频道"
+      capture: [screenshot]
+    - goal: "输入并发送一条消息"
+      hint: "用屏幕键盘"
+      capture: [screenshot]
+    - goal: "长按刚发送的消息"
+      capture: [screenshot]
+    - goal: "在菜单中点击 Convert to Task"
+      capture: [screenshot]
+    - goal: "等待任务创建"
+      hint: "wait 2s"
+    - goal: "截图验证task badge"
+      capture: [screenshot]

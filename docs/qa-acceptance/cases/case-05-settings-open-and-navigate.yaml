@@ -1,0 +1,54 @@
+id: settings-open-and-navigate
+title: "设置页-打开设置并浏览子页面"
+goal: "验证设置页打开正确，Account 和 Storage 子页面可访问"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+assertions:
+  - id: settings-list-visible
+    goal: "设置根页面显示导航项"
+    type: visual_check
+    severity: major
+  - id: account-page-loaded
+    goal: "Account 页面正确加载"
+    type: visual_check
+    severity: major
+  - id: storage-page-loaded
+    goal: "Storage 页面正确加载"
+    type: visual_check
+    severity: major
+android:
+  device: { type: emulator, api_level: 34 }
+  steps:
+    - goal: "打开设置页"
+      capture: [screenshot]
+    - goal: "点击 Account"
+      capture: [screenshot]
+    - goal: "等待加载"
+      hint: "wait 1.5s"
+    - goal: "截图 Account 页"
+      capture: [screenshot]
+    - goal: "返回设置根"
+      hint: "BACK 键"
+    - goal: "点击 Storage"
+      capture: [screenshot]
+    - goal: "截图 Storage 页"
+      capture: [screenshot, dump_layout]
+ios:
+  device: { type: ios-simulator, device_name: "iPhone 14" }
+  steps:
+    - goal: "打开设置页"
+      capture: [screenshot]
+    - goal: "点击 Account"
+      capture: [screenshot]
+    - goal: "等待加载"
+      hint: "wait 1.5s"
+    - goal: "截图 Account 页"
+      capture: [screenshot]
+    - goal: "返回设置根"
+      hint: "左上角返回按钮或左边缘滑动"
+    - goal: "点击 Storage"
+      capture: [screenshot]
+    - goal: "截图 Storage 页"
+      capture: [screenshot]

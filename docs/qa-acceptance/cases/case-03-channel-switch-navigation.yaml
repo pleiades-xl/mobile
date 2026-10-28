@@ -1,0 +1,58 @@
+id: channel-switch-navigation
+title: "频道切换-在频道间导航"
+goal: "验证用户能在频道间切换，各频道内容正确加载且实际变化"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+assertions:
+  - id: first-channel-loaded
+    goal: "第一个频道内容可见"
+    type: visual_check
+    severity: major
+  - id: second-channel-loaded
+    goal: "第二个频道内容可见"
+    type: visual_check
+    severity: major
+  - id: content-actually-changed
+    goal: "两频道内容确实不同"
+    type: visual_check
+    severity: major
+android:
+  device: { type: emulator, api_level: 34 }
+  steps:
+    - goal: "打开 app home"
+      capture: [screenshot]
+    - goal: "点击频道列表第一个频道"
+      capture: [screenshot]
+    - goal: "等待加载"
+      hint: "wait 1.5s"
+    - goal: "截图第一个频道"
+      capture: [screenshot]
+    - goal: "返回频道列表"
+      hint: "按 BACK 键"
+    - goal: "点击第二个频道"
+      capture: [screenshot]
+    - goal: "等待加载"
+      hint: "wait 1.5s"
+    - goal: "截图第二个频道"
+      capture: [screenshot, dump_layout]
+ios:
+  device: { type: ios-simulator, device_name: "iPhone 14" }
+  steps:
+    - goal: "打开 app home"
+      capture: [screenshot]
+    - goal: "点击频道列表第一个频道"
+      capture: [screenshot]
+    - goal: "等待加载"
+      hint: "wait 1.5s"
+    - goal: "截图第一个频道"
+      capture: [screenshot]
+    - goal: "返回频道列表"
+      hint: "左边缘滑动或返回按钮"
+    - goal: "点击第二个频道"
+      capture: [screenshot]
+    - goal: "等待加载"
+      hint: "wait 1.5s"
+    - goal: "截图第二个频道"
+      capture: [screenshot]

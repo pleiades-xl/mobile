@@ -1,0 +1,59 @@
+id: send-message-in-channel
+title: "发送消息-频道内发送文本消息"
+goal: "验证用户能在频道里发送文本消息，消息出现在会话中"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+assertions:
+  - id: message-appears
+    goal: "发送的消息出现在会话中"
+    type: text_present
+    severity: critical
+  - id: input-cleared
+    goal: "发送后输入框已清空"
+    type: visual_check
+    severity: major
+  - id: no-send-error
+    goal: "无发送错误"
+    type: text_absent
+    params:
+      text_match_regex: "(?i)(failed|error|retry)"
+    severity: major
+android:
+  device:
+    type: emulator
+    api_level: 34
+  steps:
+    - goal: "打开 #all 频道"
+      capture: [screenshot]
+    - goal: "点击消息输入框聚焦"
+      capture: [screenshot]
+    - goal: "输入测试消息"
+      capture: [screenshot]
+    - goal: "点击发送按钮"
+      hint: "输入框右侧发送按钮"
+      capture: [screenshot, dump_layout]
+    - goal: "等待消息送达"
+      hint: "wait 2s"
+    - goal: "截图验证消息已发送"
+      capture: [screenshot, dump_layout]
+ios:
+  device:
+    type: ios-simulator
+    device_name: "iPhone 14"
+  steps:
+    - goal: "打开 #all 频道"
+      capture: [screenshot]
+    - goal: "点击消息输入框聚焦"
+      capture: [screenshot]
+    - goal: "输入测试消息"
+      hint: "用屏幕键盘输入"
+      capture: [screenshot]
+    - goal: "点击发送按钮"
+      hint: "输入框右侧发送按钮"
+      capture: [screenshot]
+    - goal: "等待消息送达"
+      hint: "wait 2s"
+    - goal: "截图验证消息已发送"
+      capture: [screenshot]

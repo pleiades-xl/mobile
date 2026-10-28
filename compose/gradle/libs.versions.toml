@@ -1,0 +1,142 @@
+[versions]
+agp = "9.4.1"
+kotlin = "2.4.21"
+ksp = "2.3.12"
+composePlugin = "1.12.2"
+# Compose Multiplatform 1.12.x ships Material3 on its own line (1.9.0 = Jetpack Material3 1.4.0).
+cmpMaterial3 = "1.9.0"
+cmpLifecycle = "2.11.0"
+androidxComposeRuntime = "1.12.1"
+kotlinxCoroutines = "1.11.0"
+kotlinxSerialization = "1.12.0"
+# Time zones (kotlin.time.Instant API, Kotlin 2.2+).
+kotlinxDatetime = "0.7.1"
+atomicfu = "0.33.0"
+coreKtx = "1.19.1"
+media3 = "1.11.1"
+coreSplashscreen = "1.2.0"
+webkit = "1.18.0"
+junit = "4.13.2"
+robolectric = "4.17"
+junitVersion = "1.3.0"
+espressoCore = "3.7.0"
+lifecycleRuntimeKtx = "2.11.0"
+window = "1.5.1"
+metricsPerformance = "1.0.0"
+activityCompose = "1.13.0"
+fragment = "1.9.1"
+composeBom = "2026.09.00"
+recyclerview = "1.4.0"
+# The app's only OkHttp version: under the Ktor HTTP transport (ktor-client-okhttp 3.6.0 is built against
+# 5.5.0), and it wins resolution over the transitive OkHttp 3.12 (socket.io-client) and 4.12 (Hands SDK).
+okhttpTransport = "5.5.1"
+# Ktor client for app HTTP (OkHttp on Android, Darwin on iOS). 3.6.0 is built against kotlinx-coroutines
+# 1.11.0, the app's version: Ktor 2.3.7 called coroutines internals 1.11 removed (Hands ae47bba1).
+ktor = "3.6.0"
+gson = "2.15.0"
+socketIoClient = "2.1.2"
+sqldelight = "2.4.1"
+coil = "3.6.3"
+# huarangmeng/latex: message math (task #775). Pure Kotlin, MIT.
+hrmLatex = "1.6.1"
+# dev.snipme:highlights: message code block syntax colours (artin task #20 lane K). Pure Kotlin
+# Multiplatform (jvm + iosArm64/iosSimulatorArm64 klibs), Apache-2.0.
+snipmeHighlights = "1.1.0"
+# MobileNativeFoundation Store5: offline-first resources (fetcher + SqlDelight-backed source of truth,
+# RaftOfflineResources.kt). Apache-2.0; android/jvm/iosArm64/iosSimulatorArm64 klibs; built against
+# kotlinx-coroutines / serialization 1.11.0 and atomicfu 0.33.0 (the app's versions). 5.1 is the
+# maintained line (5.0.0 is from 2023); beta01 is its latest release.
+store5 = "5.1.0-beta01"
+androidsvg = "1.4"
+mmkv = "2.4.3"
+firebaseBom = "35.1.0"
+googleServices = "4.5.0"
+benchmarkMacro = "1.5.0"
+profileinstaller = "1.4.1"
+uiautomator = "2.4.0"
+
+[libraries]
+androidx-media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }
+androidx-media3-ui = { group = "androidx.media3", name = "media3-ui", version.ref = "media3" }
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+androidx-core-splashscreen = { group = "androidx.core", name = "core-splashscreen", version.ref = "coreSplashscreen" }
+androidx-webkit = { group = "androidx.webkit", name = "webkit", version.ref = "webkit" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
+androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
+androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
+androidx-benchmark-macro-junit4 = { group = "androidx.benchmark", name = "benchmark-macro-junit4", version.ref = "benchmarkMacro" }
+androidx-profileinstaller = { group = "androidx.profileinstaller", name = "profileinstaller", version.ref = "profileinstaller" }
+androidx-uiautomator = { group = "androidx.test.uiautomator", name = "uiautomator", version.ref = "uiautomator" }
+androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }
+androidx-window = { group = "androidx.window", name = "window", version.ref = "window" }
+androidx-metrics-performance = { group = "androidx.metrics", name = "metrics-performance", version.ref = "metricsPerformance" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+androidx-fragment = { group = "androidx.fragment", name = "fragment", version.ref = "fragment" }
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
+androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
+androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+androidx-compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
+androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
+androidx-compose-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+androidx-compose-material3-adaptive-navigation-suite = { group = "androidx.compose.material3", name = "material3-adaptive-navigation-suite" }
+androidx-recyclerview = { group = "androidx.recyclerview", name = "recyclerview", version.ref = "recyclerview" }
+okhttp-transport = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttpTransport" }
+okhttp-mockwebserver3 = { group = "com.squareup.okhttp3", name = "mockwebserver3", version.ref = "okhttpTransport" }
+ktor-client-core = { group = "io.ktor", name = "ktor-client-core", version.ref = "ktor" }
+ktor-client-okhttp = { group = "io.ktor", name = "ktor-client-okhttp", version.ref = "ktor" }
+ktor-client-darwin = { group = "io.ktor", name = "ktor-client-darwin", version.ref = "ktor" }
+ktor-client-mock = { group = "io.ktor", name = "ktor-client-mock", version.ref = "ktor" }
+gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
+socket-io-client = { group = "io.socket", name = "socket.io-client", version.ref = "socketIoClient" }
+sqldelight-runtime = { group = "app.cash.sqldelight", name = "runtime", version.ref = "sqldelight" }
+sqldelight-android-driver = { group = "app.cash.sqldelight", name = "android-driver", version.ref = "sqldelight" }
+sqldelight-coroutines-extensions = { group = "app.cash.sqldelight", name = "coroutines-extensions-jvm", version.ref = "sqldelight" }
+sqldelight-sqlite-driver = { group = "app.cash.sqldelight", name = "sqlite-driver", version.ref = "sqldelight" }
+sqldelight-native-driver = { group = "app.cash.sqldelight", name = "native-driver", version.ref = "sqldelight" }
+androidsvg = { group = "com.caverock", name = "androidsvg-aar", version.ref = "androidsvg" }
+mmkv = { group = "com.tencent", name = "mmkv", version.ref = "mmkv" }
+firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
+firebase-messaging = { group = "com.google.firebase", name = "firebase-messaging" }
+firebase-installations = { group = "com.google.firebase", name = "firebase-installations" }
+
+# Compose Multiplatform artifacts (replace the deprecated `compose.*` Gradle plugin aliases).
+cmp-runtime = { group = "org.jetbrains.compose.runtime", name = "runtime", version.ref = "composePlugin" }
+cmp-foundation = { group = "org.jetbrains.compose.foundation", name = "foundation", version.ref = "composePlugin" }
+cmp-ui = { group = "org.jetbrains.compose.ui", name = "ui", version.ref = "composePlugin" }
+cmp-ui-backhandler = { group = "org.jetbrains.compose.ui", name = "ui-backhandler", version.ref = "composePlugin" }
+cmp-ui-test = { group = "org.jetbrains.compose.ui", name = "ui-test", version.ref = "composePlugin" }
+cmp-material3 = { group = "org.jetbrains.compose.material3", name = "material3", version.ref = "cmpMaterial3" }
+cmp-components-resources = { group = "org.jetbrains.compose.components", name = "components-resources", version.ref = "composePlugin" }
+cmp-lifecycle-viewmodel-compose = { group = "org.jetbrains.androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "cmpLifecycle" }
+cmp-lifecycle-runtime-compose = { group = "org.jetbrains.androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "cmpLifecycle" }
+androidx-compose-runtime = { group = "androidx.compose.runtime", name = "runtime", version.ref = "androidxComposeRuntime" }
+coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil" }
+coil-svg = { group = "io.coil-kt.coil3", name = "coil-svg", version.ref = "coil" }
+coil-gif = { group = "io.coil-kt.coil3", name = "coil-gif", version.ref = "coil" }
+hrm-latex-renderer = { group = "io.github.huarangmeng", name = "latex-renderer", version.ref = "hrmLatex" }
+snipme-highlights = { group = "dev.snipme", name = "highlights", version.ref = "snipmeHighlights" }
+store5 = { group = "org.mobilenativefoundation.store", name = "store5", version.ref = "store5" }
+kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
+kotlinx-coroutines-swing = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-swing", version.ref = "kotlinxCoroutines" }
+kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "kotlinxCoroutines" }
+kotlinx-datetime = { group = "org.jetbrains.kotlinx", name = "kotlinx-datetime", version.ref = "kotlinxDatetime" }
+kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxSerialization" }
+atomicfu = { group = "org.jetbrains.kotlinx", name = "atomicfu", version.ref = "atomicfu" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+android-kotlin-multiplatform-library = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
+# AGP 9 built-in Kotlin, applied per module while android.builtInKotlin=false (see gradle.properties).
+android-builtin-kotlin = { id = "com.android.built-in-kotlin", version.ref = "agp" }
+kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+jetbrains-compose = { id = "org.jetbrains.compose", version.ref = "composePlugin" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
+sqldelight = { id = "app.cash.sqldelight", version.ref = "sqldelight" }
+google-services = { id = "com.google.gms.google-services", version.ref = "googleServices" }

@@ -1,0 +1,39 @@
+id: channel-archive
+title: "频道管理-归档频道"
+goal: "验证归档频道功能，归档后频道从活跃列表消失"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+verdict_before_cleanup: true
+assertions:
+  - id: channel-archived
+    goal: "归档后频道不在活跃列表"
+    type: visual_check
+    severity: critical
+android:
+  device: { type: emulator, api_level: 34 }
+  steps:
+    - goal: "创建或打开一个qa-test频道"
+      capture: [screenshot]
+    - goal: "点击右上角齿轮设置"
+      capture: [screenshot]
+    - goal: "找到并点击Archive Channel"
+      capture: [screenshot]
+    - goal: "确认归档"
+      capture: [screenshot]
+    - goal: "返回验证频道不在列表"
+      capture: [screenshot]
+ios:
+  device: { type: ios-simulator, device_name: "iPhone 14" }
+  steps:
+    - goal: "创建或打开一个qa-test频道"
+      capture: [screenshot]
+    - goal: "点击右上角设置图标"
+      capture: [screenshot]
+    - goal: "找到Archive Channel选项"
+      capture: [screenshot]
+    - goal: "确认归档"
+      capture: [screenshot]
+    - goal: "返回验证频道不在列表"
+      capture: [screenshot]

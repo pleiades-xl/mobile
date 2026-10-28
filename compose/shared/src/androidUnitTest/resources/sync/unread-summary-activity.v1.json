@@ -1,0 +1,89 @@
+{
+  "schema": "unread-summary-activity.v1",
+  "contract": "task #235 Phase 1 v2.4.6",
+  "endpoint": "GET /api/servers/unread-summary",
+  "authority": "GET /api/channels/inbox?filter=all → totalUnreadCount",
+  "states": [
+    {
+      "state": "zero",
+      "request": {
+        "user": "MEMBER",
+        "server": "SERVER_CAUGHT_UP"
+      },
+      "entry": {
+        "serverId": "SERVER_CAUGHT_UP",
+        "unreadCount": 0,
+        "serverPushMuted": false,
+        "activityUnreadCount": 0
+      },
+      "expect": "render exact numeric badge 0-state (present means known; empty member server is also present-0, never absent)"
+    },
+    {
+      "state": "positive",
+      "request": {
+        "user": "MEMBER",
+        "server": "SERVER_WITH_UNREAD"
+      },
+      "entry": {
+        "serverId": "SERVER_WITH_UNREAD",
+        "unreadCount": 2,
+        "serverPushMuted": false,
+        "activityUnreadCount": 3
+      },
+      "expect": "render exact numeric badge 3; never substitute broader unreadCount"
+    },
+    {
+      "state": "batch-failure-all-unknown",
+      "request": {
+        "user": "MEMBER",
+        "server": "ALL"
+      },
+      "entries": [
+        {
+          "serverId": "SERVER_WITH_UNREAD",
+          "unreadCount": 2,
+          "serverPushMuted": false
+        },
+        {
+          "serverId": "SERVER_CAUGHT_UP",
+          "unreadCount": 0,
+          "serverPushMuted": false
+        }
+      ],
+      "expect": "the ONE set-based batch query failed → HTTP 200, every entry keeps legacy fields, activityUnreadCount absent on ALL entries (single failure domain; no pretended per-server isolation)"
+    },
+    {
+      "state": "unauthorized",
+      "request": {
+        "user": "NON_MEMBER",
+        "server": "SERVER_NOT_JOINED"
+      },
+      "entry": null,
+      "expect": "entry absent entirely → same unknown fallback as an absent field; clients must not render a third state"
+    },
+    {
+      "state": "mixed-known-unknown",
+      "request": {
+        "user": "MEMBER",
+        "server": "ALL"
+      },
+      "entries": [
+        {
+          "serverId": "SERVER_WITH_UNREAD",
+          "unreadCount": 2,
+          "serverPushMuted": false,
+          "activityUnreadCount": 3
+        },
+        {
+          "serverId": "SERVER_GROUP_INVALID",
+          "unreadCount": 5,
+          "serverPushMuted": false
+        }
+      ],
+      "expect": "mixed state arises ONLY from provable per-server causes (per-group validation failure, permission loss, feature gate) — never from a pretended isolatable per-server SQL compute failure; unknown entries render the §3a transitional fallback (legacy broader number) until production serves the field, then dot/hidden"
+    }
+  ],
+  "muteRule": "serverPushMuted never alters activityUnreadCount; muted servers show the exact number (weakened style allowed). For absent/unknown see renderRule.",
+  "renderRule": "v2.4.6 §3a transitional: present ⇒ render that exact number (present 0 renders nothing); absent/unknown ⇒ render the legacy broader unread NUMBER (pre-#2119 behavior), NOT a dot — artin ruling 2026-08-17 while production lacks the field. The wire rule is unchanged: absent stays absent and this field is never populated from the broader count. After production promotion the fallback branch is dead code and absent returns to dot/hidden; the rendered number then becomes the exact Activity count and MAY GET SMALLER, which is expected, not a regression.",
+  "freshness": "count may lag ≤30s; Activity snapshot is the reconciliation authority on server entry"
+}

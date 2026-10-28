@@ -1,0 +1,1054 @@
+name: Visual Testing
+
+# End-to-end visual parity pipeline (task #299/#300 in #visual-testing):
+#   react-capture  ─┐
+#                   ├─► report (diff → report → site → optional publish)
+#   android-capture ─┘
+# React and Android captures run in parallel; the report job joins their
+# artifacts, generates the site with the canonical visual-testing CLI from
+# botiverse/slock, and publishes to this repo's gh-pages behind the CLI's
+# preflight guard (case-count drop / missing Raft UI entry are rejected).
+
+on:
+  # Nightly full run publishes the report (21:30 UTC = 05:30 Beijing, fresh
+  # before the team's morning). Scheduled runs have empty inputs: slock ref
+  # falls back to the repo default branch (staging), case_filter is empty
+  # (full manifest), and the publish step below treats schedule as publish.
+  schedule:
+    - cron: "30 21 * * *"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish generated site to gh-pages (preflight-guarded)"
+        type: boolean
+        default: false
+      case_filter:
+        description: "Optional case ids, comma-separated — drives BOTH React --case and the Android instrumentation method filter (fast targeted round); empty = full manifest"
+        type: string
+        default: ""
+      capture_locale:
+        description: "Optional Android app-resource locale for i18n visual smoke: en, zh-CN, or ja. Empty keeps the process default."
+        type: string
+        default: ""
+      slock_source_ref:
+        description: "botiverse/slock ref for React source + visual CLI"
+        type: string
+        default: "staging"
+      site_only:
+        description: "UI-only fast republish: skip ALL capture jobs, rebuild the site HTML from the images/data already on gh-pages with the latest CLI, and publish (minutes instead of a full run)"
+        type: boolean
+        default: false
+      allow_case_drop:
+        description: "Allow the publish guard to accept a reduced case count (intentional retirement only, e.g. slock #4792/#4995) — never set for ordinary runs"
+        type: boolean
+        default: false
+      include_ios:
+        description: "Also run the iOS simulator capture (macOS runners are expensive: off for dispatched rounds, on for the nightly schedule)"
+        type: boolean
+        default: false
+      ios_shards:
+        description: "iOS capture parallelism: N job-owned simulators each take a slice of the case list. 1 = legacy serial behaviour. Suggested max on the single self-hosted Mac: 4."
+        type: number
+        default: 1
+
+concurrency:
+  group: visual-testing-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  react-capture:
+    if: ${{ !inputs.site_only }}
+    name: React capture (playwright)
+    runs-on: blacksmith-8vcpu-ubuntu-2204
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: slock-source
+    steps:
+      - name: Checkout slock source (React + visual CLI)
+        uses: actions/checkout@v7
+        with:
+          repository: botiverse/slock
+          ref: ${{ inputs.slock_source_ref }}
+          token: ${{ secrets.SLOCK_SOURCE_REPO_TOKEN || secrets.SLOCK_GITHUB_PACKAGES_TOKEN }}
+          path: slock-source
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          package_json_file: slock-source/package.json
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: slock-source/pnpm-lock.yaml
+
+      - name: Assert workspace packages present (fail-fast guard)
+        run: |
+          if [ -z "$(pnpm ls --filter "@botiverse/raft-web" --depth -1 --parseable 2>/dev/null)" ]; then
+            echo "::error::Package @botiverse/raft-web not found in slock workspace. Possible package rename or branch desync."
+            exit 1
+          fi
+          if [ -z "$(pnpm ls --filter "@botiverse/raft-visual-testing" --depth -1 --parseable 2>/dev/null)" ]; then
+            echo "::error::Package @botiverse/raft-visual-testing not found in slock workspace. Possible package rename or branch desync."
+            exit 1
+          fi
+
+      - name: Install web + visual-testing workspace deps
+        run: pnpm install --frozen-lockfile --filter "@botiverse/raft-web..." --filter "@botiverse/raft-visual-testing..."
+
+      - name: Install playwright chromium
+        run: pnpm --filter "@botiverse/raft-web" exec playwright install --with-deps chromium
+
+      # continue-on-error: single broken cases must surface as "missing" in the
+      # diff report instead of killing the whole pipeline.
+      - name: Capture React visuals
+        continue-on-error: true
+        env:
+          CASE_FILTER: ${{ inputs.case_filter }}
+        run: |
+          if [ -z "$CASE_FILTER" ]; then
+            node packages/visual-testing/src/cli.mjs capture --providers react
+            exit $?
+          fi
+
+          status=0
+          IFS=',' read -ra CASES <<< "$CASE_FILTER"
+          for CASE_ID in "${CASES[@]}"; do
+            CASE_ID="$(echo "$CASE_ID" | xargs)"
+            if [ -z "$CASE_ID" ]; then
+              continue
+            fi
+            if ! node packages/visual-testing/src/cli.mjs capture --providers react --case "$CASE_ID"; then
+              status=1
+            fi
+          done
+          exit "$status"
+
+      - name: Upload react results
+        uses: actions/upload-artifact@v7
+        with:
+          name: visual-results-react
+          path: slock-source/visual-testing-results/react
+          # A targeted case_filter may name Android-only cases (e.g. the compact
+          # message menu), which React legitimately has no counterpart for. In
+          # that situation React produces zero files and `error` would kill the
+          # run, defeating the `continue-on-error` above whose stated intent is
+          # that broken/absent cases surface as "missing" in the diff report.
+          # Unfiltered runs must still produce React output, so keep `error`.
+          if-no-files-found: ${{ inputs.case_filter == '' && 'error' || 'warn' }}
+
+  android-build:
+    if: ${{ !inputs.site_only }}
+    name: Android build (connected test APKs)
+    # ubuntu-latest-m (org larger runner, 4 cores / 15GB): the standard 7GB
+    # runner forces emulator and gradle to fight for memory. (task #418)
+    # Gradle is CPU-bound: a large Blacksmith runner (as android-release.yml) cuts the build most.
+    runs-on: blacksmith-16vcpu-ubuntu-2204
+    timeout-minutes: 60
+    outputs:
+      method_filter: ${{ steps.methods.outputs.filter }}
+    steps:
+      - name: Checkout mobile
+        uses: actions/checkout@v7
+
+      # Map requested case ids to KmpVisualScreenshotCaptureTest methods so a
+      # case_filter round only captures those cases on Android too.
+      - name: Derive android method filter
+        id: methods
+        env:
+          CASES: ${{ inputs.case_filter }}
+        run: python3 scripts/visual_android_case_filter.py --cases "$CASES" --github-output "$GITHUB_OUTPUT"
+
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /opt/ghc \
+            /usr/local/share/boost /usr/local/lib/node_modules
+          df -h /
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Install Android SDK packages
+        run: sdkmanager "platform-tools" "build-tools;36.0.0"
+
+      - name: Apply Gradle cache policy
+        uses: ./.github/actions/gradle-cache-policy
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+      - name: Build connected test APKs
+        working-directory: ./compose
+        run: |
+          ./gradlew --no-daemon --console=plain -PslockVisualFixtures=true \
+            --stacktrace \
+            :androidApp:assembleConnectedTest :androidApp:assembleConnectedTestAndroidTest
+
+      - name: Sign connected test APKs with rotated release identity
+        env:
+          LEGACY_KEYSTORE_FILE_B64: ${{ secrets.SLOCK_KEYSTORE_FILE_BASE64 }}
+          SLOCK_LEGACY_KEYSTORE_PASS: ${{ secrets.SLOCK_KEYSTORE_PASS }}
+          SLOCK_LEGACY_KEY_ALIAS: ${{ secrets.SLOCK_KEY_ALIAS }}
+          SLOCK_LEGACY_KEY_PASS: ${{ secrets.SLOCK_KEY_PASS }}
+          ROTATED_KEYSTORE_FILE_B64: ${{ secrets.SLOCK_ROTATED_KEYSTORE_FILE_BASE64 }}
+          SLOCK_ROTATED_KEYSTORE_PASS: ${{ secrets.SLOCK_ROTATED_KEYSTORE_PASS }}
+          SLOCK_ROTATED_KEY_ALIAS: ${{ secrets.SLOCK_ROTATED_KEY_ALIAS }}
+          SLOCK_ROTATED_KEY_PASS: ${{ secrets.SLOCK_ROTATED_KEY_PASS }}
+          SIGNING_LINEAGE_B64: ${{ secrets.SLOCK_SIGNING_LINEAGE_BASE64 }}
+        run: |
+          set -euo pipefail
+          for name in \
+            LEGACY_KEYSTORE_FILE_B64 \
+            SLOCK_LEGACY_KEYSTORE_PASS \
+            SLOCK_LEGACY_KEY_ALIAS \
+            SLOCK_LEGACY_KEY_PASS \
+            ROTATED_KEYSTORE_FILE_B64 \
+            SLOCK_ROTATED_KEYSTORE_PASS \
+            SLOCK_ROTATED_KEY_ALIAS \
+            SLOCK_ROTATED_KEY_PASS \
+            SIGNING_LINEAGE_B64; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing required rotated connected-test signing secret: ${name}" >&2
+              exit 1
+            fi
+          done
+          APP_APK="$(find compose/androidApp/build/outputs/apk/connectedTest -maxdepth 1 -type f -name '*.apk' | sort | head -n 1)"
+          TEST_APK="$(find compose/androidApp/build/outputs/apk/androidTest/connectedTest -maxdepth 1 -type f -name '*.apk' | sort | head -n 1)"
+          test -n "${APP_APK}"
+          test -n "${TEST_APK}"
+          SLOCK_LEGACY_KEYSTORE_FILE="$(mktemp -t raft-connectedtest-legacy-keystore-XXXXXX.jks)"
+          SLOCK_ROTATED_KEYSTORE_FILE="$(mktemp -t raft-connectedtest-rotated-keystore-XXXXXX.jks)"
+          SLOCK_SIGNING_LINEAGE_FILE="$(mktemp -t raft-connectedtest-signing-lineage-XXXXXX.bin)"
+          export SLOCK_LEGACY_KEYSTORE_FILE SLOCK_ROTATED_KEYSTORE_FILE SLOCK_SIGNING_LINEAGE_FILE
+          WORK_DIR="$(mktemp -d -t raft-connectedtest-signing-XXXXXX)"
+          cleanup() {
+            rm -f \
+              "${SLOCK_LEGACY_KEYSTORE_FILE}" \
+              "${SLOCK_ROTATED_KEYSTORE_FILE}" \
+              "${SLOCK_SIGNING_LINEAGE_FILE}"
+            rm -rf "${WORK_DIR}"
+          }
+          trap cleanup EXIT
+          echo "${LEGACY_KEYSTORE_FILE_B64}" | base64 -d > "${SLOCK_LEGACY_KEYSTORE_FILE}"
+          echo "${ROTATED_KEYSTORE_FILE_B64}" | base64 -d > "${SLOCK_ROTATED_KEYSTORE_FILE}"
+          echo "${SIGNING_LINEAGE_B64}" | base64 -d > "${SLOCK_SIGNING_LINEAGE_FILE}"
+          BT="${ANDROID_HOME}/build-tools/36.0.0"
+          : > connectedtest-signers.log
+          sign_and_verify() {
+            local label="$1"
+            local apk="$2"
+            local signed="${WORK_DIR}/${label}-signed.apk"
+            local verify_log="${WORK_DIR}/${label}-verify.log"
+            scripts/sign_android_apk_with_rotation.sh \
+              --input "${apk}" \
+              --output "${signed}" \
+              --build-tools-dir "${BT}" \
+              --verify-log "${verify_log}"
+            cp "${signed}" "${apk}"
+            local legacy_digest
+            local rotated_digest
+            legacy_digest="$(sed -n 's/^Signer (minSdkVersion=[0-9][0-9]*, maxSdkVersion=32) certificate SHA-256 digest: //p' "${verify_log}" | head -n 1)"
+            rotated_digest="$(sed -n 's/^Signer (minSdkVersion=33, maxSdkVersion=[0-9][0-9]*) certificate SHA-256 digest: //p' "${verify_log}" | head -n 1)"
+            test -n "${legacy_digest}"
+            test -n "${rotated_digest}"
+            echo "${label}_legacy=${legacy_digest}" | tee -a connectedtest-signers.log
+            echo "${label}_rotated=${rotated_digest}" | tee -a connectedtest-signers.log
+          }
+          sign_and_verify app "${APP_APK}"
+          sign_and_verify instrumentation "${TEST_APK}"
+          APP_LEGACY_SIGNER="$(sed -n 's/^app_legacy=//p' connectedtest-signers.log)"
+          APP_ROTATED_SIGNER="$(sed -n 's/^app_rotated=//p' connectedtest-signers.log)"
+          TEST_LEGACY_SIGNER="$(sed -n 's/^instrumentation_legacy=//p' connectedtest-signers.log)"
+          TEST_ROTATED_SIGNER="$(sed -n 's/^instrumentation_rotated=//p' connectedtest-signers.log)"
+          if [ "${APP_LEGACY_SIGNER}" != "${TEST_LEGACY_SIGNER}" ] || \
+             [ "${APP_ROTATED_SIGNER}" != "${TEST_ROTATED_SIGNER}" ]; then
+            echo "Connected-test app and instrumentation APK rotation signer mismatch" >&2
+            exit 1
+          fi
+          "${BT}/aapt" dump badging "${APP_APK}" > "${WORK_DIR}/app-badging.log"
+          "${BT}/aapt" dump badging "${TEST_APK}" > "${WORK_DIR}/instrumentation-badging.log"
+          "${BT}/aapt" dump xmltree "${TEST_APK}" AndroidManifest.xml > "${WORK_DIR}/instrumentation-manifest.log"
+          grep -Fq "package: name='build.raft.app.connectedtest'" "${WORK_DIR}/app-badging.log" || {
+            cat "${WORK_DIR}/app-badging.log" >&2
+            exit 1
+          }
+          grep -Fq "package: name='build.raft.app.connectedtest.test'" "${WORK_DIR}/instrumentation-badging.log" || {
+            cat "${WORK_DIR}/instrumentation-badging.log" >&2
+            exit 1
+          }
+          grep -F "android:targetPackage" "${WORK_DIR}/instrumentation-manifest.log" \
+            | grep -Fq '="build.raft.app.connectedtest"' || {
+              cat "${WORK_DIR}/instrumentation-manifest.log" >&2
+              exit 1
+            }
+          {
+            echo "## Connected-test stable signing"
+            echo "- App package: \`build.raft.app.connectedtest\`"
+            echo "- Instrumentation package: \`build.raft.app.connectedtest.test\`"
+            echo "- Shared signer certificate SHA-256 (legacy, ≤ API 32): \`${APP_LEGACY_SIGNER}\`"
+            echo "- Shared signer certificate SHA-256 (rotated, ≥ API 33): \`${APP_ROTATED_SIGNER}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v7
+        with:
+          name: visual-test-apks
+          path: |
+            compose/androidApp/build/outputs/apk/connectedTest/*.apk
+            compose/androidApp/build/outputs/apk/androidTest/connectedTest/*.apk
+            connectedtest-signers.log
+          if-no-files-found: error
+
+      - name: Gradle failure diagnostics
+        if: failure()
+        uses: ./.github/actions/gradle-failure-diagnostics
+
+  android-capture:
+    name: Android capture (shard ${{ matrix.shard }}/8)
+    # See android-build: emulator boot + render are the slow path on 7GB. (task #418)
+    # Blacksmith runners expose /dev/kvm for the emulator (the Enable KVM step below still applies).
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    timeout-minutes: 45
+    needs: android-build
+    # Build once, capture many: shards skip Gradle entirely — install the
+    # prebuilt APKs and drive AndroidJUnitRunner sharding via adb directly.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - name: Checkout mobile capture runner
+        if: ${{ needs.android-build.outputs.method_filter == '' || matrix.shard == 0 }}
+        uses: actions/checkout@v7
+
+      # Targeted case_filter runs only use shard 0; the other shards no-op
+      # so the round finishes in one emulator's time.
+      - name: Free runner disk space for emulator
+        if: ${{ needs.android-build.outputs.method_filter == '' || matrix.shard == 0 }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # sdkmanager needs JDK 17+; Blacksmith images default to 11.
+      - name: Setup JDK 17
+        if: ${{ needs.android-build.outputs.method_filter == '' || matrix.shard == 0 }}
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        if: ${{ needs.android-build.outputs.method_filter == '' || matrix.shard == 0 }}
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Install APK identity tools
+        if: ${{ needs.android-build.outputs.method_filter == '' || matrix.shard == 0 }}
+        run: sdkmanager "platform-tools" "build-tools;36.0.0"
+
+      - name: Download APKs
+        if: ${{ needs.android-build.outputs.method_filter == '' || matrix.shard == 0 }}
+        uses: actions/download-artifact@v8
+        with:
+          name: visual-test-apks
+          path: apks
+
+      - name: Enable KVM
+        if: ${{ needs.android-build.outputs.method_filter == '' || matrix.shard == 0 }}
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run visual capture shard
+        if: ${{ needs.android-build.outputs.method_filter == '' || matrix.shard == 0 }}
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6_pro
+          ram-size: 4096M
+          cores: 2
+          emulator-boot-timeout: 1200
+          emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-metrics
+          disable-animations: true
+          # The runner executes each script line as a separate command;
+          # backslash line continuations break ("Task '\' not found").
+          script: |
+            bash scripts/run_android_visual_capture.sh --app-apk "$(find apks -name '*connectedTest.apk' -not -name '*androidTest*' | sort | head -1)" --test-apk "$(find apks -name '*androidTest.apk' | sort | head -1)" --method-filter "${{ needs.android-build.outputs.method_filter }}" --shard-index "${{ matrix.shard }}" --shard-total 8 --capture-locale "${{ inputs.capture_locale }}" --output-dir visual-testing-results --defer-verdict
+
+      - name: Upload android results
+        if: ${{ always() && (needs.android-build.outputs.method_filter == '' || matrix.shard == 0) }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: visual-results-android-shard-${{ matrix.shard }}
+          path: visual-testing-results/android
+          if-no-files-found: warn
+
+      - name: Upload capture logcat (per-case timing)
+        if: ${{ always() && (needs.android-build.outputs.method_filter == '' || matrix.shard == 0) }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: visual-logcat-shard-${{ matrix.shard }}
+          path: visual-testing-results/logcat-shard-${{ matrix.shard }}.txt
+          if-no-files-found: warn
+
+      - name: Upload capture harness evidence
+        if: ${{ always() && (needs.android-build.outputs.method_filter == '' || matrix.shard == 0) }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: visual-harness-shard-${{ matrix.shard }}
+          path: |
+            visual-testing-results/android-visual-runner-receipt.json
+            visual-testing-results/device-reset.txt
+            visual-testing-results/instr-rc-${{ matrix.shard }}.txt
+            visual-testing-results/started-methods-${{ matrix.shard }}.txt
+            visual-testing-results/ended-methods-${{ matrix.shard }}.txt
+            visual-testing-results/expected-methods-${{ matrix.shard }}.txt
+            visual-testing-results/actual-cases-${{ matrix.shard }}.txt
+            visual-testing-results/expected-cases-${{ matrix.shard }}.txt
+            visual-testing-results/actual-case-map-${{ matrix.shard }}.json
+            visual-testing-results/expected-case-map-${{ matrix.shard }}.json
+            visual-testing-results/instrumentation/
+          if-no-files-found: error
+
+      - name: Finalize Android capture verdict
+        if: ${{ always() && (needs.android-build.outputs.method_filter == '' || matrix.shard == 0) }}
+        shell: bash
+        run: |
+          rc_file="visual-testing-results/instr-rc-${{ matrix.shard }}.txt"
+          log_file="visual-testing-results/logcat-shard-${{ matrix.shard }}.txt"
+          receipt_file="visual-testing-results/android-visual-runner-receipt.json"
+          if [ ! -s "$rc_file" ]; then
+            echo "::error title=Visual capture verdict missing (shard ${{ matrix.shard }})::instrumentation exit code was not recorded; uploaded evidence may be partial"
+            exit 1
+          fi
+          rc=$(tr -d '[:space:]' < "$rc_file")
+          if ! [[ "$rc" =~ ^[0-9]+$ ]]; then
+            echo "::error title=Visual capture verdict invalid (shard ${{ matrix.shard }})::invalid instrumentation exit code '$rc'"
+            exit 1
+          fi
+          if [ ! -s "$receipt_file" ]; then
+            echo "::error title=Visual capture receipt missing (shard ${{ matrix.shard }})::runner receipt was not persisted; uploaded evidence may be partial"
+            exit 1
+          fi
+          harness_status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["harness_status"])' "$receipt_file")"
+          mapfile -t failures < <(find visual-testing-results/android -type f -name '*.failure.json' -print 2>/dev/null | sort)
+          tail_drop=0
+          if [ -f "$log_file" ] && grep -q '^TAIL_DROP_GUARD:' "$log_file"; then
+            tail_drop=1
+          fi
+          if [ "$rc" -ne 0 ] || [ "${#failures[@]}" -ne 0 ] || [ "$tail_drop" -ne 0 ] || [ "$harness_status" != "complete" ]; then
+            echo "::error title=Visual capture shard failed (shard ${{ matrix.shard }})::harness_status=$harness_status, instrumentation rc=$rc, failure_json=${#failures[@]}, tail_drop=$tail_drop; results, logcat, and runner receipt were uploaded before this verdict"
+            if [ "${#failures[@]}" -ne 0 ]; then
+              printf 'failure artifact: %s\n' "${failures[@]}"
+            fi
+            exit 1
+          fi
+          echo "visual capture shard ${{ matrix.shard }} verdict: PASS (harness complete, instrumentation rc=0, no failure JSON, no tail-drop)"
+
+  # iOS simulator capture (task #418). Additive: the report job does not (yet)
+  # depend on this leg — results upload as their own artifact and the diff
+  # engine's providers.ios ingestion consumes them (CC-Wow2, slock side).
+  # Case source of truth = the android harness file; the generator emits only
+  # cases whose fixture setup is fully expressible as launch env (#359) and
+  # lists everything else as pending — no silent coverage gaps.
+  ios-capture:
+    name: iOS capture (simulator)
+    # macOS minutes are the expensive part: nightly runs always capture iOS,
+    # dispatched rounds only when include_ios is set (report degrades to react__android).
+    if: ${{ !inputs.site_only && (github.event_name == 'schedule' || inputs.include_ios) }}
+    # Same macOS pool as ios-release.yml.
+    runs-on: blacksmith-12vcpu-macos-latest
+    timeout-minutes: 75
+    env:
+      # iPhone 14: 390x844pt @3x = 1170x2532 px, the exact android/react
+      # baseline geometry — no crop step needed before diffing.
+      SIM_DEVICE: iPhone 14
+      # compile visual fixture @Page routes into commonMain; the cocoapods
+      # phase runs gradle with this env inherited
+      SLOCK_VISUAL_FIXTURES: "true"
+      CASE_FILTER: ${{ inputs.case_filter }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Select full Xcode for this job
+        run: bash scripts/ci/select_ios_xcode.sh
+
+      - name: Prepare isolated iOS capture environment
+        run: bash scripts/ci/ios_visual_runner.sh prepare
+
+      - name: Set up JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Apply Gradle cache policy
+        uses: ./.github/actions/gradle-cache-policy
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+      - name: Shared Kotlin/Native Gradle settings
+        uses: ./.github/actions/ios-kn-gradle
+
+      - name: Generate shared framework placeholder
+        working-directory: compose
+        run: ./gradlew :shared:generateDummyFramework --no-daemon --console=plain -PslockVisualFixtures=true --stacktrace
+
+      - name: Pod install
+        working-directory: compose/iosApp
+        run: pod install
+
+      # Compile the simulator target on its own first, as test.yml's iOS job does.
+      # When the framework sync is the job's first Kotlin/Native compile, its
+      # input snapshot is taken before the K/N distribution under ~/.konan is
+      # complete ("Input property 'libraries' ... has been added") and the link
+      # sees a different konanCacheKind, so Xcode's "Copy kmmresource MR bundle"
+      # phase (:shared:copyFrameworkResourcesToApp) recompiled and relinked the
+      # whole framework again (~15-20 min; info log of diagnostic run 39212776556).
+      - name: Compile shared iOS simulator target
+        working-directory: compose
+        run: |
+          ./gradlew :shared:compileKotlinIosSimulatorArm64 \
+            -PslockVisualFixtures=true \
+            --no-daemon \
+            --console=plain \
+            --stacktrace
+
+      # Sync the K/N framework as its own step (same as test.yml's iOS job) so
+      # Gradle output is visible and cached, instead of running nested and
+      # silent inside xcodebuild's [CP-User] Build shared phase — that nested
+      # build is where single-shard runs sat until the job timeout.
+      - name: Sync shared framework (simulator arm64)
+        working-directory: compose
+        run: |
+          ./gradlew :shared:syncFramework \
+            -Pkotlin.native.cocoapods.platform=iphonesimulator \
+            -Pkotlin.native.cocoapods.archs=arm64 \
+            -Pkotlin.native.cocoapods.configuration=Debug \
+            -PslockVisualFixtures=true \
+            --no-daemon \
+            --console=plain \
+            --stacktrace
+
+      # Concrete destination (any available iPhone UDID, not booted): avoids
+      # "Unable to find a device" while CoreSimulator boots N shards, and — unlike
+      # "generic/platform=iOS Simulator" — keeps Xcode's MR-bundle phase from
+      # recompiling the framework (see scripts/ci/ios_build_sim_udid.sh).
+      # Simulators are booted after the build.
+      - name: Build iOS app for simulator
+        working-directory: compose/iosApp
+        run: |
+          # Full build output goes to a file (uploaded via ios-diagnostics on
+          # failure); only the tail is echoed live. A raw `| tail -200` silently
+          # truncated Kotlin/Native `e:` errors from the `[CP-User] Build shared`
+          # phase behind the Pods compile spew, hiding the real cause of build
+          # breaks — capture the whole log and grep the errors out on failure.
+          log="$GITHUB_WORKSPACE/xcodebuild-ios.log"
+          udid=$(bash "$GITHUB_WORKSPACE/scripts/ci/ios_build_sim_udid.sh")
+          echo "build destination UDID=$udid"
+          set +e
+          xcodebuild \
+            -workspace iosApp.xcworkspace \
+            -scheme iosApp \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$udid" \
+            -derivedDataPath "$IOS_CAPTURE_TEMP/DerivedData" \
+            ARCHS=arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            OVERRIDE_KOTLIN_BUILD_IDE_SUPPORTED=YES \
+            RAFT_IOS_REUSE_LINKED_FRAMEWORK=YES \
+            build > "$log" 2>&1
+          status=$?
+          tail -200 "$log"
+          if [ "$status" -ne 0 ]; then
+            echo "===== iOS build FAILED (status=$status) — extracted errors ====="
+            grep -nE "e: |: error:|error: |Unresolved|unresolved reference|BUILD FAILED|following build commands failed|PhaseScriptExecution" "$log" | tail -100 || true
+            mkdir -p "$GITHUB_WORKSPACE/visual-testing-results/ios-diagnostics"
+            cp "$log" "$GITHUB_WORKSPACE/visual-testing-results/ios-diagnostics/xcodebuild-ios.log" || true
+          fi
+          exit "$status"
+
+      - name: Boot job-owned simulator
+        run: bash scripts/ci/ios_visual_runner.sh boot --shards "${{ inputs.ios_shards || 1 }}"
+
+      - name: Generate case manifest
+        run: |
+          python3 scripts/generate_ios_case_manifest.py \
+            --filter "$CASE_FILTER" --out "$IOS_CAPTURE_TEMP/ios-manifest.json"
+
+      - name: Install app and capture cases
+        run: |
+          app=$(find "$IOS_CAPTURE_TEMP/DerivedData/Build/Products/Debug-iphonesimulator" -maxdepth 1 -name '*.app' | head -1)
+          test -n "$app"
+          bundle_id=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app/Info.plist")
+          echo "app=$app bundle_id=$bundle_id shards=$IOS_CAPTURE_SHARDS"
+          mkdir -p visual-testing-results/ios
+          python3 -c "
+          import json, os
+          m = json.load(open(os.path.join(os.environ['IOS_CAPTURE_TEMP'], 'ios-manifest.json')))
+          with open(os.path.join(os.environ['IOS_CAPTURE_TEMP'], 'ios-cases.tsv'), 'w') as out:
+              for c in m['cases']:
+                  print(c['caseId'], c['pageName'], json.dumps(c['pageData'], ensure_ascii=False), sep='\t', file=out)
+          "
+          # Split the manifest into per-shard slices (round-robin keeps shards
+          # balanced even if adjacent cases vary in cost).
+          python3 -c "
+          import os
+          temp = os.environ['IOS_CAPTURE_TEMP']
+          shards = int(os.environ['IOS_CAPTURE_SHARDS'])
+          rows = open(os.path.join(temp, 'ios-cases.tsv')).read().splitlines()
+          for i in range(shards):
+              with open(os.path.join(temp, f'ios-cases.{i}.tsv'), 'w') as out:
+                  out.write('\n'.join(rows[i::shards]) + ('\n' if rows[i::shards] else ''))
+          "
+          # Each shard runs its own simulator + serial launch loop — the same
+          # per-case semantics as before, only parallel across devices.
+          i=0
+          pids=
+          while IFS= read -r udid; do
+            bash scripts/ci/ios_visual_capture_shard.sh "$udid" \
+              "$IOS_CAPTURE_TEMP/ios-cases.$i.tsv" visual-testing-results/ios \
+              > "$IOS_CAPTURE_TEMP/shard-log.$i" 2>&1 &
+            pids="$pids $!"
+            i=$((i+1))
+          done < "$IOS_CAPTURE_TEMP/simulator-udids"
+          # Collect every shard's exit status before failing, so all shard logs
+          # are still printed when one shard dies.
+          shard_errors=0
+          for pid in $pids; do wait "$pid" || shard_errors=$((shard_errors+1)); done
+          # Shard order restored for log readability; per-case lines unchanged.
+          i=0
+          while IFS= read -r udid; do
+            sed "s/^/[s$i] /" "$IOS_CAPTURE_TEMP/shard-log.$i"
+            i=$((i+1))
+          done < "$IOS_CAPTURE_TEMP/simulator-udids"
+          if [ "$shard_errors" != 0 ]; then
+            echo "::error::$shard_errors iOS capture shard(s) exited nonzero"
+            exit 1
+          fi
+          captured=$(ls visual-testing-results/ios/*.png 2>/dev/null | wc -l | tr -d ' ')
+          shard_count=$(wc -l < "$IOS_CAPTURE_TEMP/simulator-udids" | tr -d ' ')
+          expected=$(wc -l < "$IOS_CAPTURE_TEMP/ios-cases.tsv" | tr -d ' ')
+          results=0; ok=0; failed=0; total=0
+          while IFS= read -r udid; do
+            f="$IOS_CAPTURE_TEMP/shard-result.$udid"
+            [ -f "$f" ] || { echo "::error::missing shard result for $udid"; exit 1; }
+            v_c=$(grep -o 'captured=[0-9]*' "$f" | cut -d= -f2)
+            v_f=$(grep -o 'failed=[0-9]*' "$f" | cut -d= -f2)
+            v_t=$(grep -o 'total=[0-9]*' "$f" | cut -d= -f2)
+            results=$((results + 1))
+            ok=$((ok + v_c)); failed=$((failed + v_f)); total=$((total + v_t))
+          done < "$IOS_CAPTURE_TEMP/simulator-udids"
+          echo "captured=$captured failed=$failed total=$total"
+          # Per-case READY/renderer failures stay warnings (legacy behaviour);
+          # a shard that lost cases or PNGs is a capture-infrastructure failure.
+          if [ "$results" != "$shard_count" ] || [ "$total" != "$expected" ] \
+            || [ "$ok" != "$captured" ] || [ $((ok + failed)) != "$total" ]; then
+            echo "::error::iOS shard tallies inconsistent: shards=$results/$shard_count total=$total/$expected ok=$ok png=$captured failed=$failed"
+            exit 1
+          fi
+          cp "$IOS_CAPTURE_TEMP/ios-manifest.json" visual-testing-results/ios-manifest.json
+          # Per-case metadata alongside each PNG, mirroring the android
+          # provider's <caseId>.metadata.json so the CLI panels don't show n/a.
+          python3 -c "
+          import json, struct, os
+          m = json.load(open(os.path.join(os.environ['IOS_CAPTURE_TEMP'], 'ios-manifest.json')))
+          by_id = {c['caseId']: c for c in m['cases']}
+          import glob, os
+          for png in glob.glob('visual-testing-results/ios/*.png'):
+              case_id = os.path.basename(png)[:-4]
+              with open(png, 'rb') as f:
+                  head = f.read(24)
+              w, h = struct.unpack('>II', head[16:24])
+              case = by_id.get(case_id, {})
+              meta = {
+                  'provider': 'ios',
+                  'providerType': 'ios-kuikly-shared-page',
+                  'source': 'kmp-shared',
+                  'caseId': case_id,
+                  'image': os.path.basename(png),
+                  'pageName': case.get('pageName'),
+                  'pageData': case.get('pageData'),
+                  'viewport': {'width': w, 'height': h, 'density': 1},
+                  'device': os.environ.get('SIM_DEVICE'),
+                  'systemBars': 'status-hidden-home-indicator-visible',
+              }
+              with open(png[:-4] + '.metadata.json', 'w') as out:
+                  json.dump(meta, out, indent=2)
+          print('metadata written for', len(glob.glob('visual-testing-results/ios/*.metadata.json')), 'cases')
+          "
+          # task #441: merge the SLOCK_RICHTEXT_CAPS marker into each case's
+          # metadata (site reads richTextCapabilities + declaredDivergences).
+          # No marker for a case -> keys stay absent (unknown, never defaulted).
+          python3 scripts/collect_richtext_caps.py \
+            --metadata-dir visual-testing-results/ios \
+            --log-for 'visual-testing-results/ios/%s.caps.log' || true
+          rm -f visual-testing-results/ios/*.caps.log
+          # A case_filter that selects no iOS cases is a legitimate outcome, not a
+          # failure: an Android-only filter (the compact-menu cases under task #228,
+          # for instance) leaves this provider with nothing to do. Failing here made
+          # every filtered dispatch report a RED run while the Android shard was
+          # green - which is worse than a plain false alarm, because anyone
+          # re-checking an Android result by run status saw failure and anyone
+          # reading the shard saw success, both correctly.
+          #
+          # Same "no work is not a failure" defect PR #2226 fixed for artifact
+          # upload (if-no-files-found, above). That fix covered "no files"; this
+          # branch of the guard, "no cases", never inherited it.
+          if [ "$total" -eq 0 ]; then
+            if [ -n "$CASE_FILTER" ]; then
+              echo "::warning::case_filter selected no iOS cases; nothing to capture"
+              exit 0
+            fi
+            # An unfiltered run with zero cases means enumeration itself broke.
+            echo "::error::no iOS cases to capture"; exit 1
+          fi
+          if [ "$captured" -eq 0 ]; then
+            echo "::error::no cases captured"; exit 1
+          fi
+          if [ "$failed" -gt 0 ]; then
+            echo "::error::$failed of $total cases failed to reach READY"; exit 1
+          fi
+
+      - name: Clean up job-owned simulator and temporary files
+        if: always()
+        run: bash scripts/ci/ios_visual_runner.sh cleanup
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: visual-testing-results-ios
+          path: visual-testing-results/
+          if-no-files-found: warn
+
+      - name: Gradle failure diagnostics
+        if: failure()
+        uses: ./.github/actions/gradle-failure-diagnostics
+
+  report:
+    name: Diff, report, site, publish
+    # ios-capture is in needs only for ORDERING (its artifact must exist before
+    # the download step runs — it finishes minutes after the android shards);
+    # the if-condition deliberately tolerates a red ios leg (e.g. task #421
+    # renderer crashes) so the site degrades to react__android instead of
+    # blocking. react/android failures still block, and site_only (all capture
+    # jobs skipped) still passes.
+    needs: [react-capture, android-capture, ios-capture]
+    # Outside site_only, react AND android captures must have actually
+    # SUCCEEDED — "not failed" was not enough: when android-build fails, the
+    # shards are SKIPPED (not failed) and run 28970107352 published a site
+    # with an empty android side (react__android missing 89). iOS stays
+    # tolerated (red/skipped degrades to fewer pairs, never blocks).
+    if: ${{ !cancelled() && (inputs.site_only || (needs.react-capture.result == 'success' && needs.android-capture.result == 'success')) }}
+    runs-on: blacksmith-8vcpu-ubuntu-2204
+    # AI analysis moved to the ai-analysis job (images publish first, per
+    # artin 2026-07-09); without it diff/report/site fits well inside 30.
+    timeout-minutes: 30
+    outputs:
+      run_id: ${{ steps.pairs.outputs.run_id }}
+      pairs: ${{ steps.pairs.outputs.pairs }}
+      published: ${{ steps.pairs.outputs.published }}
+    steps:
+      - name: Checkout mobile
+        uses: actions/checkout@v7
+        with:
+          path: mobile
+
+      - name: Checkout slock source (visual CLI)
+        uses: actions/checkout@v7
+        with:
+          repository: botiverse/slock
+          ref: ${{ inputs.slock_source_ref }}
+          token: ${{ secrets.SLOCK_SOURCE_REPO_TOKEN || secrets.SLOCK_GITHUB_PACKAGES_TOKEN }}
+          path: slock-source
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          package_json_file: slock-source/package.json
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: slock-source/pnpm-lock.yaml
+
+      # Installs the visual-testing package deps from slock's lockfile,
+      # including @earendil-works/pi-ai for the direct pi-SDK AI diff analysis.
+      - name: Install visual-testing CLI deps (sharp, pi-ai)
+        working-directory: slock-source
+        run: pnpm install --frozen-lockfile --filter "@botiverse/raft-visual-testing..."
+
+      # Fixture data drift gate (task #304): mobile's generated
+      # VisualFixtureData.kt must match slock's canonical fixtureData.json.
+      - name: Check fixture data drift
+        working-directory: mobile
+        env:
+          SLOCK_SOURCE_REPO: ${{ github.workspace }}/slock-source
+        run: node scripts/slock-visual-testing.mjs generate-fixture-data --check
+
+      # Pixel avatar drift gate (task #352): mobile's generated
+      # RaftPixelAvatarData.kt must match slock's canonical pixelAvatars.json.
+      - name: Check pixel avatar drift
+        working-directory: mobile
+        env:
+          SLOCK_SOURCE_REPO: ${{ github.workspace }}/slock-source
+        run: node scripts/generate_pixel_avatars.mjs --check
+
+      # A targeted case_filter can select Android-only cases (e.g. compact
+      # message menu) which React legitimately has no counterpart for. In that
+      # case React uploads nothing and this download has nothing to find.
+      # Tolerated ONLY for React when a filter is in play. Unfiltered runs must
+      # produce React results. Android captures are always required.
+      - name: Download react results
+        if: ${{ !inputs.site_only }}
+        continue-on-error: ${{ inputs.case_filter != '' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: visual-results-react
+          path: mobile/visual-testing-results/react
+
+      - name: Download android results (merge shards)
+        if: ${{ !inputs.site_only }}
+        uses: actions/download-artifact@v8
+        with:
+          pattern: visual-results-android-shard-*
+          merge-multiple: true
+          path: mobile/visual-testing-results/android
+
+      - name: Verify capture artifacts
+        if: ${{ !inputs.site_only }}
+        working-directory: mobile
+        run: |
+          if [ ! -d visual-testing-results/android ] || [ -z "$(ls -A visual-testing-results/android/*.png 2>/dev/null)" ]; then
+            echo "::error::Android capture results missing or empty in visual-testing-results/android"
+            exit 1
+          fi
+          if [ -z "${{ inputs.case_filter }}" ] && { [ ! -d visual-testing-results/react ] || [ -z "$(ls -A visual-testing-results/react/*.png 2>/dev/null)" ]; }; then
+            echo "::error::Unfiltered run requires React captures, but visual-testing-results/react is missing or empty"
+            exit 1
+          fi
+
+      # iOS results are additive (task #418): tolerate an absent/red ios leg so
+      # the react/android site never blocks on it.
+      - name: Download ios results
+        if: ${{ !inputs.site_only }}
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: visual-testing-results-ios
+          path: mobile/visual-testing-results
+
+      # UI-only republish: rebuild visual-testing-results from what is already
+      # published on gh-pages (raw react/android captures + metadata), then run
+      # the normal diff/report/site chain with the LATEST CLI. No emulators, no
+      # browsers — minutes instead of a full capture round.
+      - name: Reconstruct results from gh-pages (site_only)
+        if: ${{ inputs.site_only }}
+        working-directory: mobile
+        run: |
+          git fetch origin gh-pages --depth 1
+          git worktree add /tmp/ghpages origin/gh-pages
+          SRC=/tmp/ghpages/visual-testing/latest
+          test -d "$SRC/react" && test -d "$SRC/android" || { echo "gh-pages latest/ lacks raw captures"; exit 1; }
+          mkdir -p visual-testing-results
+          cp -R "$SRC/react" visual-testing-results/react
+          cp -R "$SRC/android" visual-testing-results/android
+          test -d "$SRC/ios" && cp -R "$SRC/ios" visual-testing-results/ios || echo "no ios captures on gh-pages yet"
+          # prior analysis JSONs seed the imageHash cache so unchanged cases skip re-analysis
+          test -d "$SRC/analysis" && cp -R "$SRC/analysis" visual-testing-results/analysis || true
+
+      # Prior analysis JSONs from gh-pages seed the site so the previous
+      # run's AI notes stay visible (marked stale where images changed) while
+      # the ai-analysis job refreshes them AFTER images publish. The normal
+      # path needs this seed too now that analyze left this job.
+      - name: Seed prior analysis from gh-pages
+        if: ${{ !inputs.site_only }}
+        working-directory: mobile
+        continue-on-error: true
+        run: |
+          git fetch origin gh-pages --depth 1
+          git worktree add /tmp/ghpages-seed origin/gh-pages
+          SRC=/tmp/ghpages-seed/visual-testing/latest
+          test -d "$SRC/analysis" && mkdir -p visual-testing-results && cp -R "$SRC/analysis" visual-testing-results/analysis || echo "no prior analysis to seed"
+          git worktree remove --force /tmp/ghpages-seed || true
+
+      - name: Diff / report / site
+        id: pairs
+        working-directory: mobile
+        env:
+          SLOCK_SOURCE_REPO: ${{ github.workspace }}/slock-source
+        run: |
+          # Pair list per the provider-pair-first spec (task #430): cross-platform
+          # android__ios is a default pair. ios legs are additive — a red/absent
+          # ios leg degrades to the classic react__android-only site.
+          PAIRS="react__android"
+          if [ -d visual-testing-results/ios ] && [ -n "$(ls visual-testing-results/ios/*.png 2>/dev/null)" ]; then
+            PAIRS="react__android,react__ios,android__ios"
+          else
+            # ios leg loudly absent (capture job red/skipped) — declare it
+            # degraded so the publish guard tolerates its pairs vanishing
+            # while still holding react__android to its previous total
+            # (slock PR #5008, task #498).
+            echo "DEGRADED_PROVIDERS=ios" >> "$GITHUB_ENV"
+          fi
+          echo "diff pairs: $PAIRS"
+          node scripts/slock-visual-testing.mjs diff --pairs "$PAIRS"
+          # AI analysis runs in the ai-analysis job AFTER this site publishes
+          # (images first — artin 2026-07-09); seeded prior notes render as
+          # cached/stale meanwhile.
+          node scripts/slock-visual-testing.mjs report --pairs "$PAIRS"
+          node scripts/slock-visual-testing.mjs site --pairs "$PAIRS"
+          echo "PAIRS=$PAIRS" >> "$GITHUB_ENV"
+          # Stable run id shared by this job's publish and the ai-analysis
+          # republish so both write the same runs/<id> + latest generation.
+          RUN_ID="$(git rev-parse --short HEAD)-$(date -u +%Y%m%d%H%M%S)"
+          echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "pairs=$PAIRS" >> "$GITHUB_OUTPUT"
+          echo "published=${{ inputs.publish || inputs.site_only || github.event_name == 'schedule' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload site artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: visual-testing-site
+          path: mobile/artifacts/visual-testing-site
+          if-no-files-found: error
+
+      - name: Publish to gh-pages (preflight-guarded)
+        if: ${{ inputs.publish || inputs.site_only || github.event_name == 'schedule' }}
+        working-directory: mobile
+        env:
+          SLOCK_SOURCE_REPO: ${{ github.workspace }}/slock-source
+        run: |
+          git config user.name "raft-visual-bot"
+          git config user.email "visual-testing@raft.build"
+          git fetch origin gh-pages:refs/remotes/origin/gh-pages || echo "no existing gh-pages branch"
+          EXTRA_FLAGS=()
+          if [ -n "${DEGRADED_PROVIDERS:-}" ]; then EXTRA_FLAGS+=(--allow-degraded-providers "$DEGRADED_PROVIDERS"); fi
+          if [ "${{ inputs.allow_case_drop || false }}" = "true" ]; then EXTRA_FLAGS+=(--allow-case-drop); fi
+          node scripts/slock-visual-testing.mjs publish-gh-pages --pairs "${PAIRS:-react__android}" --repo-dir . --run-id "$RUN_ID" --dry-run "${EXTRA_FLAGS[@]}"
+          node scripts/slock-visual-testing.mjs publish-gh-pages --pairs "${PAIRS:-react__android}" --repo-dir . --run-id "$RUN_ID" "${EXTRA_FLAGS[@]}"
+
+  # AI diff analysis, decoupled from the image publish (artin 2026-07-09:
+  # "图先出来，AI 并行异步"). Runs after the site is live, re-analyzes only
+  # what the perceptual cache says changed, and republishes the SAME run id
+  # so analysis lands on the generation the images shipped with.
+  ai-analysis:
+    name: AI diff analysis (async)
+    needs: [report]
+    # Only meaningful when the report actually published a site to update.
+    if: ${{ !cancelled() && needs.report.result == 'success' && needs.report.outputs.published == 'true' }}
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    timeout-minutes: 60
+    # A rerun/new publish supersedes the in-flight analysis of the previous
+    # one: cancel it instead of letting it burn model calls and a runner
+    # (artin). Completed pairs persist via the analysis JSONs + perceptual
+    # cache, so a cancelled batch resumes incrementally next round.
+    concurrency:
+      group: visual-testing-ai-analysis-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout mobile
+        uses: actions/checkout@v7
+        with:
+          path: mobile
+
+      - name: Checkout slock source (visual CLI)
+        uses: actions/checkout@v7
+        with:
+          repository: botiverse/slock
+          ref: ${{ inputs.slock_source_ref }}
+          token: ${{ secrets.SLOCK_SOURCE_REPO_TOKEN || secrets.SLOCK_GITHUB_PACKAGES_TOKEN }}
+          path: slock-source
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          package_json_file: slock-source/package.json
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: slock-source/pnpm-lock.yaml
+
+      - name: Install visual-testing CLI deps (sharp, pi-ai)
+        working-directory: slock-source
+        run: pnpm install --frozen-lockfile --filter "@botiverse/raft-visual-testing..."
+
+      # Rebuild visual-testing-results from what the report job just
+      # published: raw captures + prior analysis (the perceptual cache keys
+      # incremental re-analysis off the analysis JSONs).
+      - name: Reconstruct results from gh-pages
+        working-directory: mobile
+        run: |
+          git fetch origin gh-pages --depth 1
+          git worktree add /tmp/ghpages origin/gh-pages
+          SRC=/tmp/ghpages/visual-testing/latest
+          test -d "$SRC/react" && test -d "$SRC/android" || { echo "gh-pages latest/ lacks raw captures"; exit 1; }
+          mkdir -p visual-testing-results
+          cp -R "$SRC/react" visual-testing-results/react
+          cp -R "$SRC/android" visual-testing-results/android
+          test -d "$SRC/ios" && cp -R "$SRC/ios" visual-testing-results/ios || echo "no ios captures on gh-pages"
+          test -d "$SRC/analysis" && cp -R "$SRC/analysis" visual-testing-results/analysis || echo "no prior analysis"
+          git worktree remove --force /tmp/ghpages || true
+
+      - name: Analyze and republish (generation-guarded)
+        working-directory: mobile
+        env:
+          SLOCK_SOURCE_REPO: ${{ github.workspace }}/slock-source
+          # pi SDK credential (provider minimax, model $PI_MODEL, default
+          # MiniMax-M3.1-Flash-Preview). Absent -> skip with a notice, never fail the run.
+          PI_API_KEY: ${{ secrets.PI_API_KEY }}
+          PI_MODEL: ${{ vars.PI_MODEL }}
+          RUN_ID: ${{ needs.report.outputs.run_id }}
+        run: |
+          if [ -z "$PI_API_KEY" ]; then
+            echo "No AI credential (PI_API_KEY); skipping AI diff analysis"
+            exit 0
+          fi
+          export MINIMAX_API_KEY="$PI_API_KEY"
+          PAIRS="react__android"
+          if [ -d visual-testing-results/ios ] && [ -n "$(ls visual-testing-results/ios/*.png 2>/dev/null)" ]; then
+            PAIRS="react__android,react__ios,android__ios"
+          fi
+          node scripts/slock-visual-testing.mjs diff --pairs "$PAIRS"
+          node scripts/slock-visual-testing.mjs analyze --pairs "$PAIRS" \
+            || { echo "::warning::AI diff analysis failed; site keeps previous notes"; exit 0; }
+          node scripts/slock-visual-testing.mjs report --pairs "$PAIRS"
+          node scripts/slock-visual-testing.mjs site --pairs "$PAIRS"
+          # Generation guard (write-back protection): only republish if the
+          # live site still shows OUR run id. A newer publish supersedes this
+          # analysis — drop the write, never overwrite newer images.
+          git fetch origin gh-pages:refs/remotes/origin/gh-pages
+          LIVE_RUN_ID=$(git show origin/gh-pages:visual-testing/latest/metadata.json | node -e "let d='';process.stdin.on('data',(c)=>d+=c).on('end',()=>console.log(JSON.parse(d).runId||''))")
+          if [ "$LIVE_RUN_ID" != "$RUN_ID" ]; then
+            echo "::notice::superseded: live runId=$LIVE_RUN_ID != ours=$RUN_ID; skipping analysis republish"
+            exit 0
+          fi
+          git config user.name "raft-visual-bot"
+          git config user.email "visual-testing@raft.build"
+          node scripts/slock-visual-testing.mjs publish-gh-pages --pairs "$PAIRS" --repo-dir . --run-id "$RUN_ID"

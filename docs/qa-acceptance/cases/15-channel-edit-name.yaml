@@ -1,0 +1,43 @@
+id: channel-edit-name
+title: "频道管理-修改频道名称"
+goal: "验证修改频道名称功能，Save Changes可点击且生效"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+assertions:
+  - id: new-name-visible
+    goal: "新名称显示在频道header"
+    type: visual_check
+    severity: critical
+android:
+  device: { type: emulator, api_level: 34 }
+  steps:
+    - goal: "打开一个qa-test频道"
+      capture: [screenshot]
+    - goal: "点击右上角齿轮设置"
+      capture: [screenshot]
+    - goal: "找到编辑/改名选项"
+      capture: [screenshot]
+    - goal: "修改频道名加-renamed后缀"
+      capture: [screenshot]
+    - goal: "用tap_text点击Save Changes"
+      capture: [screenshot]
+    - goal: "验证新名称显示"
+      capture: [screenshot]
+ios:
+  device: { type: ios-simulator, device_name: "iPhone 14" }
+  steps:
+    - goal: "打开一个qa-test频道"
+      capture: [screenshot]
+    - goal: "点击右上角设置图标"
+      capture: [screenshot]
+    - goal: "找到编辑选项"
+      capture: [screenshot]
+    - goal: "修改频道名"
+      hint: "用屏幕键盘"
+      capture: [screenshot]
+    - goal: "点击保存"
+      capture: [screenshot]
+    - goal: "验证新名称"
+      capture: [screenshot]

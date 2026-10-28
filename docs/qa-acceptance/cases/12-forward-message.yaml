@@ -1,0 +1,40 @@
+id: forward-message
+title: "转发消息-跨频道转发"
+goal: "验证消息转发功能：Select Message→多选→Forward→选目标→发送"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+assertions:
+  - id: no-forward-error
+    goal: "转发无错误"
+    type: text_absent
+    params:
+      text_match_regex: "(?i)(unsupport|error|failed|cross.?server)"
+    severity: critical
+android:
+  device: { type: emulator, api_level: 34 }
+  steps:
+    - goal: "打开 #all 频道"
+      capture: [screenshot]
+    - goal: "长按一条消息"
+      capture: [screenshot]
+    - goal: "点击 Select Message 进入多选"
+      capture: [screenshot]
+    - goal: "在多选模式找到 Forward 操作"
+      capture: [screenshot]
+    - goal: "选择目标频道并确认转发"
+      capture: [screenshot]
+ios:
+  device: { type: ios-simulator, device_name: "iPhone 14" }
+  steps:
+    - goal: "打开 #all 频道"
+      capture: [screenshot]
+    - goal: "长按一条消息"
+      capture: [screenshot]
+    - goal: "点击 Select Message"
+      capture: [screenshot]
+    - goal: "找到 Forward 操作"
+      capture: [screenshot]
+    - goal: "选择目标并确认"
+      capture: [screenshot]

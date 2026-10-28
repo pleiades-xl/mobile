@@ -1,0 +1,117 @@
+package build.raft.app
+
+import android.graphics.Typeface
+import android.os.Build
+import android.util.TypedValue
+import android.view.ViewGroup
+import android.widget.TextView
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.text.selection.TextSelectionColors
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.remember
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFontFamilyResolver
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontSynthesis
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.unit.isSpecified
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.widget.TextViewCompat
+import build.raft.app.shared.R
+import kotlin.math.roundToInt
+
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+actual fun RaftNativeSelectableText(
+    text: String,
+    style: TextStyle,
+    modifier: Modifier,
+    selection: RaftNativeTextSelection?,
+) {
+    val viewHolder = remember { arrayOfNulls<TextView>(1) }
+    DisposableEffect(selection) {
+        selection?.reader = {
+            viewHolder[0]?.let { view -> raftNativeSelectedSlice(view.text ?: "", view.selectionStart, view.selectionEnd) }.orEmpty()
+        }
+        onDispose { selection?.reader = null }
+    }
+    val density = LocalDensity.current
+    val typeface =
+        style.fontFamily?.let { family ->
+            LocalFontFamilyResolver.current.resolve(
+                fontFamily = family,
+                fontWeight = style.fontWeight ?: FontWeight.Normal,
+                fontStyle = style.fontStyle ?: FontStyle.Normal,
+                fontSynthesis = style.fontSynthesis ?: FontSynthesis.All,
+            ).value as? Typeface
+        }
+    val fontSizePx = style.fontSize.toPxOrNull(density)
+    val lineHeightPx = style.lineHeight.toPxOrNull(density, fontSizePx)
+    val textColor = style.color.takeIf { it != Color.Unspecified } ?: Color.Black
+    // The design system's selection (RaftTheme: `selection` behind the text, `foreground` handles),
+    // not the platform accent (Artea: pink on the emulator, whatever the OEM theme is on a phone).
+    val selectionColors = LocalTextSelectionColors.current
+    AndroidView(
+        factory = { context ->
+            TextView(context).apply {
+                // Stable native id for UIAutomator (task #924 physical admission); the Compose
+                // testTag is additionally exposed as resource-id via testTagsAsResourceId below.
+                id = R.id.thread_message_selection_text
+                layoutParams =
+                    ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    )
+                includeFontPadding = false
+                setPadding(0, 0, 0, 0)
+                // System-owned selection: platform handles + floating toolbar incl. PROCESS_TEXT.
+                setTextIsSelectable(true)
+            }.also { viewHolder[0] = it }
+        },
+        modifier =
+            modifier
+                .semantics { testTagsAsResourceId = true }
+                .fillMaxWidth()
+                .wrapContentHeight(),
+        update = { view ->
+            if (view.text?.toString() != text) view.text = text
+            view.setTextColor(textColor.toArgb())
+            if (fontSizePx != null) view.setTextSize(TypedValue.COMPLEX_UNIT_PX, fontSizePx)
+            if (typeface != null) view.typeface = typeface
+            if (lineHeightPx != null) TextViewCompat.setLineHeight(view, lineHeightPx.roundToInt().coerceAtLeast(1))
+            view.applyRaftSelectionColors(selectionColors)
+        },
+    )
+}
+
+/** The highlight, and on API 29+ the three selection handles, in the design system's colours. */
+private fun TextView.applyRaftSelectionColors(colors: TextSelectionColors) {
+    val background = colors.backgroundColor.toArgb()
+    if (highlightColor != background) highlightColor = background
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+    val handle = colors.handleColor.toArgb()
+    if (getTag(R.id.thread_message_selection_text) == handle) return
+    textSelectHandle?.mutate()?.let { it.setTint(handle); setTextSelectHandle(it) }
+    textSelectHandleLeft?.mutate()?.let { it.setTint(handle); setTextSelectHandleLeft(it) }
+    textSelectHandleRight?.mutate()?.let { it.setTint(handle); setTextSelectHandleRight(it) }
+    setTag(R.id.thread_message_selection_text, handle)
+}
+
+private fun TextUnit.toPxOrNull(density: androidx.compose.ui.unit.Density, fontSizePx: Float? = null): Float? =
+    when {
+        !isSpecified -> null
+        isSp -> with(density) { toPx() }
+        isEm -> fontSizePx?.let { it * value }
+        else -> null
+    }

@@ -1,0 +1,302 @@
+package build.raft.app
+
+import build.raft.app.resources.*
+import build.raft.app.base.BridgeModule
+import build.raft.app.data.BridgeSettingsPlatformCapabilities
+import build.raft.app.data.BridgeRaftAvatarNativeCache
+import build.raft.app.data.ChatLayoutPreferenceRepository
+import build.raft.app.data.DataResult
+import build.raft.app.data.KeyValueChatLayoutPreferenceStore
+import build.raft.app.data.KeyValueLinkOpenPreferenceStore
+import build.raft.app.data.KeyValueLocalePreferenceStore
+import build.raft.app.data.PersistentChatLayoutPreferenceRepository
+import build.raft.app.data.PersistentLinkOpenPreferenceRepository
+import build.raft.app.data.PersistentLocaleRepository
+import build.raft.app.data.NotificationPreferenceRepository
+import build.raft.app.data.RealSettingsRepository
+import build.raft.app.data.NetworkServerPublicVisibilityRepository
+import build.raft.app.data.ServerPublicVisibilityRepository
+import build.raft.app.data.NetworkServerAppearanceRepository
+import build.raft.app.data.ServerAppearanceRepository
+import build.raft.app.data.ScreenError
+import build.raft.app.data.SharedAuthDataSource
+import build.raft.app.data.SharedApiEnvironmentStore
+import build.raft.app.data.SharedServerMembersStore
+import build.raft.app.data.SharedSettingsDataSource
+import build.raft.app.data.SharedSettingsEffect
+import build.raft.app.data.SharedSettingsIntent
+import build.raft.app.data.SharedSettingsState
+import build.raft.app.data.RaftAuthSessionStore
+import build.raft.app.data.RaftSharedStoreRegistry
+import build.raft.app.data.RaftShellStoreScope
+import build.raft.app.data.kuiklyBridgeCallContext
+import build.raft.app.data.RaftChatLayoutPreferenceEvents
+import build.raft.app.data.RaftNotificationPreferenceEvents
+import build.raft.app.data.raftChatLayoutPreferenceRepository
+import build.raft.app.data.raftNotificationPreferenceRepository
+import build.raft.app.data.messageBodyFontSizeOwnerKey
+import build.raft.app.data.raftSharedPreferenceStore
+import build.raft.app.data.KeyValuePushPreviewModePreferenceStore
+import build.raft.app.data.KeyValueThreadReverseLayoutPreferenceStore
+import build.raft.app.data.MOBILE_THREAD_REVERSE_LAYOUT_FEATURE_FLAG_KEY
+import build.raft.app.model.ServerId
+import build.raft.app.network.sync.ProcessDiagnosticFeatureFlagOverrides
+import build.raft.app.data.runCatchingPreservingCancellation
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import build.raft.app.compat.module.RouterModule
+import build.raft.app.compat.pager.Pager
+
+internal data class StandaloneSettingsEnvironment(
+    val dataSource: SharedSettingsDataSource,
+    val authDataSource: SharedAuthDataSource,
+    val authStore: RaftAuthSessionStore,
+    val serverMembersStore: SharedServerMembersStore,
+    val settingsCapabilities: BridgeSettingsPlatformCapabilities,
+    val chatLayoutPreferenceRepository: ChatLayoutPreferenceRepository,
+    val notificationPreferenceRepository: NotificationPreferenceRepository,
+    val storeScope: RaftShellStoreScope,
+    val webBaseUrl: String,
+    val serverPublicVisibilityRepository: ServerPublicVisibilityRepository,
+    val serverAppearanceRepository: ServerAppearanceRepository,
+)
+
+/**
+ * Standalone Settings pages must resolve their Web origin synchronously from
+ * the canonical environment store. The developer screen state is loaded
+ * asynchronously and can still be empty when a standalone WebView is created.
+ */
+internal fun standaloneSettingsWebBaseUrl(apiEnvironmentStore: SharedApiEnvironmentStore): String =
+    apiEnvironmentStore.current().webUrl
+
+@Composable
+internal fun rememberStandaloneSettingsEnvironment(
+    pager: Pager,
+    bridge: BridgeModule
+): StandaloneSettingsEnvironment {
+    val storeScope = remember(pager.pageData.params.toString(), pager.pagerId) {
+        pager.pageData.params.raftShellStoreScope(RaftShellStoreScope.Legacy.shellInstanceId)
+    }
+    val sharedStores = remember(bridge) { RaftSharedStoreRegistry.get(bridge) }
+    val webBaseUrl = standaloneSettingsWebBaseUrl(sharedStores.apiEnvironmentStore)
+    val authStore = remember(sharedStores, storeScope) { sharedStores.authStore(storeScope) }
+    val networkClient = remember(sharedStores, storeScope) { sharedStores.networkClient(storeScope) }
+    val scope = rememberCoroutineScope()
+    val avatarNativeCache =
+        remember(bridge, scope) {
+            BridgeRaftAvatarNativeCache(
+                bridge = bridge,
+                bridgeCallContext = scope.kuiklyBridgeCallContext()
+            )
+        }
+    val authDataSource = remember(sharedStores, storeScope, avatarNativeCache) {
+        sharedStores.createAuthDataSourceForCurrentEnvironment(storeScope, avatarNativeCache)
+    }
+    val serverMembersStore = remember(sharedStores, storeScope) {
+        sharedStores.serverMembersStore(storeScope)
+    }
+    val linkNavigator = rememberRaftLinkNavigator(pager, bridge)
+    val copiedMessage = stringResource(Res.string.common_copied)
+    val settingsCapabilities =
+        remember(bridge, scope, linkNavigator, copiedMessage) {
+            BridgeSettingsPlatformCapabilities(
+                bridge = bridge,
+                copiedMessage = copiedMessage,
+                bridgeCallContext = scope.kuiklyBridgeCallContext(),
+                openUrlHandler = { url -> linkNavigator.open(url) }
+            )
+        }
+    val sharedPreferenceStore = remember { raftSharedPreferenceStore() }
+    val eventBus = remember(sharedStores) { sharedStores.eventBus }
+    val chatLayoutPreferenceEvents = remember(eventBus) { RaftChatLayoutPreferenceEvents(eventBus) }
+    val chatLayoutPreferenceRepository =
+        remember(sharedPreferenceStore, chatLayoutPreferenceEvents) {
+            raftChatLayoutPreferenceRepository(
+                delegate =
+                    PersistentChatLayoutPreferenceRepository(
+                        KeyValueChatLayoutPreferenceStore(sharedPreferenceStore)
+                    ),
+                events = chatLayoutPreferenceEvents,
+            )
+        }
+    val notificationPreferenceEvents = remember(eventBus) { RaftNotificationPreferenceEvents(eventBus) }
+    val notificationPreferenceRepository =
+        remember(notificationPreferenceEvents) {
+            raftNotificationPreferenceRepository(notificationPreferenceEvents)
+        }
+    val dataSource =
+        remember(
+            sharedStores,
+            storeScope,
+            authStore,
+            networkClient,
+            sharedPreferenceStore,
+            settingsCapabilities,
+            chatLayoutPreferenceRepository,
+            notificationPreferenceRepository,
+            avatarNativeCache,
+        ) {
+            SharedSettingsDataSource(
+                sessionStore = authStore,
+                settingsRepository =
+                    RealSettingsRepository(
+                        sessionStore = authStore,
+                        networkClient = networkClient,
+                        logger = { message -> bridge.log("settings_standalone_repository $message") },
+                        warningLogger = { message -> bridge.log("settings_standalone_repository_warning $message") },
+                        onAppearanceSnapshot = { ownerId, snapshot ->
+                            messageBodyFontSizeOwnerKey(
+                                sharedStores.apiEnvironmentStore.current().apiBaseUrl,
+                                ownerId,
+                            )?.let { ownerKey ->
+                                sharedStores.messageBodyFontSizeStore.acceptAuthoritative(ownerKey, snapshot)
+                            }
+                        },
+                        serverNotificationLastKnownStore = sharedStores.settingsServerNotificationLastKnownStore,
+                    ),
+                serverMembersStore = serverMembersStore,
+                // Data-layer plan step 5: the shell's owner-fenced, durable machine cache.
+                computersSource = sharedStores.computersStore(storeScope),
+                notificationPreferenceRepository = notificationPreferenceRepository,
+                localeRepository = PersistentLocaleRepository(KeyValueLocalePreferenceStore(sharedPreferenceStore)),
+                chatLayoutPreferenceRepository = chatLayoutPreferenceRepository,
+                linkOpenPreferenceRepository =
+                    PersistentLinkOpenPreferenceRepository(KeyValueLinkOpenPreferenceStore(sharedPreferenceStore)),
+                apiEnvironmentStore = sharedStores.apiEnvironmentStore,
+                platformCapabilities = settingsCapabilities,
+                diagnosticsLogger = { message -> bridge.log("settings_standalone $message") },
+                threadReverseLayoutPreferenceStore = KeyValueThreadReverseLayoutPreferenceStore(sharedPreferenceStore),
+                pushPreviewModePreferenceStore = KeyValuePushPreviewModePreferenceStore(sharedPreferenceStore),
+                threadReverseLayoutDefault = {
+                    authStore.readSession()?.let { session ->
+                        session.currentServerId?.let { serverId ->
+                            resolveThreadReverseLayoutEnabled(
+                                registry = ProcessDiagnosticFeatureFlagOverrides.registry,
+                                serverEffective =
+                                    sharedStores.serverFeatureFlags.isEnabled(
+                                        ServerId(serverId),
+                                        MOBILE_THREAD_REVERSE_LAYOUT_FEATURE_FLAG_KEY
+                                    ),
+                                environmentId = sharedStores.apiEnvironmentStore.current().apiBaseUrl,
+                                accountId = session.user.id,
+                                serverId = serverId
+                            )
+                        }
+                    } ?: false
+                }
+            ).withAvatarCacheRuntime(
+                runtime = sharedStores.avatarCacheRuntime,
+                nativeCache = avatarNativeCache
+            )
+        }
+    val serverPublicVisibilityRepository =
+        remember(networkClient) { NetworkServerPublicVisibilityRepository(networkClient) }
+    val serverAppearanceRepository =
+        remember(networkClient, authStore) { NetworkServerAppearanceRepository(networkClient, authStore) }
+    return remember(
+        dataSource,
+        serverPublicVisibilityRepository,
+        serverAppearanceRepository,
+        authDataSource,
+        authStore,
+        serverMembersStore,
+        settingsCapabilities,
+        chatLayoutPreferenceRepository,
+        notificationPreferenceRepository,
+        storeScope,
+        webBaseUrl,
+    ) {
+        StandaloneSettingsEnvironment(
+            dataSource = dataSource,
+            authDataSource = authDataSource,
+            authStore = authStore,
+            serverMembersStore = serverMembersStore,
+            settingsCapabilities = settingsCapabilities,
+            chatLayoutPreferenceRepository = chatLayoutPreferenceRepository,
+            notificationPreferenceRepository = notificationPreferenceRepository,
+            storeScope = storeScope,
+            webBaseUrl = webBaseUrl,
+            serverPublicVisibilityRepository = serverPublicVisibilityRepository,
+            serverAppearanceRepository = serverAppearanceRepository,
+        )
+    }
+}
+
+@Composable
+internal fun StandaloneSettingsEffectHandler(
+    pager: Pager,
+    environment: StandaloneSettingsEnvironment,
+    state: SharedSettingsState,
+    dispatch: (SharedSettingsIntent) -> Unit
+) {
+    val shareUsageDataSaveFailed = stringResource(Res.string.settings_usage_data_save_failed)
+    LaunchedEffect(state.effect) {
+        val effect = state.effect ?: return@LaunchedEffect
+        when (effect) {
+            SharedSettingsEffect.Logout -> {
+                runCatchingPreservingCancellation { environment.authDataSource.logout() }
+                pager.acquireModule<RouterModule>(RouterModule.MODULE_NAME)
+                    .openPage(LOGIN_PAGE, loginPageData(replaceCurrent = true))
+            }
+            is SharedSettingsEffect.ApiEnvironmentChanged -> {
+                environment.settingsCapabilities.bridgeToast(effect.message)
+                runCatchingPreservingCancellation { environment.authDataSource.logout() }
+                pager.acquireModule<RouterModule>(RouterModule.MODULE_NAME)
+                    .openPage(LOGIN_PAGE, loginPageData(replaceCurrent = true))
+            }
+            is SharedSettingsEffect.OpenUrl -> {
+                environment.settingsCapabilities.openExternalUrl(effect.url)
+            }
+            is SharedSettingsEffect.CopyText -> {
+                environment.settingsCapabilities.bridgeCopyToClipboard(effect.text)
+            }
+            SharedSettingsEffect.ShareUsageDataSaveFailed -> {
+                environment.settingsCapabilities.bridgeToast(shareUsageDataSaveFailed)
+            }
+            is SharedSettingsEffect.ClearStorage -> {
+                val result = environment.dataSource.clearStorage(effect.target)
+                when (result) {
+                    is DataResult.Content ->
+                        dispatch(
+                            SharedSettingsIntent.CompleteStorageClear(
+                                effect.target,
+                                ok = true,
+                                snapshot = result.data
+                            )
+                        )
+                    is DataResult.Empty ->
+                        dispatch(
+                            SharedSettingsIntent.CompleteStorageClear(
+                                effect.target,
+                                ok = false,
+                                code = result.reason.name,
+                                emptyReason = result.reason
+                            )
+                        )
+                    is DataResult.Error ->
+                        dispatch(
+                            SharedSettingsIntent.CompleteStorageClear(
+                                effect.target,
+                                ok = false,
+                                code = result.error.code,
+                                screenError = result.error
+                            )
+                        )
+                    is DataResult.NoPermission ->
+                        dispatch(
+                            SharedSettingsIntent.CompleteStorageClear(
+                                effect.target,
+                                ok = false,
+                                code = result.blocker.code,
+                                permissionBlocker = result.blocker
+                            )
+                        )
+                }
+            }
+            else -> Unit
+        }
+        dispatch(SharedSettingsIntent.ConsumeEffect)
+    }
+}

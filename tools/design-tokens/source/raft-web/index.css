@@ -1,0 +1,1050 @@
+@import "@botiverse/raft-ui/fonts.css";
+
+@import "tailwindcss";
+@import "@botiverse/raft-ui/styles.css";
+@import "@botiverse/raft-ui/themes.css";
+@import "./components/mermaid/mermaid.css";
+
+
+/* Typography follows raft-ui/fonts.css contract */
+
+/*
+ * Space Grotesk keeps Raft's established typography, but its straight double
+ * quote is visually too close to the closing curly quote. This face reuses
+ * Hanken Grotesk only for the neutral straight-quote code point. Curly quotes
+ * remain owned by Space Grotesk. The browser
+ * selects it per glyph through unicode-range; DOM text, copy/paste, search,
+ * wrapping ownership, and accessibility content remain unchanged.
+ *
+ * #7347 dropped this block while switching the file's top to
+ * `@import "@botiverse/raft-ui/fonts.css"`; the visual suite caught it — its font
+ * contract requires this woff2 to be requested, and `Raft Quote Glyphs` is
+ * probed by name. Restored verbatim from 7a1558117:packages/web/src/index.css.
+ */
+@font-face {
+  font-family: 'Raft Quote Glyphs';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('https://fonts.gstatic.com/s/hankengrotesk/v12/ieVn2YZDLWuGJpnzaiwFXS9tYtpd59CxCis4.woff2') format('woff2');
+  unicode-range: U+0022;
+}
+
+/*
+ * Tailwind v4 source scanning. These directives travel WITH this CSS
+ * file, so any package that imports `@botiverse/raft-web/src/index.css`
+ * (currently `@botiverse/raft-web`, future internal apps) automatically gets utility-class generation for the shared
+ * primitive surface — primitives that use `sr-only` / `ml-2` etc.
+ * keep working without each consumer re-declaring scan paths.
+ *
+ * Without this, an out-of-package consumer's Tailwind only scans its
+ * own src tree; primitives looked correct in the web app but rendered
+ * with raw `<input type=checkbox>` and zero-gap section headers in the
+ * inventory — stdrc #proj-theme:ac79cf20 msg=12665926.
+ */
+@source "./components";
+@source "./pages";
+@source "../node_modules/@botiverse/raft-ui/dist";
+
+@theme {
+  /* Match the two Shiki themes, including plaintext/loading fallbacks. */
+  --color-code-surface: #ffffff;
+  --color-code-foreground: #24292e;
+
+  /* Display copy (titles, wordmarks) uses the theme's heading face. */
+  --font-display: var(--font-heading);
+}
+
+/* Every column head shares the shell height (Raft Design System: 56, 48 in
+   windows under 600 tall), so the rail, sidebar and panel seams line up. */
+@utility h-panel-header {
+  height: var(--shell-header-height, 56px);
+}
+@media (max-height: 600px) {
+  [data-slot="app-shell-root"] {
+    --shell-header-height: 48px;
+  }
+}
+
+/* Header icon-container utility — 36px square. Used for the icon slots
+   inside panel headers. The container size DOES NOT shrink on short
+   viewports per stdrc 2026-05-02 #proj-uiux:648f8735 f1966eb3
+   ("不是高度放回去，是 button 和 icon 放回去") — the rectangular
+   header rectangle gets shorter (48px) but the inner icon button
+   stays 36x36 so it doesn't lose visual weight. */
+@utility size-icon-header {
+  width: 36px;
+  height: 36px;
+}
+
+@layer base {
+  /* Remove iOS tap highlight for native-feeling touch interactions */
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Cursor contract: everything clickable, including in-message refs, uses
+     the same link-hand affordance as the Website. Disabled controls keep their
+     own explicit not-allowed/default state; non-clickable look-alikes (static
+     ref spans, display-only chips), drag handles, and busy refs opt into
+     default/wait/grab at their callsites
+     (src/components/message/clickableAffordance.ts). */
+  button:not(:disabled), [role="button"]:not([aria-disabled="true"]), a[href="#"] {
+    cursor: pointer;
+  }
+
+  /* Prevent text selection on interactive elements (feels more app-like) */
+  button, [role="button"], a {
+    -webkit-touch-callout: none;
+    user-select: none;
+  }
+
+
+  /* The page canvas is paper (white / #1b1b19) on html, body and #root alike:
+     on a phone every screen sits on paper, and the app wrapper paints the
+     frame or paper above the safe-area inset per route (Raft DS foundations;
+     MainLayout shell). Cream belongs to the desktop sidebar only, so it must
+     not show through here. */
+  html {
+    height: 100%;
+    overflow: hidden;
+    background-color: var(--layer-canvas);
+  }
+
+  /* Prevent rubber-band bounce on desktop; mobile needs it for native-feeling scroll */
+  @media (hover: hover) {
+    html, body {
+      overscroll-behavior: none;
+    }
+  }
+
+  body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    font-family: var(--font-sans, var(--sans-font, system-ui, sans-serif));
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background-color: var(--layer-canvas);
+    color: var(--foreground);
+  }
+
+  /* #root is pinned to the visual viewport by trackVisualViewport() in
+     main.tsx, which writes #root's own inline height / top — only while the
+     software keyboard is up. Otherwise the rule below applies: 100dvh, the
+     dynamic viewport unit, which on iOS PWA standalone is the *real* visible
+     height (visualViewport.height reported a smaller value on real iPhones,
+     leaving a cream gap below). Never custom properties on :root for this:
+     every element inherits them, so each change restyled the whole document.
+     Two iOS-specific cases this handles:
+       (1) Mobile Safari translating position:fixed content upward when a
+           focused input needs to reach the visual viewport above the keyboard
+           — handled by the visualViewport override while the keyboard is up;
+       (2) PWA standalone mode where the layout viewport can be taller than
+           the visible webview — handled by 100dvh as the fallback. */
+  #root {
+    /* Task #15: fixed box + 100dvh for the no-keyboard path (PWA/safe-area).
+       When the soft keyboard is up, trackVisualViewport() sets an inline
+       height / top so the shell shrinks to the visual viewport (#5888/#725)
+       without reintroducing always-on JS pinning (which left a PWA bottom gap). */
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    /* Default: 100dvh for address/tool bar. Keyboard-up override: inline height. */
+    height: 100dvh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    /* Same paper as html/body: whatever no surface covers (a short page, the
+       strip under the keyboard-sized shell) shows one colour, not cream. */
+    background-color: var(--layer-canvas);
+  }
+
+  /* A fallback ring for focusable elements with no focus style of their own.
+     An element whose classes state one (`focus-visible:shadow-focus` on
+     raft-ui's controls, `focus-visible:bg-…` on menu rows) keeps it alone.
+     A data-slot is no marker: raft-ui's Badge rendered as a button has no
+     ring, and a Tooltip stamps its slot on a hand-rolled trigger. Every ring
+     follows raft-ui's input-modality gate: none after a click or a tap, a
+     ring after keyboard navigation (raft-design states.md › Focus). */
+  :root:not([data-input-modality="pointer"]) :focus-visible:not([class*="focus-visible:"]) {
+    outline: 2px solid var(--line-strong);
+    outline-offset: 2px;
+  }
+
+  /* Scrollbars: shared desktop treatment with native touch overlays.
+     stdrc 2026-05-20 #proj-uiux:d7e5c75b (task #282): "桌面端还是加回来滚动时
+     显示进度条吧，移动端本身就会有进度条". Reverts the 5/11 desktop-hide
+     rule. Desktop pointer devices keep a quiet 10px hit area around a 6px
+     thumb on a transparent track; scroller and thumb hover progressively
+     strengthen it. Touch devices stay on their platform overlay indicator.
+     Surfaces that need to opt out entirely (e.g. horizontal tab strips) use
+     Tailwind's `scrollbar-none` with `[&::-webkit-scrollbar]:hidden`. */
+  @media (hover: hover) and (pointer: fine) {
+    /* `scrollbar-color` is an INHERITED property. Changing it on the scroller
+       (`:hover` below) used to make every descendant recompute its style:
+       entering/leaving the message list or sidebar restyled ~10k elements
+       (up to 15k; 66 of 528 pointer moves across the window, measured on a
+       real busy channel). Children get a constant value instead of inheriting,
+       so the hover change stays on the scroller itself. Declared before the
+       `.scrollbar-quiet` rule so a nested `.scrollbar-quiet` scroller still
+       uses its own (equal specificity, later wins). */
+    .scrollbar-quiet > * {
+      scrollbar-color: color-mix(in oklch, var(--foreground) 24%, transparent) transparent;
+    }
+
+    .scrollbar-quiet {
+      scrollbar-color: color-mix(in oklch, var(--foreground) 24%, transparent) transparent;
+      scrollbar-width: thin;
+    }
+
+    .scrollbar-quiet:hover {
+      scrollbar-color: color-mix(in oklch, var(--foreground) 36%, transparent) transparent;
+    }
+
+    .scrollbar-quiet::-webkit-scrollbar {
+      width: 10px;
+    }
+
+    .scrollbar-quiet::-webkit-scrollbar-track,
+    .scrollbar-quiet::-webkit-scrollbar-corner {
+      background: transparent;
+    }
+
+    .scrollbar-quiet::-webkit-scrollbar-thumb {
+      min-height: 32px;
+      background: color-mix(in oklch, var(--foreground) 24%, transparent);
+      background-clip: padding-box;
+      border: 2px solid transparent;
+      border-radius: 5px;
+    }
+
+    .scrollbar-quiet:hover::-webkit-scrollbar-thumb {
+      background: color-mix(in oklch, var(--foreground) 36%, transparent);
+      background-clip: padding-box;
+      border: 2px solid transparent;
+    }
+
+    .scrollbar-quiet::-webkit-scrollbar-thumb:hover {
+      background: color-mix(in oklch, var(--foreground) 52%, transparent);
+      background-clip: padding-box;
+      border: 2px solid transparent;
+    }
+  }
+}
+
+@layer components {
+  .safe-top { padding-top: env(safe-area-inset-top); }
+  .safe-left { padding-left: env(safe-area-inset-left); }
+  .safe-right { padding-right: env(safe-area-inset-right); }
+
+  .overflow-y-overlay {
+    overflow-y: auto;
+  }
+
+  @supports (overflow: overlay) {
+    .overflow-y-overlay {
+      overflow-y: overlay;
+    }
+  }
+
+  @keyframes onboarding-connect-success-reveal {
+    0% { opacity: 0; transform: translateY(-4px); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes onboarding-runtime-reveal {
+    0% { opacity: 0; transform: translateY(-4px); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+
+  .onboarding-connect-success-reveal {
+    animation: onboarding-connect-success-reveal 160ms cubic-bezier(0.2, 0, 0.2, 1);
+  }
+
+  .onboarding-runtime-reveal {
+    animation: onboarding-runtime-reveal 160ms cubic-bezier(0.2, 0, 0.2, 1);
+  }
+
+  /* Phone tab bar (Kirby/Jasper 2026-10-20): it hides while the on-screen
+     keyboard is up and, when the keyboard closes, comes back with the
+     platform's slide-and-fade up instead of a jump: 200ms on the slide ease
+     (raft-ui's drawer motion). #root reads data-soft-keyboard="closed" only
+     briefly (utils/visualViewport.ts), so other mounts do not animate.
+     Reduced motion switches instantly. */
+  @keyframes mobile-tab-bar-return {
+    0% { opacity: 0; transform: translateY(100%); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+
+  [data-soft-keyboard="closed"] .mobile-tab-bar-return {
+    animation: mobile-tab-bar-return 200ms var(--ease-slide) both;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    [data-soft-keyboard="closed"] .mobile-tab-bar-return {
+      animation: none;
+    }
+  }
+
+  /* Phone full-screen dialog (NarrowDialog, stdrc 2026-10-21): it comes up
+     from the bottom edge like the platform's full-screen modal, on the slide
+     ease (raft-ui's drawer motion). Reduced motion: it is simply there. */
+  @keyframes narrow-dialog-enter {
+    0% { transform: translateY(100%); }
+    100% { transform: translateY(0); }
+  }
+
+  .narrow-dialog-enter {
+    animation: narrow-dialog-enter 280ms var(--ease-slide);
+  }
+
+  /* The scrim behind a phone sheet fades in over the same time and ease as the
+     sheet slides (Jasper, 2026-10-21): the scrim moves with the layer it
+     belongs to, as raft-ui's Drawer overlay does. Colour and opacity stay the
+     shared backdrop. Covers slock's own sheet scrim and raft-ui Dialog's
+     overlay when its content is a sheet. */
+  @keyframes narrow-scrim-enter {
+    0% { opacity: 0; }
+    100% { opacity: 1; }
+  }
+
+  .narrow-scrim-enter,
+  [data-slot="dialog-portal"]:has([data-narrow="sheet"]) [data-slot="dialog-overlay"] {
+    animation: narrow-scrim-enter 280ms var(--ease-slide);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .narrow-dialog-enter,
+    .narrow-scrim-enter,
+    [data-slot="dialog-portal"]:has([data-narrow="sheet"]) [data-slot="dialog-overlay"] {
+      animation: none;
+    }
+  }
+
+  /* Bulk Change model dialog (task #1287): steps 3/4/5a share one fixed shell;
+     the body slides 16px and fades in. Reduced motion switches instantly. */
+  @keyframes bulk-model-step-in {
+    0% { opacity: 0; transform: translateX(16px); }
+    100% { opacity: 1; transform: translateX(0); }
+  }
+
+  .bulk-model-step {
+    animation: bulk-model-step-in 200ms ease-out;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .bulk-model-step {
+      animation: none;
+    }
+  }
+
+  @keyframes notification-activation-progress {
+    from { width: 100%; }
+    to { width: 0%; }
+  }
+
+  .notification-activation-progress {
+    animation: notification-activation-progress 3000ms linear forwards;
+  }
+
+  @keyframes notification-activation-dismiss-timer {
+    from { opacity: 0; }
+    to { opacity: 0; }
+  }
+
+  .notification-activation-dismiss-timer {
+    animation: notification-activation-dismiss-timer 3000ms linear forwards;
+  }
+
+  @keyframes onboarding-preview-pop {
+    0% {
+      transform: rotate(var(--onboarding-pop-rotate, 0deg)) translateY(1px) scale(0.96);
+      box-shadow: 2px 2px 0 #141111;
+    }
+    48% {
+      transform: rotate(var(--onboarding-pop-rotate, 0deg)) translateY(-1px) scale(1.14);
+      box-shadow: 4px 4px 0 #141111;
+    }
+    100% {
+      transform: rotate(var(--onboarding-pop-rotate, 0deg)) translateY(0) scale(1);
+      box-shadow: 2px 2px 0 #141111;
+    }
+  }
+
+  .onboarding-preview-pop {
+    animation: onboarding-preview-pop 180ms cubic-bezier(0.2, 0, 0.2, 1);
+    transform-origin: center;
+  }
+
+  @keyframes onboarding-live-message {
+    0% {
+      opacity: 0;
+      transform: translateY(6px) scale(0.98);
+    }
+    64% {
+      opacity: 1;
+      transform: translateY(-1px) scale(1.02);
+    }
+    100% {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  .onboarding-live-message {
+    animation: onboarding-live-message 240ms cubic-bezier(0.2, 0, 0.2, 1);
+    transform-origin: left bottom;
+  }
+
+  @keyframes onboarding-identity-pop {
+    0% {
+      transform: scale(1);
+    }
+    40% {
+      transform: scale(1.16);
+    }
+    100% {
+      transform: scale(1);
+    }
+  }
+
+  .onboarding-identity-pop {
+    animation: onboarding-identity-pop 300ms cubic-bezier(0.2, 0, 0.2, 1);
+    transform-origin: center;
+  }
+
+  @keyframes onboarding-identity-card-enter {
+    0% {
+      opacity: 0;
+      transform: rotate(var(--identity-card-rotate, 0deg)) translateY(12px) scale(0.96);
+    }
+    56% {
+      opacity: 1;
+      transform: rotate(var(--identity-card-rotate, 0deg)) translateY(-2px) scale(1.04);
+    }
+    100% {
+      opacity: 1;
+      transform: rotate(var(--identity-card-rotate, 0deg)) translateY(0) scale(1);
+    }
+  }
+
+  .onboarding-identity-card-enter {
+    animation: onboarding-identity-card-enter 240ms cubic-bezier(0.2, 0, 0.2, 1) both;
+    animation-delay: var(--identity-card-delay, 0ms);
+    transform-origin: center;
+  }
+
+  @keyframes onboarding-cindy-hop {
+    0% {
+      opacity: 0;
+      transform: translateY(-72px) rotate(-5deg) scale(1);
+    }
+    12% {
+      opacity: 1;
+    }
+    30% {
+      transform: translateY(0) rotate(0deg) scale(1.12, 0.86);
+    }
+    44% {
+      transform: translateY(-24px) rotate(2deg) scale(0.94, 1.08);
+    }
+    60% {
+      transform: translateY(0) rotate(0deg) scale(1.08, 0.92);
+    }
+    76% {
+      transform: translateY(-8px) scale(0.98, 1.03);
+    }
+    90% {
+      transform: translateY(0) scale(1.02, 0.98);
+    }
+    100% {
+      opacity: 1;
+      transform: translateY(0) scale(1) rotate(0deg);
+    }
+  }
+
+  .onboarding-cindy-entrance {
+    animation: onboarding-cindy-hop 580ms cubic-bezier(0.2, 0, 0.2, 1) both;
+    transform-origin: center bottom;
+  }
+  @keyframes onboarding-pop-mark {
+    0%, 42% {
+      opacity: 0;
+      transform: scale(0) rotate(-8deg);
+    }
+    62% {
+      opacity: 1;
+      transform: scale(1.12) rotate(3deg);
+    }
+    100% {
+      opacity: 0;
+      transform: scale(0.86) rotate(8deg);
+    }
+  }
+
+  .onboarding-cindy-pop-mark {
+    animation: onboarding-pop-mark 580ms cubic-bezier(0.2, 0, 0.2, 1) both;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .onboarding-connect-success-reveal,
+    .onboarding-runtime-reveal {
+      animation: none;
+    }
+    .notification-activation-progress {
+      animation: none;
+      width: 100%;
+    }
+    .onboarding-preview-pop,
+    .onboarding-live-message,
+    .onboarding-identity-pop,
+    .onboarding-identity-card-enter,
+    .onboarding-cindy-entrance,
+    .onboarding-cindy-pop-mark {
+      animation: none;
+    }
+  }
+
+  .image-transparency-bg {
+    background-color: #fff;
+    background-image:
+      linear-gradient(45deg, rgba(20, 17, 17, 0.12) 25%, transparent 25%),
+      linear-gradient(-45deg, rgba(20, 17, 17, 0.12) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, rgba(20, 17, 17, 0.12) 75%),
+      linear-gradient(-45deg, transparent 75%, rgba(20, 17, 17, 0.12) 75%);
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+    background-size: 16px 16px;
+  }
+
+  .image-gallery-bg {
+    background: #fff;
+  }
+}
+
+@layer utilities {
+  /* Keep one bottom rhythm across every surface, then add the device inset. */
+  .safe-bottom { padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 1rem); }
+  /* task #1187: compact action bars (e.g. select-mode toolbar) stay optically
+     symmetric on desktop — only the device inset lifts them. Touch devices
+     keep the 1rem thumb rhythm of .safe-bottom. */
+  .safe-bottom-action-bar { padding-bottom: env(safe-area-inset-bottom, 0px); }
+  @media (pointer: coarse) {
+    .safe-bottom-action-bar { padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 1rem); }
+  }
+
+  /* Stacked overlays (raft-design elevation, stdrc and Jasper 2026-10-21): a
+     raft-ui Dialog, AlertDialog or Drawer opened over a slock Modal draws the
+     lighter nested scrim, as it does over another raft-ui overlay. raft-ui
+     keeps its overlay stack private, so this keys on the document instead: an
+     overlay whose portal comes after an open Modal's scrim was opened over it.
+     Kept in step with NESTED_RAFT_OVERLAY_SELECTOR (components/ui/scrim.ts). */
+  :is([data-slot="modal-backdrop"], [data-slot="modal-narrow-scrim"]) ~ * :is([data-slot="dialog-overlay"], [data-slot="alert-dialog-overlay"], [data-slot="drawer-overlay"]):not([data-nested]) {
+    background-color: var(--color-layer-backdrop-nested);
+  }
+}
+
+/* Responsive high-frequency actions use the width of their owning surface,
+   not a viewport breakpoint. This keeps narrow desktop drawers readable
+   while preserving the same affordance on phones. */
+.channel-file-row {
+  container-type: inline-size;
+}
+
+.agent-profile-header-container {
+  container-type: inline-size;
+}
+
+.agent-profile-responsive-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.agent-profile-responsive-actions .agent-profile-inline-actions {
+  display: flex;
+}
+
+.agent-profile-responsive-actions .agent-profile-overflow-actions {
+  display: none;
+}
+
+/* The profile drawer is commonly ~600px wide even on a very wide desktop
+   viewport. Keep its compact icon actions visible there; reserve the menu
+   for genuinely narrow drawers and phones. */
+@container (max-width: 480px) {
+  .agent-profile-responsive-actions .agent-profile-inline-actions {
+    display: none;
+  }
+
+  .agent-profile-responsive-actions .agent-profile-overflow-actions {
+    display: flex;
+  }
+}
+
+.channel-file-responsive-actions {
+  display: flex;
+  align-items: center;
+}
+
+.channel-file-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.channel-file-overflow-actions {
+  display: none;
+}
+
+@container (max-width: 560px) {
+  .channel-file-inline-actions {
+    display: none;
+  }
+
+  .channel-file-overflow-actions {
+    display: flex;
+  }
+}
+
+/* A side thread is only useful when both the shell and the actual chat row can
+   support two readable panes. The rail and sidebar are outside this named
+   container, so the 720px threshold (the channel's 360px minimum plus the
+   thread's, lib/panelBounds.ts) measures usable content width instead of
+   guessing it from the viewport. Portrait phone/tablet shells stay thread-only
+   below xl even when their full-width row happens to clear that bare geometric
+   minimum (iPad mini is 744px wide in portrait). Keep browser resize CSS-only:
+   crossing either boundary does not run a React resize listener or disturb
+   timeline anchoring. */
+.thread-layout-container {
+  container-type: inline-size;
+  container-name: thread-layout;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.thread-side-column-resizer {
+  display: none;
+}
+
+/* A side section's head (task #165): its buttons stand above the grip's
+   96x24 target where the two meet (a narrow thread's followers button), so a
+   press on a button is the button's, never a drag. */
+[data-side-head] [data-slot="panel-actions"] {
+  position: relative;
+  z-index: 40;
+}
+
+/* A press on the head that misses the grip moves nothing, and it doesn't
+   select the head's title either (Kirby): the head is the section's chrome.
+   The section's content below it stays selectable. */
+[data-side-head] {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Sections stacked in the thread's column (task #165): the thread shares the
+   column's height with them by its share (ChannelSideArea useStack), and
+   folds to its head like they do. */
+.thread-side-column[data-side-stacked="true"] > [data-slot="thread-panel-root"] {
+  height: auto;
+  min-height: 0;
+  flex: var(--side-thread-flex, 1 1 0px);
+  /* The column draws the left seam for all its sections (below). */
+  border-left-width: 0;
+}
+
+.thread-side-column[data-side-stacked="true"] {
+  border-left: 1px solid var(--line-seam);
+}
+
+/* A section dragged into the thread's column opens a gap beside its panel
+   (sideSectionDrag): alone, the panel draws the column's left seam, so the
+   gap draws it too. */
+.thread-side-column:not([data-side-stacked="true"]) > [data-testid="side-section-drop-slot"] {
+  border-left: 1px solid var(--line-seam);
+}
+
+.thread-layout-container:not([data-thread-maximized="true"]) > .thread-side-column[data-thread-collapsed="true"] > [data-slot="thread-panel-root"] {
+  flex: 0 0 auto;
+}
+
+.thread-layout-container:not([data-thread-maximized="true"]) > .thread-side-column[data-thread-collapsed="true"] > [data-slot="thread-panel-root"] > :not([data-slot="panel-header"]) {
+  display: none;
+}
+
+/* In Focus Mode the thread fills the row alone: nothing to fold it against. */
+.thread-layout-container[data-thread-maximized="true"] [data-testid="thread-side-collapse"] {
+  display: none;
+}
+
+/* Columns after the channel stand in their layout's order (ChannelSideArea
+   sets the thread's and the sections' columns from 10); a profile or another
+   panel keeps its place right of them all. */
+.thread-layout-container > :not(.thread-main-column):not(.thread-side-column):not([data-testid="channel-side-slot"]),
+.thread-layout-container > .thread-profile-side-column > * {
+  order: 50;
+}
+
+/* While a side section is dragged (sideSectionDrag), nothing in the row
+   answers the pointer: no hover highlight, toolbar or tooltip under the hand
+   (the cursor is still raft-ui's grabbing). The drag reads the pointer from
+   the document, so the places still follow it. */
+.thread-layout-container[data-side-dragging] * {
+  pointer-events: none !important;
+}
+
+/* Task v2's Tasks and Files column in the row (task #165): it gives way
+   before the conversation drops under its 360px, as the thread does. */
+.thread-layout-container:has(> [data-testid="channel-side-slot"] [data-mode="beside"]) > .thread-main-column {
+  min-width: 360px;
+}
+
+/* With another floating over the messages, the channel keeps room for it and
+   for readable messages beside it (280 + 240; ChannelSideArea placeSections). */
+.thread-layout-container:has(> [data-testid="channel-side-slot"] [data-mode="beside"]):has([data-testid="channel-side-float-slot"] [data-mode="float"]) > .thread-main-column {
+  min-width: 520px;
+}
+
+.thread-layout-container:has(> .thread-side-column) > .thread-main-column {
+  display: none;
+}
+
+/* When a profile is opened from the side thread, the channel is temporarily
+   folded out of the row.  The profile wrapper is `display: contents`, so the
+   two real surfaces remain direct flex children: Thread on the left and
+   Profile on the right.  Removing the profile marker restores the ordinary
+   Channel | Thread row without remounting either surface. */
+.thread-profile-side-column {
+  display: contents;
+}
+
+.thread-side-column {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+}
+
+.thread-side-column [data-testid="thread-mobile-back"] {
+  display: flex;
+}
+
+.thread-side-column [data-testid="thread-close"] {
+  display: none;
+}
+
+/* Every divider between panes belongs to the pane on its right, and the pane
+   that is first in the row draws none: the sidebar already owns that edge
+   (task #683). The thread panel's own left border is the Channel | Thread
+   divider, so it is dropped whenever the thread is first — the thread-only
+   modes below, and the folded-channel split further down. */
+@container thread-layout (max-width: 719.98px) {
+  .thread-side-column > [data-slot="thread-panel-root"] {
+    border-left-width: 0;
+  }
+}
+
+@media (orientation: portrait) and (max-width: 1279.98px) {
+  .thread-side-column > [data-slot="thread-panel-root"] {
+    border-left-width: 0;
+  }
+}
+
+/* Landscape viewports can use two panes as soon as the real row fits them.
+   Portrait viewports intentionally wait until xl: all current iPads remain a
+   single readable thread surface in portrait, while wide portrait desktop
+   displays can still use the desktop split. */
+@media (orientation: landscape), (min-width: 1280px) {
+  @container thread-layout (min-width: 720px) {
+    .thread-layout-container:has(> .thread-side-column) > .thread-main-column {
+      display: flex;
+    }
+
+    .thread-side-column {
+      position: relative;
+      inset: auto;
+      z-index: auto;
+      flex-shrink: 0;
+      width: var(--thread-panel-width);
+      max-width: calc(100% - 360px);
+    }
+
+    .thread-side-column-resizer {
+      display: block;
+    }
+
+    .thread-side-column [data-testid="thread-mobile-back"] {
+      display: none;
+    }
+
+    .thread-side-column [data-testid="thread-close"] {
+      display: flex;
+    }
+
+    /* The thread's column covering the channel (task #165; stdrc and Kirby,
+       2026-10-26): the row has no room for the channel's 360px beside the
+       side columns at their minimums (ChannelSideArea placeSections). The
+       column takes the channel's place, the sections stacked in it with it,
+       and fills what the other columns leave; it covers the channel, so Back
+       instead of × (DS Navigation, Closing). The channel keeps its box at its
+       360px, hidden and inert under the column, so its scroll position and
+       drafts are as they were when it comes back. */
+    .thread-layout-container:has(> .thread-side-column[data-covers]) > .thread-main-column {
+      position: absolute;
+      inset-block: 0;
+      left: 0;
+      width: 360px;
+      visibility: hidden;
+      pointer-events: none;
+    }
+
+    .thread-side-column[data-covers] {
+      flex: 1 1 0px;
+      width: auto;
+      min-width: 360px;
+      max-width: none;
+    }
+
+    .thread-side-column[data-covers] > .thread-side-column-resizer {
+      display: none;
+    }
+
+    .thread-side-column[data-covers] [data-testid="thread-mobile-back"] {
+      display: flex;
+    }
+
+    .thread-side-column[data-covers] [data-testid="thread-close"] {
+      display: none;
+    }
+  }
+}
+
+/* Covering and first in the row, the thread's column draws no left edge: the
+   sidebar already has it. Behind a column the person put left of it, it keeps
+   its seam, as beside the channel. */
+.thread-side-column[data-covers="first"],
+.thread-side-column[data-covers="first"] > [data-slot="thread-panel-root"] {
+  border-left-width: 0;
+}
+
+/* ProfilePanel switches from an absolute mobile surface to an inline desktop
+   pane at Tailwind's lg (1024px) breakpoint.  Keep the reversible split on
+   that same breakpoint; a narrow landscape tablet still gets the mobile-style
+   profile cover instead of a squeezed Thread | Profile pair. The row splits at
+   the same 720px as Channel | Thread, so the Thread | Profile pair never meets a
+   row where the thread is still in its thread-only (absolute) mode. */
+@media (min-width: 1024px) {
+  @container thread-layout (min-width: 720px) {
+    .thread-layout-container:has(> .thread-profile-side-column[data-collapse-channel="true"]) > .thread-main-column {
+      display: none;
+    }
+
+    .thread-layout-container:has(> .thread-profile-side-column[data-collapse-channel="true"]) > .thread-side-column {
+      flex: 1 1 auto;
+      min-width: 0;
+      width: auto;
+      max-width: none;
+    }
+
+    /* The channel is folded, so the thread is first in the row: the sidebar
+       already draws that edge, and the profile owns the divider on its right. */
+    .thread-layout-container:has(> .thread-profile-side-column[data-collapse-channel="true"]) > .thread-side-column > [data-slot="thread-panel-root"] {
+      border-left-width: 0;
+    }
+
+    .thread-layout-container:has(> .thread-profile-side-column[data-collapse-channel="true"]) > .thread-profile-side-column > :is([data-testid="profile-panel"], [data-profile-panel-fallback]) {
+      position: relative;
+      inset: auto;
+      z-index: auto;
+      flex: 0 0 auto;
+      min-width: 0;
+      max-width: calc(100% - 360px);
+      overflow: hidden;
+      border-left: 1px solid var(--line-seam);
+    }
+
+
+    /* A Channel avatar opens Profile without leaving the Channel. In the
+       existing Channel + Thread row, fold only the retained Thread pane; the
+       same Profile pane geometry is reused for both entry sources. */
+    .thread-layout-container:has(> .thread-profile-side-column[data-collapse-thread="true"]) > .thread-main-column {
+      display: flex;
+    }
+
+    .thread-layout-container:has(> .thread-profile-side-column[data-collapse-thread="true"]) > .thread-side-column {
+      display: none;
+    }
+
+    .thread-layout-container:has(> .thread-profile-side-column[data-collapse-thread="true"]) > .thread-profile-side-column > :is([data-testid="profile-panel"], [data-profile-panel-fallback]) {
+      position: relative;
+      inset: auto;
+      z-index: auto;
+      flex: 0 0 auto;
+      min-width: 0;
+      max-width: calc(100% - 360px);
+      overflow: hidden;
+      border-left: 1px solid var(--line-seam);
+    }
+
+
+    /* Chat | Profile with no thread in the row. The profile pane owns the one
+       divider on its own box, so nothing inside the chat column (the composer
+       bar stacks above the resize handle) can cover it, and the chat keeps a
+       readable width instead of shrinking to a strip. */
+    .thread-layout-container:has(> .thread-profile-side-column[data-collapse-channel="false"][data-collapse-thread="false"]) > .thread-profile-side-column > :is([data-testid="profile-panel"], [data-profile-panel-fallback]) {
+      max-width: calc(100% - 360px);
+      border-left: 1px solid var(--line-seam);
+    }
+
+  }
+
+  /* Too narrow for two readable panes: fold the conversation away and let the
+     profile take the row, next to the sidebar, which already draws that edge. */
+  @container thread-layout (max-width: 719.98px) {
+    .thread-layout-container:has(> .thread-profile-side-column) > .thread-main-column,
+    .thread-layout-container:has(> .thread-profile-side-column) > .thread-side-column {
+      display: none;
+    }
+
+    .thread-layout-container:has(> .thread-profile-side-column) > .thread-profile-side-column > :is([data-testid="profile-panel"], [data-profile-panel-fallback]) {
+      /* ProfilePanel sets width/flex inline for its resizable desktop size. */
+      flex: 1 1 auto !important;
+      width: auto !important;
+      max-width: none;
+      min-width: 0;
+      border-left: 0;
+    }
+
+    /* The profile fills the row here, so its width does not apply: no handle. */
+    .thread-layout-container:has(> .thread-profile-side-column) > .thread-profile-side-column > [data-testid="profile-panel"] > [data-slot="column-resize-handle"] {
+      display: none;
+    }
+
+    /* The legacy task side panel folds the same way rather than going under
+       its 320px minimum beside a conversation squeezed below 360px. */
+    .thread-layout-container:has(> :is([data-testid="legacy-task-panel"], [data-legacy-task-panel-fallback])) > .thread-main-column {
+      display: none;
+    }
+
+    .thread-layout-container > :is([data-testid="legacy-task-panel"], [data-legacy-task-panel-fallback]) {
+      /* LegacyTaskPanel sets its resizable desktop width inline. */
+      flex: 1 1 auto;
+      width: auto !important;
+      max-width: none;
+      border-left-width: 0;
+    }
+
+    .thread-layout-container > [data-testid="legacy-task-panel"] > [data-slot="column-resize-handle"] {
+      display: none;
+    }
+  }
+}
+
+/* Thread | Profile with the channel folded: the thread takes the rest of the
+   row, so its own width does not apply and its handle would sit on the same
+   seam as the sidebar's. Only the sidebar's handle is offered there. */
+.thread-layout-container:has(> .thread-profile-side-column[data-collapse-channel="true"]) > .thread-side-column > .thread-side-column-resizer {
+  display: none;
+}
+
+
+@layer base {
+  /* Raft Design System: a text selection is painted with its own token
+     (raft-ui 0.23 `--selection`): brand-soft in light mode, brand at 22% in
+     dark, where brand-soft was too faint to see what was selected. brand-soft
+     stays the menu highlight. */
+  ::selection {
+    background-color: var(--selection);
+  }
+}
+
+/* Shiki retains both palettes so mode changes recolor existing token nodes. */
+:root.dark {
+  --color-code-surface: #0a0c10;
+  --color-code-foreground: #f0f3f6;
+}
+
+.r-code-token {
+  color: var(--shiki-light-color, inherit);
+}
+
+:root.dark .r-code-token {
+  color: var(--shiki-dark-color, inherit);
+}
+
+.r-code-copy {
+  color: var(--color-code-foreground);
+  opacity: 0;
+}
+
+.group:hover .r-code-copy,
+.r-code-copy:focus-visible {
+  opacity: 0.55;
+}
+
+.r-code-copy:hover,
+.r-code-copy.r-code-copy--copied {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .r-code-copy { opacity: 0.55; }
+}
+
+/* Touch: a long-press anywhere on a message opens the message menu, so the
+   browser must not also select its text. Android Chrome otherwise selects the
+   word and raises its search/translate bar under our menu (task #50); whole-
+   message copy lives in the menu. Only rows that have the menu
+   (data-touch-menu; read-only rows keep native selection). Unlayered +
+   !important so it wins over the body's inline user-select and the
+   select-text utilities; fields stay editable. External links keep the
+   browser's link callout: MessageItem leaves their long-press to the browser. */
+@media (hover: none) {
+  [data-touch-menu="true"],
+  [data-touch-menu="true"] *:not(input, textarea, [contenteditable="true"], [contenteditable="true"] *) {
+    -webkit-touch-callout: none !important;
+    -webkit-user-select: none !important;
+    user-select: none !important;
+  }
+
+  [data-touch-menu="true"] a[target="_blank"] {
+    -webkit-touch-callout: default !important;
+  }
+}
+
+/* RUI's tooltip positioner (the `isolate z-50` wrapper around the bubble) has
+   no pointer-events guidance, so an open tooltip swallows hover/clicks aimed
+   at whatever it covers — header action rows, sidebar rows, chips. Our
+   tooltips are text-only, so keep the whole tooltip layer inert; if a future
+   tooltip needs interactive content, re-enable pointer events on that one
+   content element explicitly. */
+[data-slot="tooltip-portal"],
+[data-slot="tooltip-portal"] > * {
+  pointer-events: none;
+}
+
+/* Keep both columns in flow at their ordinary widths. Only the thread
+   surface overlays the row; hidden channel geometry never changes on toggle. */
+@media (orientation: landscape), (min-width: 1280px) {
+  @container thread-layout (min-width: 720px) {
+    .thread-layout-container[data-thread-maximized="true"] { position: relative; }
+    .thread-layout-container[data-thread-maximized="true"] > .thread-main-column,
+    .thread-layout-container[data-thread-maximized="true"] > [data-testid="channel-side-slot"] > *,
+    .thread-layout-container[data-thread-maximized="true"] > .thread-side-column > :is([data-card], [data-side-seam]) {
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .thread-layout-container[data-thread-maximized="true"] > .thread-side-column {
+      position: static;
+    }
+    .thread-layout-container[data-thread-maximized="true"] > .thread-side-column > .thread-side-column-resizer {
+      display: none;
+    }
+    .thread-layout-container[data-thread-maximized="true"] > .thread-side-column > [data-slot="thread-panel-root"] {
+      position: absolute;
+      inset: 0;
+      z-index: 30;
+      border-left-width: 0;
+    }
+  }
+}

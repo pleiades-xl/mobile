@@ -1,0 +1,36 @@
+id: channel-create
+title: "频道管理-创建新频道"
+goal: "验证创建新频道功能正常，频道出现在列表中"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+verdict_before_cleanup: true
+assertions:
+  - id: channel-in-list
+    goal: "新创建的频道出现在频道列表"
+    type: text_present
+    severity: critical
+android:
+  device: { type: emulator, api_level: 34 }
+  steps:
+    - goal: "点击 CHANNELS 区头右侧的 + 按钮"
+      capture: [screenshot]
+    - goal: "输入频道名 qa-test-create-XYZ"
+      capture: [screenshot]
+    - goal: "确认创建"
+      capture: [screenshot]
+    - goal: "验证频道出现在列表"
+      capture: [screenshot]
+ios:
+  device: { type: ios-simulator, device_name: "iPhone 14" }
+  steps:
+    - goal: "点击 CHANNELS 区头右侧的 + 按钮"
+      capture: [screenshot]
+    - goal: "输入频道名"
+      hint: "用屏幕键盘"
+      capture: [screenshot]
+    - goal: "确认创建"
+      capture: [screenshot]
+    - goal: "验证频道出现在列表"
+      capture: [screenshot]

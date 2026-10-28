@@ -1,0 +1,45 @@
+name: Stamp failure diagnosis (independent agent)
+
+on:
+  workflow_dispatch:
+    inputs:
+      stamp_run_case_id:
+        description: "Terminal Stamp run_case requiring evidence-only diagnosis"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Diagnose immutable attempt
+        env:
+          STAMP_RUN_CASE_ID: ${{ inputs.stamp_run_case_id }}
+          STAMP_URL: ${{ secrets.STAMP_URL }}
+          STAMP_REVIEW_TOKEN: ${{ secrets.STAMP_REVIEW_TOKEN }}
+          PI_API_KEY: ${{ secrets.PI_API_KEY }}
+          MINIMAX_API_KEY: ${{ secrets.PI_API_KEY }}
+          QWEN_TOKEN_PLAN_CN_API_KEY: ${{ secrets.QWEN_TOKEN_PLAN_CN_API_KEY }}
+          PI_PROVIDER: ${{ vars.PI_REVIEW_PROVIDER || 'minimax' }}
+          PI_MODEL: ${{ vars.PI_REVIEW_MODEL || 'MiniMax-M3.1-Flash-Preview' }}
+          SLOCK_PI_AI_MODULE: ${{ runner.temp }}/agent-review/node_modules/@earendil-works/pi-ai/dist/providers/all.js
+        run: |
+          mkdir -p "$RUNNER_TEMP/agent-review"
+          npm install --prefix "$RUNNER_TEMP/agent-review" --no-save @earendil-works/pi-ai@0.81.1
+          node scripts/qa/failure_diagnosis_agent.mjs --run-case-id "$STAMP_RUN_CASE_ID" --out failure-diagnosis.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: failure-diagnosis-${{ inputs.stamp_run_case_id }}
+          path: |
+            failure-diagnosis.json
+            model-capacity.jsonl
+          if-no-files-found: warn

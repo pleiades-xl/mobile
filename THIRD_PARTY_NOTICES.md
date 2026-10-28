@@ -1,0 +1,80 @@
+# Third-party notices — Raft Mobile
+
+Raft Mobile is licensed under FSL-1.1-ALv2 (see LICENSE). That grant covers Botiverse's own code only.
+The components below are third-party works used under their own licenses. Licenses were read from the
+published package metadata (Maven POM `<licenses>`, npm registry `license`, CocoaPods trunk spec);
+"vendored" means source is copied into this repository under `third_party/`.
+
+## Vendored source (third_party/)
+| Path | Upstream | Version / commit | License |
+| --- | --- | --- | --- |
+| third_party/markdown-parser | JetBrains/markdown (via botiverse/jetbrains-markdown fork raft/0.7.5-mobile) | 0.7.5, upstream 52368fb1, fork 295290f8 | Apache-2.0 (LICENSE present) |
+| third_party/kuikly-compose-markdown | Kuikly-contrib/kuikly-compose-markdown (com.tencent.kuiklybase:markdown 0.4.0 sources) + embedded JetBrains/Saket Narayan Apache-2.0 files | 0.4.0 / 0.3.0-ohos | KuiklyUI license (Tencent) for Kuikly-authored files; Apache-2.0 for JetBrains (42 files) and Saket Narayan (6 files) |
+
+## Git submodules (not vendored; referenced by URL)
+| Path | Repository | License |
+|---|---|---|
+
+## Build-time dependencies — Maven (Android / KMP)
+| Component | Version | License |
+|---|---|---|
+| com.tencent.kuikly-open:core / compose / core-render-android / core-annotations / core-ksp (Botiverse-built fork on maven.artifacts.botiverse.dev) | 2.28.0-raft.15-2.1.21 | KuiklyUI license — MIT-style grant; prohibits derivative work for dynamic code loading / live update without Tencent consent (Raft Mobile adds none) |
+| com.tencent.kuiklybase:network | 0.1.0-raft.47 | Apache-2.0 |
+| com.tencent.kuiklybase:resource-core | 0.1.0-raft.5 | Apache-2.0 |
+| build.raft.kuiklybase:datetime | 0.1.0-raft.0 | Apache-2.0 |
+| build.raft.mermaid:mermaid-core / mermaid-layout-api / mermaid-layout-simple / mermaid-compose | 0.1.14 | Apache-2.0 |
+| org.jetbrains.kotlinx:kotlinx-coroutines-core / -test | 1.7.3 | Apache-2.0 |
+| org.jetbrains.kotlinx:kotlinx-serialization-json | 1.6.2 | Apache-2.0 |
+| org.jetbrains.kotlinx:atomicfu | 0.25.0 | Apache-2.0 |
+| androidx.* (core-ktx 1.10.1, core-splashscreen 1.0.1, webkit 1.14.0, lifecycle-runtime-ktx 2.6.1, window 1.3.0, metrics-performance 1.0.0, activity-compose 1.8.0, compose BOM 2024.12.01 / runtime 1.8.3 / ui / material / material3, recyclerview 1.3.2, credentials 1.6.0 (+ play-services-auth), media3 1.6.1, profileinstaller 1.4.1) | as listed | Apache-2.0 |
+| com.google.android.libraries.identity.googleid:googleid | 1.2.0 | **Android Software Development Kit License** (binary SDK; depend-only, do not redistribute the artifact in the repo) |
+| com.google.firebase:firebase-bom / firebase-messaging | 34.15.0 / 25.0.1 | Apache-2.0 (BOM itself declares none) |
+| com.squareup.okhttp3:okhttp | 4.12.0 | Apache-2.0 |
+| com.google.code.gson:gson | 2.11.0 | Apache-2.0 |
+| io.socket:socket.io-client | 2.1.2 | MIT |
+| app.cash.sqldelight:runtime / android-driver / native-driver / sqlite-driver / coroutines-extensions | 2.4.1 | Apache-2.0 |
+| com.caverock:androidsvg-aar | 1.4 | Apache-2.0 |
+| com.tencent:mmkv | 2.4.0 | BSD-3-Clause |
+| org.jetbrains:markdown (coordinate reference only; sources vendored) | 0.7.5 | Apache-2.0 |
+| io.github.huarangmeng:latex-renderer / latex-parser / latex-base (message math) | 1.6.1 | MIT |
+| dev.snipme:highlights (message code block syntax colours) | 1.1.0 | Apache-2.0 |
+| org.mobilenativefoundation.store:store5 (+ core5 / cache5 / multicast5; offline-first resources) | 5.1.0-beta01 | Apache-2.0 |
+| co.touchlab:kermit (transitive, via store5) | 2.1.0 | Apache-2.0 |
+| KaTeX fonts (`compose/designsystem/src/commonMain/composeResources/font/katex_*.ttf`, from the `katex` npm package) | 0.19.0 | MIT |
+| Test-only: junit 4.13.2 (EPL-1.0), androidx.test.* (Apache-2.0), org.robolectric:robolectric 4.14.1 (MIT), androidx.benchmark / uiautomator (Apache-2.0) | — | as listed |
+| Gradle plugins: AGP 8.13.2, Kotlin 2.1.21, KSP, Compose plugin 1.7.3, SQLDelight 2.4.1, google-services 4.5.0 | — | Apache-2.0 (google-services plugin: Apache-2.0) |
+
+## iOS — CocoaPods
+| Pod | Version | License |
+|---|---|---|
+| OpenKuiklyIOSRender (Botiverse-built podspec) | 2.28.0-raft.15-2.1.21 | KuiklyUI license |
+| Hands (oranix-io/hands, tag ios-v0.2.1) | 0.2.1 | MIT |
+| MMKV / MMKVCore | 2.4.0 | BSD-3-Clause |
+| SDWebImage | 5.21.7 | MIT |
+| SDWebImageSVGCoder | 1.8.0 | MIT |
+| Socket.IO-Client-Swift | 16.1.1 | MIT |
+| Starscream | 4.0.8 | Apache-2.0 |
+
+## Tooling — npm (compose/package.json; dev/CI only, not shipped)
+MIT: console-error, console-info, console-warn, koa, koa-bodyparser, koa-router, koa-static, koa-whistle, mime-types, uuid, yargs, file-loader, gulp, gulp-zip, husky, querystring, shell · BSD-3-Clause: md5, shelljs · Unlicense: big-integer.
+
+## Bundled font assets (compose/androidApp, compose/iosApp, compose/designsystem)
+| Family | Weights | Upstream | License |
+| --- | --- | --- | --- |
+| Space Grotesk | 300/400/500/600/700 (+variable) | google/fonts ofl/spacegrotesk — https://fonts.googleapis.com/css2?family=Space+Grotesk | SIL OFL 1.1 (`compose/androidApp/SpaceGrotesk-OFL.txt`) |
+| Space Mono | 400/700 | google/fonts ofl/spacemono — https://fonts.googleapis.com/css2?family=Space+Mono | SIL OFL 1.1 (`compose/androidApp/SpaceMono-OFL.txt`) |
+
+Details: `compose/androidApp/FONTS-PROVENANCE.md`.
+
+## Bundled icon data (compose/designsystem)
+| Source | Use | License |
+| --- | --- | --- |
+| Lucide (lucide.dev) | SVG path data of 8 icons drawn by `RaftGlyph` (chevron-right, info, triangle-alert, octagon-alert, circle-check, at-sign, plus, copy) | ISC |
+
+## Copyleft check
+No GPL / LGPL / AGPL / MPL component found in any ecosystem. EPL-1.0 (junit) is test-only. The only non-OSI terms are the KuiklyUI license (permissive + no-hot-update clause) and Google's Android SDK license (binary dependency).
+
+## Scope
+
+This list covers direct dependencies pinned in the version catalog, build files, and Podfile.lock. Transitive dependencies inherit the licenses of their ecosystems above and are
+enumerated by the build tooling (Gradle license report, CocoaPods acknowledgements).

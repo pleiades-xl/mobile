@@ -1,0 +1,30 @@
+id: channel-share-link
+title: "频道分享-获取分享/邀请链接"
+goal: "验证频道设置页能找到分享/邀请链接功能"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+assertions:
+  - id: share-available
+    goal: "频道设置中有分享/邀请选项"
+    type: visual_check
+    severity: major
+android:
+  device: { type: emulator, api_level: 34 }
+  steps:
+    - goal: "打开一个频道"
+      capture: [screenshot]
+    - goal: "点击右上角齿轮设置"
+      capture: [screenshot]
+    - goal: "查找 Share/Invite/Copy Link 选项"
+      capture: [screenshot]
+ios:
+  device: { type: ios-simulator, device_name: "iPhone 14" }
+  steps:
+    - goal: "打开一个频道"
+      capture: [screenshot]
+    - goal: "点击右上角设置图标"
+      capture: [screenshot]
+    - goal: "查找 Share/Invite 选项"
+      capture: [screenshot]

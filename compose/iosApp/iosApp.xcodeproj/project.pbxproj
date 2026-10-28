@@ -1,0 +1,1173 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 51;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A51000010000000000000003 /* RaftCmpBridgeHost.m in Sources */ = {isa = PBXBuildFile; fileRef = A51000020000000000000003 /* RaftCmpBridgeHost.m */; };
+		A51000010000000000000004 /* RaftPageControllerFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = A51000020000000000000004 /* RaftPageControllerFactory.swift */; };
+		0474A3F329F6A41000F43E31 /* UINavigationController+FDFullscreenPopGesture.m in Sources */ = {isa = PBXBuildFile; fileRef = 0474A3F229F6A41000F43E31 /* UINavigationController+FDFullscreenPopGesture.m */; };
+		04E32B3E29F01975000A6BC5 /* RaftPageRouter.m in Sources */ = {isa = PBXBuildFile; fileRef = 04E32B3D29F01975000A6BC5 /* RaftPageRouter.m */; };
+		058557BB273AAA24004C7B11 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 058557BA273AAA24004C7B11 /* Assets.xcassets */; };
+		058557D9273AAEEB004C7B11 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 058557D8273AAEEB004C7B11 /* Preview Assets.xcassets */; };
+		0721899DF9F6E0424B1E4B7D /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B8FDA997E9DD2D474C82E853 /* Foundation.framework */; };
+		2152FB042600AC8F00CF470E /* iOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2152FB032600AC8F00CF470E /* iOSApp.swift */; };
+		3FDCFB96518F86B53D4E5ADD /* Pods_iosApp.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 28A2BBF98AD622240C0C6069 /* Pods_iosApp.framework */; };
+		4983CA96F486D911EC6CCFB8 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CFD86DD765CA5210E2F6061E /* UIKit.framework */; };
+		7555FF83242A565900829871 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7555FF82242A565900829871 /* ContentView.swift */; };
+		A47100010000000000000001 /* RaftIosSceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A47100020000000000000001 /* RaftIosSceneDelegate.swift */; };
+		A47200010000000000000001 /* RaftIosShellWindowContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = A47200020000000000000001 /* RaftIosShellWindowContract.swift */; };
+		8DFBDFF355CB77B1EFE78055 /* Pods_iosApp_iosAppTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E6FE20F52F0830F7F4E65579 /* Pods_iosApp_iosAppTests.framework */; };
+		A12900010000000000000001 /* RaftIosNetworkRequestLifetimeAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A12900020000000000000001 /* RaftIosNetworkRequestLifetimeAdapter.swift */; };
+		A12900010000000000000002 /* RaftIosNetworkRequestLifetimeAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A12900020000000000000001 /* RaftIosNetworkRequestLifetimeAdapter.swift */; };
+		A12900010000000000000003 /* RaftIosNetworkRequestLifetimeAdapterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A12900020000000000000002 /* RaftIosNetworkRequestLifetimeAdapterTests.swift */; };
+		A13700010000000000000001 /* RaftIosRealtimeLifecyclePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A13700020000000000000001 /* RaftIosRealtimeLifecyclePolicy.swift */; };
+		A13700010000000000000002 /* RaftIosRealtimeLifecyclePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A13700020000000000000001 /* RaftIosRealtimeLifecyclePolicy.swift */; };
+		A13700010000000000000003 /* RaftIosRealtimeLifecyclePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A13700020000000000000002 /* RaftIosRealtimeLifecyclePolicyTests.swift */; };
+		A13000010000000000000001 /* RaftIosAdaptivePanePublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = A13000020000000000000001 /* RaftIosAdaptivePanePublisher.swift */; };
+		A13000010000000000000002 /* RaftIosAdaptivePanePublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = A13000020000000000000001 /* RaftIosAdaptivePanePublisher.swift */; };
+		A13000010000000000000003 /* RaftIosAdaptivePanePublisherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A13000020000000000000002 /* RaftIosAdaptivePanePublisherTests.swift */; };
+		A53100010000000000000001 /* RaftIosTabBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A53100020000000000000001 /* RaftIosTabBarController.swift */; };
+		A53100010000000000000002 /* RaftIosTabBarItemMapping.swift in Sources */ = {isa = PBXBuildFile; fileRef = A53100020000000000000002 /* RaftIosTabBarItemMapping.swift */; };
+		A53100010000000000000003 /* RaftIosTabBarItemMapping.swift in Sources */ = {isa = PBXBuildFile; fileRef = A53100020000000000000002 /* RaftIosTabBarItemMapping.swift */; };
+		A53100010000000000000004 /* RaftIosTabBarItemMappingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A53100020000000000000003 /* RaftIosTabBarItemMappingTests.swift */; };
+		A39600010000000000000001 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = A39600020000000000000001 /* InfoPlist.strings */; };
+		A39700010000000000000001 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = A39700020000000000000001 /* Localizable.strings */; };
+		A42100010000000000000001 /* RaftAdaptiveNavigationSession.m in Sources */ = {isa = PBXBuildFile; fileRef = A42100020000000000000001 /* RaftAdaptiveNavigationSession.m */; };
+		A42400010000000000000001 /* RaftIosAvatarCacheProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = A42400020000000000000001 /* RaftIosAvatarCacheProvider.swift */; };
+		A42400010000000000000002 /* RaftIosAvatarCacheProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = A42400020000000000000001 /* RaftIosAvatarCacheProvider.swift */; };
+		A42400010000000000000003 /* RaftIosAvatarCacheProviderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A42400020000000000000002 /* RaftIosAvatarCacheProviderTests.swift */; };
+		B84B15A39AB40BD06D3F34C9 /* QaAcceptanceLoopTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C46559A0D991429AC545C212 /* QaAcceptanceLoopTests.swift */; };
+		D41350012E0F000100C0DE02 /* GeneratedRealtimeContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = D41350032E0F000100C0DE02 /* GeneratedRealtimeContract.swift */; };
+		D41350022E0F000100C0DE02 /* RaftIosRealtimeHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = D41350042E0F000100C0DE02 /* RaftIosRealtimeHost.swift */; };
+		D41350122E0F000100C0DE12 /* RaftIosNetworkPathMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D41350142E0F000100C0DE12 /* RaftIosNetworkPathMonitor.swift */; };
+		D41350062E140100100C0DE03 /* RaftIosAppScopeMMKV.swift in Sources */ = {isa = PBXBuildFile; fileRef = D41350052E140100100C0DE03 /* RaftIosAppScopeMMKV.swift */; };
+		D46363012E17000100C0DE09 /* RaftIosMobileOAuthHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = D46363022E17000100C0DE09 /* RaftIosMobileOAuthHost.swift */; };
+		D49163022E14000100C0DE01 /* space_grotesk_regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = D49163122E14000100C0DE01 /* space_grotesk_regular.ttf */; };
+		D49163032E14000100C0DE01 /* space_grotesk_medium.ttf in Resources */ = {isa = PBXBuildFile; fileRef = D49163132E14000100C0DE01 /* space_grotesk_medium.ttf */; };
+		D49163042E14000100C0DE01 /* space_grotesk_semibold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = D49163142E14000100C0DE01 /* space_grotesk_semibold.ttf */; };
+		D49163052E14000100C0DE01 /* space_grotesk_bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = D49163152E14000100C0DE01 /* space_grotesk_bold.ttf */; };
+		D491633A2E14000100C0DE01 /* space_grotesk_light.ttf in Resources */ = {isa = PBXBuildFile; fileRef = D491633B2E14000100C0DE01 /* space_grotesk_light.ttf */; };
+		D49163062E14000100C0DE01 /* space_mono_regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = D49163162E14000100C0DE01 /* space_mono_regular.ttf */; };
+		D49163072E14000100C0DE01 /* space_mono_bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = D49163172E14000100C0DE01 /* space_mono_bold.ttf */; };
+		D9E4627AB87B13FE4B46DA69 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 7A2F2C0A7ECD160D0FE049EB /* Foundation.framework */; };
+		FD8955B78ECFD1C7E8071ED2 /* RaftAdaptiveEditorSnapshotTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A42700020000000000000001 /* RaftAdaptiveEditorSnapshotTests.m */; };
+		FF6B714429A2A174009349F1 /* RaftPageViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = FF6B713F29A2A173009349F1 /* RaftPageViewController.m */; };
+		FF6B714529A2A174009349F1 /* HRBridgeModule.m in Sources */ = {isa = PBXBuildFile; fileRef = FF6B714129A2A173009349F1 /* HRBridgeModule.m */; };
+		FF6B714729A2A315009349F1 /* RaftPageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF6B714629A2A315009349F1 /* RaftPageView.swift */; };
+		J0NY00010000000000000001 /* RaftShareControllerFailureReasonTests.m in Sources */ = {isa = PBXBuildFile; fileRef = J0NY00020000000000000001 /* RaftShareControllerFailureReasonTests.m */; };
+		A19300010000000000000001 /* RaftInteractivePopGestureTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A19300020000000000000001 /* RaftInteractivePopGestureTests.m */; };
+		A20500010000000000000001 /* RaftRouterLoginTransitionTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A20500020000000000000001 /* RaftRouterLoginTransitionTests.m */; };
+		RCB100010000000000000001 /* RaftCmpBridgeSelectorTests.m in Sources */ = {isa = PBXBuildFile; fileRef = RCB100020000000000000001 /* RaftCmpBridgeSelectorTests.m */; };
+		J0NY00030000000000000001 /* RaftIosOpenAttachmentTests.m in Sources */ = {isa = PBXBuildFile; fileRef = J0NY00040000000000000001 /* RaftIosOpenAttachmentTests.m */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A12900080000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7555FF73242A565900829871 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7555FF7A242A565900829871;
+			remoteInfo = iosApp;
+		};
+		F6B1415414C164BA5FC82C87 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7555FF73242A565900829871 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 7555FF7A242A565900829871;
+			remoteInfo = iosApp;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		A51000020000000000000002 /* RaftCmpBridgeHost.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RaftCmpBridgeHost.h; sourceTree = "<group>"; };
+		A51000020000000000000003 /* RaftCmpBridgeHost.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = RaftCmpBridgeHost.m; sourceTree = "<group>"; };
+		A51000020000000000000004 /* RaftPageControllerFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftPageControllerFactory.swift; sourceTree = "<group>"; };
+		0423580F44476A8BFD9068C7 /* Pods-iosApp-iosAppTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-iosApp-iosAppTests.debug.xcconfig"; path = "Target Support Files/Pods-iosApp-iosAppTests/Pods-iosApp-iosAppTests.debug.xcconfig"; sourceTree = "<group>"; };
+		0474A3F129F6A41000F43E31 /* UINavigationController+FDFullscreenPopGesture.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = "UINavigationController+FDFullscreenPopGesture.h"; sourceTree = "<group>"; };
+		0474A3F229F6A41000F43E31 /* UINavigationController+FDFullscreenPopGesture.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = "UINavigationController+FDFullscreenPopGesture.m"; sourceTree = "<group>"; };
+		04E32B3C29F01971000A6BC5 /* RaftPageRouter.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RaftPageRouter.h; sourceTree = "<group>"; };
+		04E32B3D29F01975000A6BC5 /* RaftPageRouter.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = RaftPageRouter.m; sourceTree = "<group>"; };
+		058557BA273AAA24004C7B11 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		058557D8273AAEEB004C7B11 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
+		1DAE3769BAE68C43F5D78324 /* iosAppUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = iosAppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		2152FB032600AC8F00CF470E /* iOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = iOSApp.swift; sourceTree = "<group>"; };
+		A47100020000000000000001 /* RaftIosSceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftIosSceneDelegate.swift; sourceTree = "<group>"; };
+		A47200020000000000000001 /* RaftIosShellWindowContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftIosShellWindowContract.swift; sourceTree = "<group>"; };
+		28A2BBF98AD622240C0C6069 /* Pods_iosApp.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_iosApp.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		312F0DBEF95A91A72E5FCBFA /* Pods-iosApp.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-iosApp.debug.xcconfig"; path = "Target Support Files/Pods-iosApp/Pods-iosApp.debug.xcconfig"; sourceTree = "<group>"; };
+		55EA1C556347C9913DA93659 /* Pods-iosApp-iosAppTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-iosApp-iosAppTests.release.xcconfig"; path = "Target Support Files/Pods-iosApp-iosAppTests/Pods-iosApp-iosAppTests.release.xcconfig"; sourceTree = "<group>"; };
+		674A0D166AA25A29DEFF1F7C /* AdaptiveEditorTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AdaptiveEditorTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		7555FF7B242A565900829871 /* iosApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = iosApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		7555FF82242A565900829871 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		7555FF8C242A565B00829871 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		7A2F2C0A7ECD160D0FE049EB /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = System/Library/Frameworks/Foundation.framework; sourceTree = SDKROOT; };
+		A12900020000000000000001 /* RaftIosNetworkRequestLifetimeAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftIosNetworkRequestLifetimeAdapter.swift; sourceTree = "<group>"; };
+		A12900020000000000000002 /* RaftIosNetworkRequestLifetimeAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftIosNetworkRequestLifetimeAdapterTests.swift; sourceTree = "<group>"; };
+		A13700020000000000000001 /* RaftIosRealtimeLifecyclePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftIosRealtimeLifecyclePolicy.swift; sourceTree = "<group>"; };
+		A13700020000000000000002 /* RaftIosRealtimeLifecyclePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftIosRealtimeLifecyclePolicyTests.swift; sourceTree = "<group>"; };
+		A12900020000000000000003 /* iosAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = iosAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A13000020000000000000001 /* RaftIosAdaptivePanePublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftIosAdaptivePanePublisher.swift; sourceTree = "<group>"; };
+		A13000020000000000000002 /* RaftIosAdaptivePanePublisherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftIosAdaptivePanePublisherTests.swift; sourceTree = "<group>"; };
+		A53100020000000000000001 /* RaftIosTabBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftIosTabBarController.swift; sourceTree = "<group>"; };
+		A53100020000000000000002 /* RaftIosTabBarItemMapping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftIosTabBarItemMapping.swift; sourceTree = "<group>"; };
+		A53100020000000000000003 /* RaftIosTabBarItemMappingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftIosTabBarItemMappingTests.swift; sourceTree = "<group>"; };
+		A39600030000000000000001 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		A39600030000000000000002 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
+		A39600030000000000000003 /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		A39700030000000000000001 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
+		A39700030000000000000002 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		A39700030000000000000003 /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/Localizable.strings; sourceTree = "<group>"; };
+		A42100020000000000000001 /* RaftAdaptiveNavigationSession.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = RaftAdaptiveNavigationSession.m; sourceTree = "<group>"; };
+		A42100020000000000000002 /* RaftAdaptiveNavigationSession.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RaftAdaptiveNavigationSession.h; sourceTree = "<group>"; };
+		A42400020000000000000001 /* RaftIosAvatarCacheProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftIosAvatarCacheProvider.swift; sourceTree = "<group>"; };
+		A42400020000000000000002 /* RaftIosAvatarCacheProviderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftIosAvatarCacheProviderTests.swift; sourceTree = "<group>"; };
+		A42700020000000000000001 /* RaftAdaptiveEditorSnapshotTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = RaftAdaptiveEditorSnapshotTests.m; sourceTree = "<group>"; };
+		A42700020000000000000002 /* RaftAdaptiveEditorSnapshot.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RaftAdaptiveEditorSnapshot.h; sourceTree = "<group>"; };
+		A82F000129F6A41000F43E31 /* RaftConversationForwardGestureAdmission.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = RaftConversationForwardGestureAdmission.h; sourceTree = "<group>"; };
+		A82F000229F6A41000F43E31 /* RaftInteractivePopGestureAdmission.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = RaftInteractivePopGestureAdmission.h; sourceTree = "<group>"; };
+		B8FDA997E9DD2D474C82E853 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
+		C46559A0D991429AC545C212 /* QaAcceptanceLoopTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = QaAcceptanceLoopTests.swift; sourceTree = "<group>"; };
+		CFD86DD765CA5210E2F6061E /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+		D41350032E0F000100C0DE02 /* GeneratedRealtimeContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneratedRealtimeContract.swift; sourceTree = "<group>"; };
+		D41350042E0F000100C0DE02 /* RaftIosRealtimeHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftIosRealtimeHost.swift; sourceTree = "<group>"; };
+		D41350142E0F000100C0DE12 /* RaftIosNetworkPathMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftIosNetworkPathMonitor.swift; sourceTree = "<group>"; };
+		D41350052E140100100C0DE03 /* RaftIosAppScopeMMKV.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftIosAppScopeMMKV.swift; sourceTree = "<group>"; };
+		D46363022E17000100C0DE09 /* RaftIosMobileOAuthHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaftIosMobileOAuthHost.swift; sourceTree = "<group>"; };
+		D49163122E14000100C0DE01 /* space_grotesk_regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = space_grotesk_regular.ttf; sourceTree = "<group>"; };
+		D49163132E14000100C0DE01 /* space_grotesk_medium.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = space_grotesk_medium.ttf; sourceTree = "<group>"; };
+		D49163142E14000100C0DE01 /* space_grotesk_semibold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = space_grotesk_semibold.ttf; sourceTree = "<group>"; };
+		D49163152E14000100C0DE01 /* space_grotesk_bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = space_grotesk_bold.ttf; sourceTree = "<group>"; };
+		D491633B2E14000100C0DE01 /* space_grotesk_light.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = space_grotesk_light.ttf; sourceTree = "<group>"; };
+		D49163162E14000100C0DE01 /* space_mono_regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = space_mono_regular.ttf; sourceTree = "<group>"; };
+		D49163172E14000100C0DE01 /* space_mono_bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = space_mono_bold.ttf; sourceTree = "<group>"; };
+		E6FE20F52F0830F7F4E65579 /* Pods_iosApp_iosAppTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_iosApp_iosAppTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		EAD586BEDBD0772EDC4E4B96 /* Pods-iosApp.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-iosApp.release.xcconfig"; path = "Target Support Files/Pods-iosApp/Pods-iosApp.release.xcconfig"; sourceTree = "<group>"; };
+		FF6B713F29A2A173009349F1 /* RaftPageViewController.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = RaftPageViewController.m; sourceTree = "<group>"; };
+		FF6B714129A2A173009349F1 /* HRBridgeModule.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = HRBridgeModule.m; sourceTree = "<group>"; };
+		FF6B714229A2A173009349F1 /* HRBridgeModule.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = HRBridgeModule.h; sourceTree = "<group>"; };
+		FF6B714329A2A174009349F1 /* RaftPageViewController.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = RaftPageViewController.h; sourceTree = "<group>"; };
+		FF6B714629A2A315009349F1 /* RaftPageView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = RaftPageView.swift; sourceTree = "<group>"; };
+		FF6B714C29A2A45D009349F1 /* iosApp-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "iosApp-Bridging-Header.h"; sourceTree = "<group>"; };
+		J0NY00020000000000000001 /* RaftShareControllerFailureReasonTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = RaftShareControllerFailureReasonTests.m; sourceTree = "<group>"; };
+		A19300020000000000000001 /* RaftInteractivePopGestureTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = RaftInteractivePopGestureTests.m; sourceTree = "<group>"; };
+		A20500020000000000000001 /* RaftRouterLoginTransitionTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = RaftRouterLoginTransitionTests.m; sourceTree = "<group>"; };
+		RCB100020000000000000001 /* RaftCmpBridgeSelectorTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = RaftCmpBridgeSelectorTests.m; sourceTree = "<group>"; };
+		J0NY00040000000000000001 /* RaftIosOpenAttachmentTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = RaftIosOpenAttachmentTests.m; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		412082966DD7AFE0B53032CB /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3FDCFB96518F86B53D4E5ADD /* Pods_iosApp.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A12900050000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8DFBDFF355CB77B1EFE78055 /* Pods_iosApp_iosAppTests.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B353DDD6BF09802D9DFE05E3 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0721899DF9F6E0424B1E4B7D /* Foundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D844A074D60A86C9F3BD0B08 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D9E4627AB87B13FE4B46DA69 /* Foundation.framework in Frameworks */,
+				4983CA96F486D911EC6CCFB8 /* UIKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A51000020000000000000001 /* Cmp */ = {
+			isa = PBXGroup;
+			children = (
+				A51000020000000000000004 /* RaftPageControllerFactory.swift */,
+				A51000020000000000000002 /* RaftCmpBridgeHost.h */,
+				A51000020000000000000003 /* RaftCmpBridgeHost.m */,
+				FF6B714329A2A174009349F1 /* RaftPageViewController.h */,
+				FF6B713F29A2A173009349F1 /* RaftPageViewController.m */,
+				04E32B3C29F01971000A6BC5 /* RaftPageRouter.h */,
+				04E32B3D29F01975000A6BC5 /* RaftPageRouter.m */,
+			);
+			path = Cmp;
+			sourceTree = "<group>";
+		};
+		0474A3EF29F6A3FE00F43E31 /* Vendor */ = {
+			isa = PBXGroup;
+			children = (
+				0474A3F029F6A41000F43E31 /* FDFullscreenPopGesture */,
+			);
+			name = Vendor;
+			sourceTree = "<group>";
+		};
+		0474A3F029F6A41000F43E31 /* FDFullscreenPopGesture */ = {
+			isa = PBXGroup;
+			children = (
+				A82F000129F6A41000F43E31 /* RaftConversationForwardGestureAdmission.h */,
+				A82F000229F6A41000F43E31 /* RaftInteractivePopGestureAdmission.h */,
+				0474A3F129F6A41000F43E31 /* UINavigationController+FDFullscreenPopGesture.h */,
+				0474A3F229F6A41000F43E31 /* UINavigationController+FDFullscreenPopGesture.m */,
+			);
+			path = FDFullscreenPopGesture;
+			sourceTree = "<group>";
+		};
+		058557D7273AAEEB004C7B11 /* Preview Content */ = {
+			isa = PBXGroup;
+			children = (
+				058557D8273AAEEB004C7B11 /* Preview Assets.xcassets */,
+			);
+			path = "Preview Content";
+			sourceTree = "<group>";
+		};
+		254BBAA1096EC0C0491EF8C3 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				28A2BBF98AD622240C0C6069 /* Pods_iosApp.framework */,
+				344FA050C9E0DC463DFE0173 /* iOS */,
+				E6FE20F52F0830F7F4E65579 /* Pods_iosApp_iosAppTests.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		344FA050C9E0DC463DFE0173 /* iOS */ = {
+			isa = PBXGroup;
+			children = (
+				B8FDA997E9DD2D474C82E853 /* Foundation.framework */,
+				7A2F2C0A7ECD160D0FE049EB /* Foundation.framework */,
+				CFD86DD765CA5210E2F6061E /* UIKit.framework */,
+			);
+			name = iOS;
+			sourceTree = "<group>";
+		};
+		7555FF72242A565900829871 = {
+			isa = PBXGroup;
+			children = (
+				FF6B714C29A2A45D009349F1 /* iosApp-Bridging-Header.h */,
+				7555FF7D242A565900829871 /* iosApp */,
+				7555FF7C242A565900829871 /* Products */,
+				FDF972C7159D4191183C9089 /* Pods */,
+				254BBAA1096EC0C0491EF8C3 /* Frameworks */,
+				A0C1056F00055DC2789CB933 /* iosAppUITests */,
+				A12900030000000000000001 /* iosAppTests */,
+			);
+			sourceTree = "<group>";
+		};
+		7555FF7C242A565900829871 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				7555FF7B242A565900829871 /* iosApp.app */,
+				1DAE3769BAE68C43F5D78324 /* iosAppUITests.xctest */,
+				A12900020000000000000003 /* iosAppTests.xctest */,
+				674A0D166AA25A29DEFF1F7C /* AdaptiveEditorTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		7555FF7D242A565900829871 /* iosApp */ = {
+			isa = PBXGroup;
+			children = (
+				0474A3EF29F6A3FE00F43E31 /* Vendor */,
+				FF6B714629A2A315009349F1 /* RaftPageView.swift */,
+				D41350032E0F000100C0DE02 /* GeneratedRealtimeContract.swift */,
+				D41350042E0F000100C0DE02 /* RaftIosRealtimeHost.swift */,
+				D41350142E0F000100C0DE12 /* RaftIosNetworkPathMonitor.swift */,
+				D41350052E140100100C0DE03 /* RaftIosAppScopeMMKV.swift */,
+				D46363022E17000100C0DE09 /* RaftIosMobileOAuthHost.swift */,
+				A42400020000000000000001 /* RaftIosAvatarCacheProvider.swift */,
+				FF6B713E29A2A10E009349F1 /* Host */,
+				A51000020000000000000001 /* Cmp */,
+				058557BA273AAA24004C7B11 /* Assets.xcassets */,
+				D49163102E14000100C0DE01 /* Fonts */,
+				7555FF82242A565900829871 /* ContentView.swift */,
+				A47100020000000000000001 /* RaftIosSceneDelegate.swift */,
+				A47200020000000000000001 /* RaftIosShellWindowContract.swift */,
+				7555FF8C242A565B00829871 /* Info.plist */,
+				A39600020000000000000001 /* InfoPlist.strings */,
+				A39700020000000000000001 /* Localizable.strings */,
+				2152FB032600AC8F00CF470E /* iOSApp.swift */,
+				A12900020000000000000001 /* RaftIosNetworkRequestLifetimeAdapter.swift */,
+				A13700020000000000000001 /* RaftIosRealtimeLifecyclePolicy.swift */,
+				A13000020000000000000001 /* RaftIosAdaptivePanePublisher.swift */,
+				A53100020000000000000001 /* RaftIosTabBarController.swift */,
+				A53100020000000000000002 /* RaftIosTabBarItemMapping.swift */,
+				058557D7273AAEEB004C7B11 /* Preview Content */,
+			);
+			path = iosApp;
+			sourceTree = "<group>";
+		};
+		A0C1056F00055DC2789CB933 /* iosAppUITests */ = {
+			isa = PBXGroup;
+			children = (
+				C46559A0D991429AC545C212 /* QaAcceptanceLoopTests.swift */,
+			);
+			path = iosAppUITests;
+			sourceTree = "<group>";
+		};
+		A12900030000000000000001 /* iosAppTests */ = {
+			isa = PBXGroup;
+			children = (
+				A42400020000000000000002 /* RaftIosAvatarCacheProviderTests.swift */,
+				A12900020000000000000002 /* RaftIosNetworkRequestLifetimeAdapterTests.swift */,
+				A13700020000000000000002 /* RaftIosRealtimeLifecyclePolicyTests.swift */,
+				A13000020000000000000002 /* RaftIosAdaptivePanePublisherTests.swift */,
+				A53100020000000000000003 /* RaftIosTabBarItemMappingTests.swift */,
+				A42700020000000000000001 /* RaftAdaptiveEditorSnapshotTests.m */,
+				J0NY00020000000000000001 /* RaftShareControllerFailureReasonTests.m */,
+				A19300020000000000000001 /* RaftInteractivePopGestureTests.m */,
+				A20500020000000000000001 /* RaftRouterLoginTransitionTests.m */,
+				RCB100020000000000000001 /* RaftCmpBridgeSelectorTests.m */,
+				J0NY00040000000000000001 /* RaftIosOpenAttachmentTests.m */,
+			);
+			path = iosAppTests;
+			sourceTree = "<group>";
+		};
+		D49163102E14000100C0DE01 /* Fonts */ = {
+			isa = PBXGroup;
+			children = (
+				D49163122E14000100C0DE01 /* space_grotesk_regular.ttf */,
+				D49163132E14000100C0DE01 /* space_grotesk_medium.ttf */,
+				D49163142E14000100C0DE01 /* space_grotesk_semibold.ttf */,
+				D49163152E14000100C0DE01 /* space_grotesk_bold.ttf */,
+				D491633B2E14000100C0DE01 /* space_grotesk_light.ttf */,
+				D49163162E14000100C0DE01 /* space_mono_regular.ttf */,
+				D49163172E14000100C0DE01 /* space_mono_bold.ttf */,
+			);
+			path = Fonts;
+			sourceTree = "<group>";
+		};
+		FDF972C7159D4191183C9089 /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				312F0DBEF95A91A72E5FCBFA /* Pods-iosApp.debug.xcconfig */,
+				EAD586BEDBD0772EDC4E4B96 /* Pods-iosApp.release.xcconfig */,
+				0423580F44476A8BFD9068C7 /* Pods-iosApp-iosAppTests.debug.xcconfig */,
+				55EA1C556347C9913DA93659 /* Pods-iosApp-iosAppTests.release.xcconfig */,
+			);
+			path = Pods;
+			sourceTree = "<group>";
+		};
+		FF6B713E29A2A10E009349F1 /* Host */ = {
+			isa = PBXGroup;
+			children = (
+				FF6B714129A2A173009349F1 /* HRBridgeModule.m */,
+				FF6B714229A2A173009349F1 /* HRBridgeModule.h */,
+				A42100020000000000000001 /* RaftAdaptiveNavigationSession.m */,
+				A42100020000000000000002 /* RaftAdaptiveNavigationSession.h */,
+				A42700020000000000000002 /* RaftAdaptiveEditorSnapshot.h */,
+			);
+			path = Host;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		58446DBDE2D1CA2C2AFC79B7 /* AdaptiveEditorTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A81109DC88326C86FDF262E5 /* Build configuration list for PBXNativeTarget "AdaptiveEditorTests" */;
+			buildPhases = (
+				558AC89118BC41B8CC9EAD4F /* Sources */,
+				D844A074D60A86C9F3BD0B08 /* Frameworks */,
+				74AFCD01D0D9286C1691CC6E /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AdaptiveEditorTests;
+			productName = AdaptiveEditorTests;
+			productReference = 674A0D166AA25A29DEFF1F7C /* AdaptiveEditorTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		7555FF7A242A565900829871 /* iosApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7555FFA5242A565B00829871 /* Build configuration list for PBXNativeTarget "iosApp" */;
+			buildPhases = (
+				972A582C11CA0A94A4C34E98 /* [CP] Check Pods Manifest.lock */,
+				D4C7A0112E15000100C0DE01 /* Generate Raft Build Metadata */,
+				7555FF77242A565900829871 /* Sources */,
+				7555FF79242A565900829871 /* Resources */,
+				D4C7A0122E15000100C0DE01 /* Stamp Hands Build Metadata */,
+				412082966DD7AFE0B53032CB /* Frameworks */,
+				6715C2D1184DF4DA5556ABE1 /* [CP] Embed Pods Frameworks */,
+				70E4183CF2B3FF25AA2B7C8F /* [CP] Copy Pods Resources */,
+				037D30FF99587FF5BDE98C71 /* [CP-User] Copy Compose resources to app */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = iosApp;
+			productName = iosApp;
+			productReference = 7555FF7B242A565900829871 /* iosApp.app */;
+			productType = "com.apple.product-type.application";
+		};
+		88BC1E863A7604D85563C5C6 /* iosAppUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8D91AB816E98F04E3DDC5352 /* Build configuration list for PBXNativeTarget "iosAppUITests" */;
+			buildPhases = (
+				7CCDFD4A3CCADE53ADB0C549 /* Sources */,
+				B353DDD6BF09802D9DFE05E3 /* Frameworks */,
+				D4CF1579663686D13F798DDC /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				EAE537CA3D22BBF5D067B254 /* PBXTargetDependency */,
+			);
+			name = iosAppUITests;
+			productName = iosAppUITests;
+			productReference = 1DAE3769BAE68C43F5D78324 /* iosAppUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		A12900040000000000000001 /* iosAppTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A12900070000000000000001 /* Build configuration list for PBXNativeTarget "iosAppTests" */;
+			buildPhases = (
+				A5B40D3BF7114A79AAD1765C /* [CP] Check Pods Manifest.lock */,
+				A12900050000000000000001 /* Sources */,
+				A12900050000000000000002 /* Frameworks */,
+				A12900050000000000000003 /* Resources */,
+				C5AFC7215F1FE45A326FBB86 /* [CP] Embed Pods Frameworks */,
+				AC986769335986F8488539E5 /* [CP] Copy Pods Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A12900080000000000000002 /* PBXTargetDependency */,
+			);
+			name = iosAppTests;
+			productName = iosAppTests;
+			productReference = A12900020000000000000003 /* iosAppTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		7555FF73242A565900829871 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastSwiftUpdateCheck = 1130;
+				LastUpgradeCheck = 1130;
+				ORGANIZATIONNAME = orgName;
+				TargetAttributes = {
+					7555FF7A242A565900829871 = {
+						CreatedOnToolsVersion = 11.3.1;
+						SystemCapabilities = {
+							com.apple.Push = {
+								enabled = 1;
+							};
+							com.apple.SafariKeychain = {
+								enabled = 1;
+							};
+							com.apple.SignInWithApple = {
+								enabled = 1;
+							};
+						};
+					};
+					A12900040000000000000001 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = 7555FF76242A565900829871 /* Build configuration list for PBXProject "iosApp" */;
+			compatibilityVersion = "Xcode 9.3";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				ja,
+				"zh-Hans",
+				Base,
+			);
+			mainGroup = 7555FF72242A565900829871;
+			productRefGroup = 7555FF7C242A565900829871 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				7555FF7A242A565900829871 /* iosApp */,
+				88BC1E863A7604D85563C5C6 /* iosAppUITests */,
+				A12900040000000000000001 /* iosAppTests */,
+				58446DBDE2D1CA2C2AFC79B7 /* AdaptiveEditorTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		74AFCD01D0D9286C1691CC6E /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7555FF79242A565900829871 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				058557D9273AAEEB004C7B11 /* Preview Assets.xcassets in Resources */,
+				D49163022E14000100C0DE01 /* space_grotesk_regular.ttf in Resources */,
+				D49163032E14000100C0DE01 /* space_grotesk_medium.ttf in Resources */,
+				D49163042E14000100C0DE01 /* space_grotesk_semibold.ttf in Resources */,
+				D49163052E14000100C0DE01 /* space_grotesk_bold.ttf in Resources */,
+				D491633A2E14000100C0DE01 /* space_grotesk_light.ttf in Resources */,
+				D49163062E14000100C0DE01 /* space_mono_regular.ttf in Resources */,
+				D49163072E14000100C0DE01 /* space_mono_bold.ttf in Resources */,
+				058557BB273AAA24004C7B11 /* Assets.xcassets in Resources */,
+				A39600010000000000000001 /* InfoPlist.strings in Resources */,
+				A39700010000000000000001 /* Localizable.strings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A12900050000000000000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D4CF1579663686D13F798DDC /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		037D30FF99587FF5BDE98C71 /* [CP-User] Copy Compose resources to app */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			name = "[CP-User] Copy Compose resources to app";
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -e\n# The Gradle project root is compose/ (gradlew + settings.gradle.kts live there),\n# one level up from this target's $SRCROOT (compose/iosApp).\nGRADLE_ROOT=\"$SRCROOT/..\"\n# :ui-cmp:syncComposeResourcesForXcodeApp copies the Compose Multiplatform resources\n# (Raft fonts, the app strings and bundled files of :shared) to <App>.app/compose-resources,\n# where the CMP runtime reads them; compose.ios.resources.sync=false keeps the CMP plugin\n# from doing it.\n\"$GRADLE_ROOT/gradlew\" -p \"$GRADLE_ROOT\" :ui-cmp:syncComposeResourcesForXcodeApp \\\n  -Praft.cmp.resources.dir=\"$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH/compose-resources\"\n";
+		};
+		6715C2D1184DF4DA5556ABE1 /* [CP] Embed Pods Frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-iosApp/Pods-iosApp-frameworks-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			name = "[CP] Embed Pods Frameworks";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-iosApp/Pods-iosApp-frameworks-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-iosApp/Pods-iosApp-frameworks.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+		70E4183CF2B3FF25AA2B7C8F /* [CP] Copy Pods Resources */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-iosApp/Pods-iosApp-resources-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			name = "[CP] Copy Pods Resources";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-iosApp/Pods-iosApp-resources-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-iosApp/Pods-iosApp-resources.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+		972A582C11CA0A94A4C34E98 /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-iosApp-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+		A5B40D3BF7114A79AAD1765C /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-iosApp-iosAppTests-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+		AC986769335986F8488539E5 /* [CP] Copy Pods Resources */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-iosApp-iosAppTests/Pods-iosApp-iosAppTests-resources-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			name = "[CP] Copy Pods Resources";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-iosApp-iosAppTests/Pods-iosApp-iosAppTests-resources-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-iosApp-iosAppTests/Pods-iosApp-iosAppTests-resources.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+		C5AFC7215F1FE45A326FBB86 /* [CP] Embed Pods Frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-iosApp-iosAppTests/Pods-iosApp-iosAppTests-frameworks-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			name = "[CP] Embed Pods Frameworks";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-iosApp-iosAppTests/Pods-iosApp-iosAppTests-frameworks-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-iosApp-iosAppTests/Pods-iosApp-iosAppTests-frameworks.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+		D4C7A0112E15000100C0DE01 /* Generate Raft Build Metadata */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Generate Raft Build Metadata";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/RaftIosBuildMetadata.h",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${SRCROOT}/scripts/generate_raft_build_metadata.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+		D4C7A0122E15000100C0DE01 /* Stamp Hands Build Metadata */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Stamp Hands Build Metadata";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${SRCROOT}/scripts/stamp_hands_build_metadata.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		558AC89118BC41B8CC9EAD4F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FD8955B78ECFD1C7E8071ED2 /* RaftAdaptiveEditorSnapshotTests.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7555FF77242A565900829871 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FF6B714429A2A174009349F1 /* RaftPageViewController.m in Sources */,
+				A42100010000000000000001 /* RaftAdaptiveNavigationSession.m in Sources */,
+				04E32B3E29F01975000A6BC5 /* RaftPageRouter.m in Sources */,
+				A51000010000000000000003 /* RaftCmpBridgeHost.m in Sources */,
+				A51000010000000000000004 /* RaftPageControllerFactory.swift in Sources */,
+				0474A3F329F6A41000F43E31 /* UINavigationController+FDFullscreenPopGesture.m in Sources */,
+				2152FB042600AC8F00CF470E /* iOSApp.swift in Sources */,
+				A12900010000000000000001 /* RaftIosNetworkRequestLifetimeAdapter.swift in Sources */,
+				A13700010000000000000001 /* RaftIosRealtimeLifecyclePolicy.swift in Sources */,
+				A13000010000000000000001 /* RaftIosAdaptivePanePublisher.swift in Sources */,
+				A53100010000000000000001 /* RaftIosTabBarController.swift in Sources */,
+				A53100010000000000000002 /* RaftIosTabBarItemMapping.swift in Sources */,
+				D41350012E0F000100C0DE02 /* GeneratedRealtimeContract.swift in Sources */,
+				D41350062E140100100C0DE03 /* RaftIosAppScopeMMKV.swift in Sources */,
+				D46363012E17000100C0DE09 /* RaftIosMobileOAuthHost.swift in Sources */,
+				A42400010000000000000001 /* RaftIosAvatarCacheProvider.swift in Sources */,
+				FF6B714529A2A174009349F1 /* HRBridgeModule.m in Sources */,
+				D41350022E0F000100C0DE02 /* RaftIosRealtimeHost.swift in Sources */,
+				D41350122E0F000100C0DE12 /* RaftIosNetworkPathMonitor.swift in Sources */,
+				FF6B714729A2A315009349F1 /* RaftPageView.swift in Sources */,
+				7555FF83242A565900829871 /* ContentView.swift in Sources */,
+				A47100010000000000000001 /* RaftIosSceneDelegate.swift in Sources */,
+				A47200010000000000000001 /* RaftIosShellWindowContract.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		7CCDFD4A3CCADE53ADB0C549 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B84B15A39AB40BD06D3F34C9 /* QaAcceptanceLoopTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A12900050000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A42400010000000000000002 /* RaftIosAvatarCacheProvider.swift in Sources */,
+				A42400010000000000000003 /* RaftIosAvatarCacheProviderTests.swift in Sources */,
+				A12900010000000000000002 /* RaftIosNetworkRequestLifetimeAdapter.swift in Sources */,
+				A12900010000000000000003 /* RaftIosNetworkRequestLifetimeAdapterTests.swift in Sources */,
+				A13700010000000000000002 /* RaftIosRealtimeLifecyclePolicy.swift in Sources */,
+				A13700010000000000000003 /* RaftIosRealtimeLifecyclePolicyTests.swift in Sources */,
+				A13000010000000000000002 /* RaftIosAdaptivePanePublisher.swift in Sources */,
+				A13000010000000000000003 /* RaftIosAdaptivePanePublisherTests.swift in Sources */,
+				A53100010000000000000003 /* RaftIosTabBarItemMapping.swift in Sources */,
+				A53100010000000000000004 /* RaftIosTabBarItemMappingTests.swift in Sources */,
+				J0NY00010000000000000001 /* RaftShareControllerFailureReasonTests.m in Sources */,
+				A19300010000000000000001 /* RaftInteractivePopGestureTests.m in Sources */,
+				A20500010000000000000001 /* RaftRouterLoginTransitionTests.m in Sources */,
+				RCB100010000000000000001 /* RaftCmpBridgeSelectorTests.m in Sources */,
+				J0NY00030000000000000001 /* RaftIosOpenAttachmentTests.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A12900080000000000000002 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = iosApp;
+			target = 7555FF7A242A565900829871 /* iosApp */;
+			targetProxy = A12900080000000000000001 /* PBXContainerItemProxy */;
+		};
+		EAE537CA3D22BBF5D067B254 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = iosApp;
+			target = 7555FF7A242A565900829871 /* iosApp */;
+			targetProxy = F6B1415414C164BA5FC82C87 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXVariantGroup section */
+		A39600020000000000000001 /* InfoPlist.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				A39600030000000000000001 /* en */,
+				A39600030000000000000002 /* zh-Hans */,
+				A39600030000000000000003 /* ja */,
+			);
+			name = InfoPlist.strings;
+			sourceTree = "<group>";
+		};
+		A39700020000000000000001 /* Localizable.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				A39700030000000000000001 /* en */,
+				A39700030000000000000002 /* zh-Hans */,
+				A39700030000000000000003 /* ja */,
+			);
+			name = Localizable.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
+
+/* Begin XCBuildConfiguration section */
+		06E45923CD5DFD4EE77E737A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "";
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGNING_ALLOWED = NO;
+				ENABLE_TESTING_SEARCH_PATHS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "build.raft.tests.adaptive-editor";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				TEST_HOST = "";
+			};
+			name = Debug;
+		};
+		7555FFA3242A565B00829871 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		7555FFA4242A565B00829871 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		7555FFA6242A565B00829871 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 312F0DBEF95A91A72E5FCBFA /* Pods-iosApp.debug.xcconfig */;
+			buildSettings = {
+				APS_ENVIRONMENT = development;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = iosApp/iosApp.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"iosApp/Preview Content\"";
+				ENABLE_PREVIEWS = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(DERIVED_FILE_DIR)",
+				);
+				INFOPLIST_FILE = iosApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = build.raft.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SLOCK_OAUTH_CALLBACK_SCHEME = "raft-debug";
+				SWIFT_OBJC_BRIDGING_HEADER = "iosApp-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		7555FFA7242A565B00829871 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = EAD586BEDBD0772EDC4E4B96 /* Pods-iosApp.release.xcconfig */;
+			buildSettings = {
+				APS_ENVIRONMENT = production;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = iosApp/iosApp.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"iosApp/Preview Content\"";
+				ENABLE_PREVIEWS = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(DERIVED_FILE_DIR)",
+				);
+				INFOPLIST_FILE = iosApp/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = build.raft.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SLOCK_OAUTH_CALLBACK_SCHEME = raft;
+				SWIFT_OBJC_BRIDGING_HEADER = "iosApp-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		84C49A8455784CD9A0A2BDE7 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = build.raft.appUITests;
+				PRODUCT_MODULE_NAME = iosAppUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = iosApp;
+			};
+			name = Debug;
+		};
+		A12900060000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 0423580F44476A8BFD9068C7 /* Pods-iosApp-iosAppTests.debug.xcconfig */;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = build.raft.appTests;
+				OTHER_SWIFT_FLAGS = "$(inherited) -Xfrontend -disable-autolink-framework -Xfrontend shared";
+				PRODUCT_MODULE_NAME = iosAppTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/iosApp.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/iosApp";
+			};
+			name = Debug;
+		};
+		A12900060000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 55EA1C556347C9913DA93659 /* Pods-iosApp-iosAppTests.release.xcconfig */;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = build.raft.appTests;
+				OTHER_SWIFT_FLAGS = "$(inherited) -Xfrontend -disable-autolink-framework -Xfrontend shared";
+				PRODUCT_MODULE_NAME = iosAppTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/iosApp.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/iosApp";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		C2EA9517739CDFD8F6A946CE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = build.raft.appUITests;
+				PRODUCT_MODULE_NAME = iosAppUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = iosApp;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		E97F715CAEAB601A18AB097B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "";
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGNING_ALLOWED = NO;
+				ENABLE_TESTING_SEARCH_PATHS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "build.raft.tests.adaptive-editor";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				TEST_HOST = "";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		7555FF76242A565900829871 /* Build configuration list for PBXProject "iosApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7555FFA3242A565B00829871 /* Debug */,
+				7555FFA4242A565B00829871 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		7555FFA5242A565B00829871 /* Build configuration list for PBXNativeTarget "iosApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7555FFA6242A565B00829871 /* Debug */,
+				7555FFA7242A565B00829871 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		8D91AB816E98F04E3DDC5352 /* Build configuration list for PBXNativeTarget "iosAppUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C2EA9517739CDFD8F6A946CE /* Release */,
+				84C49A8455784CD9A0A2BDE7 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A12900070000000000000001 /* Build configuration list for PBXNativeTarget "iosAppTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A12900060000000000000001 /* Debug */,
+				A12900060000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A81109DC88326C86FDF262E5 /* Build configuration list for PBXNativeTarget "AdaptiveEditorTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E97F715CAEAB601A18AB097B /* Release */,
+				06E45923CD5DFD4EE77E737A /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 7555FF73242A565900829871 /* Project object */;
+}

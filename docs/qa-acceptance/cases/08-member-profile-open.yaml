@@ -1,0 +1,52 @@
+id: member-profile-open
+title: "成员资料-点击成员头像打开Profile"
+goal: "验证点击成员头像能打开profile页面，头像正确加载无404"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+assertions:
+  - id: profile-page-opened
+    goal: "Profile页面显示用户信息"
+    type: visual_check
+    severity: critical
+  - id: avatar-loaded
+    goal: "头像图片正确加载，无broken/404"
+    type: visual_check
+    severity: major
+  - id: no-404-error
+    goal: "无HTTP 404或网络错误"
+    type: text_absent
+    params:
+      text_match_regex: "(?i)(404|not found|failed to load)"
+    severity: major
+android:
+  device: { type: emulator, api_level: 34 }
+  steps:
+    - goal: "打开 app home"
+      capture: [screenshot]
+    - goal: "导航到 Members 列表"
+      capture: [screenshot, dump_layout]
+    - goal: "等待成员列表加载"
+      hint: "wait 2s"
+    - goal: "点击一个成员的头像/名字"
+      capture: [screenshot, dump_layout]
+    - goal: "等待profile加载"
+      hint: "wait 2s"
+    - goal: "截图验证profile"
+      capture: [screenshot, dump_layout]
+ios:
+  device: { type: ios-simulator, device_name: "iPhone 14" }
+  steps:
+    - goal: "打开 app home"
+      capture: [screenshot]
+    - goal: "导航到 Members 列表"
+      capture: [screenshot]
+    - goal: "等待成员列表加载"
+      hint: "wait 2s"
+    - goal: "点击一个成员的头像/名字"
+      capture: [screenshot]
+    - goal: "等待profile加载"
+      hint: "wait 2s"
+    - goal: "截图验证profile"
+      capture: [screenshot]

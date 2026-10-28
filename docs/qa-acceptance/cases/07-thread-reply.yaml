@@ -1,0 +1,55 @@
+id: thread-reply-and-reactions
+title: "消息回复-在thread中回复消息"
+goal: "验证用户能打开消息的thread并回复，回复出现在thread中"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+assertions:
+  - id: reply-appears
+    goal: "回复消息出现在thread中"
+    type: text_present
+    severity: critical
+  - id: no-reply-error
+    goal: "无错误指示"
+    type: text_absent
+    params:
+      text_match_regex: "(?i)(failed|error|retry)"
+    severity: major
+android:
+  device: { type: emulator, api_level: 34 }
+  steps:
+    - goal: "打开 #all 频道"
+      capture: [screenshot]
+    - goal: "找到带 reply chip 的消息（如 N replies）"
+      hint: "滚动查找"
+      capture: [screenshot]
+    - goal: "点击消息打开其thread"
+      hint: "Raft的回复UX是点消息进thread，不是长按菜单"
+      capture: [screenshot]
+    - goal: "在thread composer输入回复"
+      capture: [screenshot]
+    - goal: "发送回复"
+      capture: [screenshot]
+    - goal: "等待回复送达"
+      hint: "wait 2s"
+    - goal: "截图验证回复出现"
+      capture: [screenshot]
+ios:
+  device: { type: ios-simulator, device_name: "iPhone 14" }
+  steps:
+    - goal: "打开 #all 频道"
+      capture: [screenshot]
+    - goal: "找到带 reply chip 的消息"
+      capture: [screenshot]
+    - goal: "点击消息打开thread"
+      capture: [screenshot]
+    - goal: "输入回复"
+      hint: "用屏幕键盘"
+      capture: [screenshot]
+    - goal: "发送回复"
+      capture: [screenshot]
+    - goal: "等待回复送达"
+      hint: "wait 2s"
+    - goal: "截图验证回复出现"
+      capture: [screenshot]

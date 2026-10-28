@@ -1,0 +1,56 @@
+id: select-and-upload-image
+title: "附件上传-选择图片上传到对话"
+goal: "验证从相册选择图片上传到对话功能正常，权限请求正确"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+assertions:
+  - id: picker-opened
+    goal: "图片选择器/相册打开"
+    type: visual_check
+    severity: critical
+  - id: image-in-composer
+    goal: "选中图片在composer显示预览"
+    type: visual_check
+    severity: critical
+  - id: image-sent
+    goal: "图片消息出现在对话中"
+    type: visual_check
+    severity: critical
+android:
+  device: { type: emulator, api_level: 34 }
+  steps:
+    - goal: "打开 #all 频道"
+      capture: [screenshot]
+    - goal: "找到并点击图片/附件按钮"
+      capture: [screenshot]
+    - goal: "如出现权限弹窗点Allow"
+      capture: [screenshot]
+    - goal: "在相册选择一张图片"
+      capture: [screenshot]
+    - goal: "验证图片在composer预览"
+      capture: [screenshot]
+    - goal: "发送消息"
+      capture: [screenshot]
+    - goal: "等待上传"
+      hint: "wait 3s"
+    - goal: "验证图片在对话中"
+      capture: [screenshot]
+ios:
+  device: { type: ios-simulator, device_name: "iPhone 14" }
+  steps:
+    - goal: "打开 #all 频道"
+      capture: [screenshot]
+    - goal: "点击图片按钮"
+      capture: [screenshot]
+    - goal: "授权相册权限"
+      capture: [screenshot]
+    - goal: "在PHPicker选择图片"
+      capture: [screenshot]
+    - goal: "验证composer预览"
+      capture: [screenshot]
+    - goal: "发送"
+      capture: [screenshot]
+    - goal: "验证图片在对话中"
+      capture: [screenshot]

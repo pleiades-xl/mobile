@@ -1,0 +1,39 @@
+id: convert-message-to-task
+title: "Task-将消息转换为Task"
+goal: "验证长按消息→Convert to Task功能正常，task badge出现"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+assertions:
+  - id: task-badge-visible
+    goal: "消息出现task badge带编号"
+    type: visual_check
+    severity: critical
+android:
+  device: { type: emulator, api_level: 34 }
+  steps:
+    - goal: "打开 #all 频道"
+      capture: [screenshot]
+    - goal: "长按一条非task消息"
+      capture: [screenshot]
+    - goal: "点击 Convert to Task"
+      hint: "用tap_text"
+      capture: [screenshot]
+    - goal: "等待任务创建"
+      hint: "wait 2s"
+    - goal: "截图验证task badge"
+      capture: [screenshot]
+ios:
+  device: { type: ios-simulator, device_name: "iPhone 14" }
+  steps:
+    - goal: "打开 #all 频道"
+      capture: [screenshot]
+    - goal: "长按一条消息"
+      capture: [screenshot]
+    - goal: "点击 Convert to Task"
+      capture: [screenshot]
+    - goal: "等待创建"
+      hint: "wait 2s"
+    - goal: "截图验证badge"
+      capture: [screenshot]

@@ -1,0 +1,86 @@
+name: Source constraints lint
+
+# Incident-born static constraints as an explicit gate (test-discipline
+# announcement, #all 2026-07-25). check_source_constraints.py now holds the
+# 1.15.0 conditional-interaction-state crash guard, the task #82 native
+# Sign in with Apple contract and the #3823 no-production-runBlocking gate; the other steps below
+# are the visual fixture census, string edge spaces and no-production-visual-pages.
+# Behavior stays proven by behavior tests; this only blocks silent structural
+# regressions a refactor could reintroduce.
+
+on:
+  pull_request:
+    paths:
+      # check_no_conditional_interaction_state scans every .kt under these roots.
+      - "compose/designsystem/src/commonMain/kotlin/**/*.kt"
+      - "compose/shared/src/commonMain/kotlin/**/*.kt"
+      # Same glob as check_string_edge_spaces.py: a fourth locale must trigger
+      # this job on its own PR, not only after it lands (LiBai, #2327 review).
+      - "compose/shared/src/commonMain/composeResources/values*/strings.xml"
+      - "scripts/ci/check_source_constraints.py"
+      # check_no_production_run_blocking (#3823) scans every non-test Kotlin source set.
+      - "compose/**/src/**/*.kt"
+      # check_native_apple_authentication_services (task #82) reads these iOS files.
+      - "compose/iosApp/iosApp/RaftIosMobileOAuthHost.swift"
+      - "compose/iosApp/iosApp/iosApp.entitlements"
+      - "compose/iosApp/iosApp.xcodeproj/project.pbxproj"
+      - "scripts/ci/check_string_edge_spaces.py"
+      - "scripts/ci/visual_fixture_split_census.py"
+      - "scripts/ci/verify_no_production_visual_pages.py"
+      # visual_fixture_split_census.py and verify_no_production_visual_pages.py
+      # also scan the platform production source sets, the visual fixture source
+      # sets and the generated CMP page registries.
+      - "compose/shared/src/androidMain/kotlin/**/*.kt"
+      - "compose/shared/src/iosMain/kotlin/**/*.kt"
+      - "compose/shared/src/visualFixtures/**"
+      - "compose/shared/src/visualFixtureData/**"
+      - "compose/shared/src/visualFixturesOff/**"
+      - "compose/androidApp/src/main/java/**/*.kt"
+      - "scripts/cmp_generate_page_registry.py"
+      - ".github/workflows/source-constraints-lint.yml"
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  constraints:
+    name: Incident constraints invariant
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Self-test checker
+        run: python3 scripts/ci/check_source_constraints.py --self-test
+
+      - name: Enforce constraints
+        run: python3 scripts/ci/check_source_constraints.py
+
+      # task #189: runs inside this already-required job on purpose. A guard that
+      # is only wired to an optional task is how verifyNoProductionVisualPages
+      # collected nine violations while never actually running.
+      - name: Self-test visual fixture split census
+        run: python3 scripts/ci/visual_fixture_split_census.py --self-test
+
+      - name: Enforce visual fixture split census
+        run: python3 scripts/ci/visual_fixture_split_census.py
+
+      # task #536 (S8): aapt trims unquoted edge whitespace in <string>, so
+      # `prefix + bold(name) + suffix` rendered "deleteVisual Serverand" on
+      # Android while iOS kept the spaces. Resources must use &#160; at edges.
+      - name: Self-test string edge-space check
+        run: python3 scripts/ci/check_string_edge_spaces.py --self-test
+
+      - name: Enforce string edge-space check
+        run: python3 scripts/ci/check_string_edge_spaces.py
+
+      # task #194: verifyNoProductionVisualPages as a required CI gate.
+      - name: Self-test verify no production visual pages
+        run: python3 scripts/ci/verify_no_production_visual_pages.py --self-test
+
+      - name: Enforce no production visual pages
+        run: python3 scripts/ci/verify_no_production_visual_pages.py

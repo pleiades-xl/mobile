@@ -1,0 +1,42 @@
+id: open-thread-from-channel
+title: "Thread-在频道中打开消息的Thread"
+goal: "验证点击消息的reply chip能打开thread，thread内容正确渲染"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+assertions:
+  - id: thread-content-visible
+    goal: "Thread对话可见，包含父消息和回复"
+    type: visual_check
+    severity: critical
+  - id: thread-composer-visible
+    goal: "Thread回复输入框可见"
+    type: visual_check
+    severity: major
+android:
+  device: { type: emulator, api_level: 34 }
+  steps:
+    - goal: "打开 #all 频道"
+      capture: [screenshot]
+    - goal: "滚动找到带reply chip的消息"
+      capture: [screenshot]
+    - goal: "点击reply chip打开thread"
+      capture: [screenshot]
+    - goal: "等待thread加载"
+      hint: "wait 2s"
+    - goal: "截图验证thread内容"
+      capture: [screenshot]
+ios:
+  device: { type: ios-simulator, device_name: "iPhone 14" }
+  steps:
+    - goal: "打开 #all 频道"
+      capture: [screenshot]
+    - goal: "找到带reply chip的消息"
+      capture: [screenshot]
+    - goal: "点击打开thread"
+      capture: [screenshot]
+    - goal: "等待加载"
+      hint: "wait 2s"
+    - goal: "截图验证"
+      capture: [screenshot]

@@ -1,0 +1,48 @@
+id: select-and-upload-file
+title: "附件上传-选择文件/附件上传到对话"
+goal: "验证选择文件上传到对话功能正常"
+tier: L1
+max_retries: 1
+auth_fixture: alpha-qa
+launch_route: compose_slock_app_shell
+assertions:
+  - id: file-in-composer
+    goal: "选中文件在composer显示为附件"
+    type: visual_check
+    severity: critical
+  - id: file-sent
+    goal: "文件消息出现在对话中"
+    type: visual_check
+    severity: critical
+android:
+  device: { type: emulator, api_level: 34 }
+  steps:
+    - goal: "打开 #all 频道"
+      capture: [screenshot]
+    - goal: "找到并点击文件/附件按钮"
+      capture: [screenshot]
+    - goal: "在文件选择器选择一个文件"
+      capture: [screenshot]
+    - goal: "验证文件在composer预览"
+      capture: [screenshot]
+    - goal: "发送消息"
+      capture: [screenshot]
+    - goal: "等待上传"
+      hint: "wait 3s"
+    - goal: "验证文件在对话中"
+      capture: [screenshot]
+ios:
+  device: { type: ios-simulator, device_name: "iPhone 14" }
+  steps:
+    - goal: "打开 #all 频道"
+      capture: [screenshot]
+    - goal: "点击文件按钮"
+      capture: [screenshot]
+    - goal: "在Files picker选择文件"
+      capture: [screenshot]
+    - goal: "验证composer预览"
+      capture: [screenshot]
+    - goal: "发送"
+      capture: [screenshot]
+    - goal: "验证文件在对话中"
+      capture: [screenshot]

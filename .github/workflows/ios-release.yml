@@ -1,0 +1,779 @@
+name: iOS Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_major:
+        description: "versionName major (X)"
+        required: true
+        type: string
+        default: "1"
+      version_minor:
+        description: "versionName minor (Y)"
+        required: true
+        type: string
+        default: "0"
+      version_patch:
+        description: "versionName patch (Z)"
+        required: true
+        type: string
+        default: "0"
+      version_build:
+        description: "versionCode build (x*10_000_000 + y*100_000 + z*1_000 + build, 0-999)"
+        required: true
+        type: string
+        default: "0"
+      version_suffix:
+        description: "versionName suffix (e.g. rc1); leave empty for release"
+        required: false
+        type: string
+        default: ""
+      release_notes_version:
+        description: "Mobile release-notes directory version (for example 1.9.1)"
+        required: true
+        type: string
+      hands_channel:
+        description: "Hands channel: main | preview | nightly | debug"
+        required: true
+        type: choice
+        default: "main"
+        options:
+          - main
+          - preview
+          - nightly
+          - debug
+      export_method:
+        description: "Xcode export method"
+        required: true
+        type: choice
+        default: "app-store-connect"
+        options:
+          - app-store-connect
+          - ad-hoc
+          - enterprise
+          - development
+      macos_runner:
+        description: "macOS runner for Build + sign IPA. blacksmith (default) | macos-latest-xlarge (GitHub larger runner, ~30GB, billed) | macos-latest (GitHub standard, 7GB; Kotlin/Native release link may OOM)"
+        required: false
+        type: choice
+        default: "blacksmith-12vcpu-macos-latest"
+        options:
+          - blacksmith-12vcpu-macos-latest
+          - macos-latest-xlarge
+          - macos-latest
+      testflight_internal:
+        description: "After the Hands draft, upload to TestFlight and distribute to the internal group (Botiverse) only; never external, App Store, or Hands activation"
+        required: false
+        type: boolean
+        default: false
+      testflight_what_to_test:
+        description: "What to Test text (zh-Hans) for the internal TestFlight build; empty uses the build number and commit"
+        required: false
+        type: string
+        default: ""
+      release_mode:
+        description: "CI always creates a draft Hands release; publish separately after review"
+        required: true
+        type: choice
+        default: "draft"
+        options:
+          - draft
+
+env:
+  # Do NOT set -Xmx here: gradle.properties (project + $GRADLE_USER_HOME) takes
+  # precedence over GRADLE_OPTS, so a -Xmx here is silently overridden. The iOS
+  # archive heap is raised per-runner in the "Raise Gradle/Kotlin heap" step via
+  # $GRADLE_USER_HOME/gradle.properties (keeps the shared project file at 4g).
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dkotlin.compiler.execution.strategy=in-process"
+  GRADLE_MAX_WORKERS: "1"
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  resolve:
+    name: Resolve release parameters
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    outputs:
+      version_major: ${{ steps.p.outputs.version_major }}
+      version_minor: ${{ steps.p.outputs.version_minor }}
+      version_patch: ${{ steps.p.outputs.version_patch }}
+      version_build: ${{ steps.p.outputs.version_build }}
+      version_suffix: ${{ steps.p.outputs.version_suffix }}
+      version_name: ${{ steps.p.outputs.version_name }}
+      version_code: ${{ steps.p.outputs.version_code }}
+      release_notes_version: ${{ steps.p.outputs.release_notes_version }}
+      hands_channel: ${{ steps.p.outputs.hands_channel }}
+      export_method: ${{ steps.p.outputs.export_method }}
+      release_mode: ${{ steps.p.outputs.release_mode }}
+    steps:
+      - name: Checkout version formula
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts/ci
+          sparse-checkout-cone-mode: false
+      - id: p
+        shell: bash
+        run: |
+          set -euo pipefail
+          MAJOR="${{ inputs.version_major }}"
+          MINOR="${{ inputs.version_minor }}"
+          PATCH="${{ inputs.version_patch }}"
+          BUILD="${{ inputs.version_build }}"
+          SUFFIX="${{ inputs.version_suffix }}"
+          RELEASE_NOTES_VERSION="${{ inputs.release_notes_version }}"
+          if [[ ! "${RELEASE_NOTES_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release_notes_version must be an X.Y.Z version" >&2
+            exit 1
+          fi
+          VERSION_CODE="$(scripts/ci/version_code.sh "$MAJOR" "$MINOR" "$PATCH" "$BUILD")"
+          if [ -n "$SUFFIX" ]; then
+            VERSION_NAME="${MAJOR}.${MINOR}.${PATCH}-${SUFFIX}"
+          else
+            VERSION_NAME="${MAJOR}.${MINOR}.${PATCH}"
+          fi
+          {
+            echo "version_major=${MAJOR}"
+            echo "version_minor=${MINOR}"
+            echo "version_patch=${PATCH}"
+            echo "version_build=${BUILD}"
+            echo "version_suffix=${SUFFIX}"
+            echo "version_name=${VERSION_NAME}"
+            echo "version_code=${VERSION_CODE}"
+            echo "release_notes_version=${RELEASE_NOTES_VERSION}"
+            echo "hands_channel=${{ inputs.hands_channel }}"
+            echo "export_method=${{ inputs.export_method }}"
+            echo "release_mode=${{ inputs.release_mode }}"
+          } >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+
+  build_ios_release:
+    name: Build + sign IPA
+    runs-on: ${{ inputs.macos_runner || 'blacksmith-12vcpu-macos-latest' }}
+    # GitHub-hosted Macs are slower than the Blacksmith 12-vCPU pool; give them headroom.
+    timeout-minutes: ${{ (inputs.macos_runner || 'blacksmith-12vcpu-macos-latest') == 'blacksmith-12vcpu-macos-latest' && 60 || 120 }}
+    needs: resolve
+    outputs:
+      ipa_sha256: ${{ steps.validate.outputs.ipa_sha256 }}
+      ipa_size: ${{ steps.validate.outputs.ipa_size }}
+      dsym_sha256: ${{ steps.validate.outputs.dsym_sha256 }}
+      dsym_size: ${{ steps.validate.outputs.dsym_size }}
+    env:
+      RAFT_IOS_VERSION_NAME: ${{ needs.resolve.outputs.version_name }}
+      RAFT_IOS_VERSION_CODE: ${{ needs.resolve.outputs.version_code }}
+      RAFT_GIT_COMMIT: ${{ github.sha }}
+      SLOCK_IOS_DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.SLOCK_IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
+      SLOCK_IOS_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.SLOCK_IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+      SLOCK_IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.SLOCK_IOS_PROVISIONING_PROFILE_BASE64 }}
+      SLOCK_IOS_APPLE_TEAM_ID: ${{ secrets.SLOCK_IOS_APPLE_TEAM_ID }}
+      SLOCK_IOS_PROVISIONING_PROFILE_SPECIFIER: ${{ secrets.SLOCK_IOS_PROVISIONING_PROFILE_SPECIFIER }}
+      SLOCK_IOS_CODE_SIGN_IDENTITY: ${{ secrets.SLOCK_IOS_CODE_SIGN_IDENTITY }}
+      SLOCK_IOS_EXPORT_OPTIONS_PLIST_BASE64: ${{ secrets.SLOCK_IOS_EXPORT_OPTIONS_PLIST_BASE64 }}
+    steps:
+      # Blacksmith macOS starts its local Actions-results proxy with the job.
+      # Give it a bounded readiness window before any action can use artifact
+      # or cache APIs. Remove this once the fleet has a server-side health gate.
+      - name: Warm macOS artifact proxy
+        shell: bash
+        run: sleep 5
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Pin Xcode
+        # Build with a chosen Xcode, not the runner image's default: the SDK decides how iOS
+        # lays the app out (the iOS 27.1 SDK makes it edge-to-edge on iPhone Duo, status bar on
+        # the right edge). Moving SDKs is a deliberate change (iPhone Duo audit, 2026-10-27).
+        env:
+          XCODE_APP_PATH: /Applications/Xcode_26.6.app
+        run: bash scripts/ci/select_ios_xcode.sh
+
+      - name: Record Xcode and iOS SDK
+        # The "Raft iOS SDK tier" of this build in the release summary (iPhone Duo audit §7).
+        # Log-only: the script never exits non-zero, and continue-on-error keeps it that way
+        # if it ever regresses. An odd version string must not stop a release.
+        continue-on-error: true
+        env:
+          XCODE_APP_PATH: /Applications/Xcode_26.6.app
+          RAFT_DEFAULT_XCODE_APP: /Applications/Xcode_26.6.app
+        run: bash scripts/ci/record_ios_toolchain.sh
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Apply Gradle cache policy
+        uses: ./.github/actions/gradle-cache-policy
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Raise Gradle/Kotlin heap for the iOS archive (this runner only)
+        shell: bash
+        env:
+          RAFT_MACOS_RUNNER: ${{ inputs.macos_runner || 'blacksmith-12vcpu-macos-latest' }}
+        run: |
+          set -euo pipefail
+          # compose/gradle.properties caps the build JVM and Kotlin daemon at
+          # 4g, which OOMs Kotlin/Native ObjC-framework generation for the shared
+          # module during archive. Override it via $GRADLE_USER_HOME/gradle.properties
+          # (higher precedence than the project file), scoped to THIS macOS
+          # runner only — so Android CI (ubuntu) and local dev keep their 4g.
+          # Two release archives exhausted the former 8g heap in Kotlin/Native's
+          # devirtualization analysis. The runner has ~30GB RAM, so 12g still
+          # leaves room for Xcode/clang while keeping Gradle at one worker.
+          # GitHub's standard macos-latest has only 7GB RAM: 12g would swap/kill, so
+          # cap at 5g there and warn — the release devirtualization pass may OOM.
+          HEAP=12g
+          if [ "${RAFT_MACOS_RUNNER}" = "macos-latest" ]; then
+            HEAP=5g
+            echo "::warning::macos-latest has ~7GB RAM; Kotlin/Native release archive runs with a 5g heap and may OOM. Prefer blacksmith-12vcpu-macos-latest or macos-latest-xlarge."
+          fi
+          GUH="${GRADLE_USER_HOME:-$HOME/.gradle}"
+          mkdir -p "$GUH"
+          printf '%s\n' "org.gradle.jvmargs=-Xmx${HEAP} -Xss4m -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Dkotlin.daemon.jvm.options\\=\"-Xmx${HEAP},-Xss4m\"" >> "$GUH/gradle.properties"
+          echo "Kotlin/Gradle heap for ${RAFT_MACOS_RUNNER}: ${HEAP}"
+
+      # ~/.konan (Kotlin/Native distribution + LLVM/libffi/sysroot deps) is not
+      # under ~/.gradle, so setup-gradle never restores it and every archive
+      # re-downloaded it inside the nested Xcode Gradle run. A cold ~/.konan is
+      # also what made Xcode's MR-bundle phase relink the framework (see
+      # visual-testing.yml). Keyed on the exact Kotlin version; actions/cache
+      # works on Blacksmith and GitHub-hosted macOS runners alike.
+      - name: Resolve Kotlin version
+        id: kotlin
+        shell: bash
+        run: |
+          set -euo pipefail
+          KOTLIN_VERSION="$(sed -n 's/^kotlin[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' compose/gradle/libs.versions.toml | head -n 1)"
+          [ -n "${KOTLIN_VERSION}" ] || { echo "::error::kotlin version not found in compose/gradle/libs.versions.toml"; exit 1; }
+          echo "version=${KOTLIN_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Kotlin ${KOTLIN_VERSION}"
+
+      - name: Cache Kotlin/Native (~/.konan)
+        uses: actions/cache@v6
+        with:
+          path: ~/.konan
+          key: konan-v1-${{ runner.os }}-${{ runner.arch }}-kotlin-${{ steps.kotlin.outputs.version }}
+
+      - name: Ensure shared framework placeholder
+        working-directory: compose
+        shell: bash
+        run: ./gradlew :shared:generateDummyFramework --no-daemon --console=plain --max-workers=${{ env.GRADLE_MAX_WORKERS }} --stacktrace
+
+      - name: Pod install
+        working-directory: compose/iosApp
+        shell: bash
+        run: pod install
+
+      - name: Import Apple signing assets
+        id: signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "${SLOCK_IOS_DISTRIBUTION_CERTIFICATE_BASE64}" ] || { echo "::error::Missing SLOCK_IOS_DISTRIBUTION_CERTIFICATE_BASE64"; exit 1; }
+          [ -n "${SLOCK_IOS_DISTRIBUTION_CERTIFICATE_PASSWORD}" ] || { echo "::error::Missing SLOCK_IOS_DISTRIBUTION_CERTIFICATE_PASSWORD"; exit 1; }
+          [ -n "${SLOCK_IOS_PROVISIONING_PROFILE_BASE64}" ] || { echo "::error::Missing SLOCK_IOS_PROVISIONING_PROFILE_BASE64"; exit 1; }
+
+          KEYCHAIN_PATH="${RUNNER_TEMP}/slock-ios-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          CERT_PATH="${RUNNER_TEMP}/slock-ios-distribution.p12"
+          PROFILE_PATH="${RUNNER_TEMP}/slock-ios.mobileprovision"
+          PROFILE_PLIST="${RUNNER_TEMP}/slock-ios-profile.plist"
+
+          # Decode a base64 secret robustly: tolerate whitespace/newline wrapping
+          # (e.g. secrets created with `base64` without -b0), and fail with a
+          # clear, secret-named error if the value is empty or not valid base64
+          # — instead of the opaque "base64: stdin: (null): error decoding
+          # base64 input stream" that gives no clue which secret is wrong.
+          decode_secret() {
+            local value="$1" out="$2" name="$3"
+            if ! printf '%s' "${value}" | tr -d '[:space:]' | base64 --decode > "${out}" 2>/dev/null || [ ! -s "${out}" ]; then
+              echo "::error::${name} is empty or not valid base64. Re-create it from the raw file, e.g. \`base64 -i <file> | pbcopy\` then \`gh secret set ${name}\` — do not store the raw binary."
+              exit 1
+            fi
+          }
+          decode_secret "${SLOCK_IOS_DISTRIBUTION_CERTIFICATE_BASE64}" "${CERT_PATH}" "SLOCK_IOS_DISTRIBUTION_CERTIFICATE_BASE64"
+          decode_secret "${SLOCK_IOS_PROVISIONING_PROFILE_BASE64}" "${PROFILE_PATH}" "SLOCK_IOS_PROVISIONING_PROFILE_BASE64"
+
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security import "${CERT_PATH}" -P "${SLOCK_IOS_DISTRIBUTION_CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${KEYCHAIN_PATH}"
+          security list-keychain -d user -s "${KEYCHAIN_PATH}" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+
+          mkdir -p "${HOME}/Library/MobileDevice/Provisioning Profiles"
+          security cms -D -i "${PROFILE_PATH}" > "${PROFILE_PLIST}"
+          PROFILE_UUID="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "${PROFILE_PLIST}")"
+          PROFILE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :Name' "${PROFILE_PLIST}")"
+          PROFILE_TEAM="$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "${PROFILE_PLIST}")"
+          cp "${PROFILE_PATH}" "${HOME}/Library/MobileDevice/Provisioning Profiles/${PROFILE_UUID}.mobileprovision"
+
+          echo "profile_uuid=${PROFILE_UUID}" >> "$GITHUB_OUTPUT"
+          echo "profile_name=${PROFILE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "profile_team=${PROFILE_TEAM}" >> "$GITHUB_OUTPUT"
+          # Raft message links (#proj-mobile #26): the app declares Associated Domains
+          # (applinks:app.raft.build / open.raft.build). A profile generated before that
+          # capability was enabled on the App ID cannot sign it; archive without the
+          # entitlement then (Universal Links stay off in that build) instead of failing.
+          if /usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.associated-domains' "${PROFILE_PLIST}" >/dev/null 2>&1; then
+            echo "associated_domains=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "associated_domains=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Provisioning profile ${PROFILE_NAME} has no Associated Domains entitlement; this build ships without Universal Links. Enable Associated Domains on the build.raft.app App ID, regenerate the App Store profile and update SLOCK_IOS_PROVISIONING_PROFILE_BASE64."
+          fi
+          echo "keychain_path=${KEYCHAIN_PATH}" >> "$GITHUB_OUTPUT"
+
+      - name: Test diagnostics path admission
+        shell: bash
+        run: compose/iosApp/scripts/test_diagnostics_path_admission.sh
+
+      - name: Test diagnostics snapshot names
+        shell: bash
+        run: compose/iosApp/scripts/test_diagnostics_snapshot_names.sh
+
+      - name: Test diagnostics environment rows
+        shell: bash
+        run: compose/iosApp/scripts/test_diagnostics_environment_rows.sh
+
+      # Link the release framework once, as its own visible step (same pattern
+      # as test.yml / visual-testing.yml), instead of inside xcodebuild's
+      # CocoaPods "[CP-User] Build shared" phase, whose output Xcode buffers
+      # until the phase ends. The archive below skips that phase with
+      # OVERRIDE_KOTLIN_BUILD_IDE_SUPPORTED=YES and consumes this framework.
+      # platform/archs/configuration match what the archive passed to the
+      # phase before (generic iOS device, Release => iphoneos / arm64).
+      # The per-runner heap (12g, or 5g on macos-latest) comes from the
+      # $GRADLE_USER_HOME/gradle.properties written by the heap step above,
+      # which this ./gradlew reads like the Xcode-nested runs did.
+      - name: Build shared framework (Release, iosArm64)
+        working-directory: compose
+        shell: bash
+        run: |
+          ./gradlew :shared:syncFramework \
+            -Pkotlin.native.cocoapods.platform=iphoneos \
+            -Pkotlin.native.cocoapods.archs=arm64 \
+            -Pkotlin.native.cocoapods.configuration=Release \
+            --no-daemon \
+            --console=plain \
+            --max-workers=${{ env.GRADLE_MAX_WORKERS }} \
+            --stacktrace
+
+      - name: Archive app
+        working-directory: compose/iosApp
+        shell: bash
+        env:
+          PROFILE_NAME: ${{ steps.signing.outputs.profile_name }}
+          PROFILE_TEAM: ${{ steps.signing.outputs.profile_team }}
+          PROFILE_ASSOCIATED_DOMAINS: ${{ steps.signing.outputs.associated_domains }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/ios-release"
+          ARCHIVE_PATH="${RUNNER_TEMP}/ios-release/iosApp.xcarchive"
+          TEAM_ID="${SLOCK_IOS_APPLE_TEAM_ID:-${PROFILE_TEAM}}"
+          PROFILE_SPECIFIER="${SLOCK_IOS_PROVISIONING_PROFILE_SPECIFIER:-${PROFILE_NAME}}"
+          CODE_SIGN_IDENTITY="${SLOCK_IOS_CODE_SIGN_IDENTITY:-Apple Distribution}"
+          BUILD_SETTINGS=(
+            "MARKETING_VERSION=${RAFT_IOS_VERSION_NAME}"
+            "CURRENT_PROJECT_VERSION=${RAFT_IOS_VERSION_CODE}"
+            "RAFT_IOS_VERSION_NAME=${RAFT_IOS_VERSION_NAME}"
+            "RAFT_IOS_VERSION_CODE=${RAFT_IOS_VERSION_CODE}"
+            "RAFT_GIT_COMMIT=${GITHUB_SHA}"
+            "CODE_SIGN_STYLE=Manual"
+            "DEVELOPMENT_TEAM=${TEAM_ID}"
+            "CODE_SIGN_IDENTITY=${CODE_SIGN_IDENTITY}"
+            "PROVISIONING_PROFILE_SPECIFIER=${PROFILE_SPECIFIER}"
+            # Device archive is arm64-only (the framework step links iosArm64).
+            "ARCHS=arm64"
+            # The framework was linked by the previous step: skip the CocoaPods
+            # "Build shared" phase, and let the MR-bundle phase reuse that link
+            # instead of relinking (~24 min; see compose/shared/build.gradle.kts).
+            "OVERRIDE_KOTLIN_BUILD_IDE_SUPPORTED=YES"
+            "RAFT_IOS_REUSE_LINKED_FRAMEWORK=YES"
+          )
+          if [ "${PROFILE_ASSOCIATED_DOMAINS:-false}" != "true" ]; then
+            # Same entitlements minus Associated Domains (see the signing step).
+            FALLBACK_ENTITLEMENTS="${RUNNER_TEMP}/ios-release/iosApp-no-associated-domains.entitlements"
+            cp iosApp/iosApp.entitlements "${FALLBACK_ENTITLEMENTS}"
+            # PlistBuddy, not `plutil -remove`: plutil reads the dots in the key as a key path.
+            /usr/libexec/PlistBuddy -c 'Delete :com.apple.developer.associated-domains' "${FALLBACK_ENTITLEMENTS}"
+            BUILD_SETTINGS+=("CODE_SIGN_ENTITLEMENTS=${FALLBACK_ENTITLEMENTS}")
+          fi
+          set -o pipefail
+          ARCHIVE_LOG="${RUNNER_TEMP}/ios-release/xcodebuild-archive.log"
+          xcodebuild \
+            -workspace iosApp.xcworkspace \
+            -scheme iosApp \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "${ARCHIVE_PATH}" \
+            "${BUILD_SETTINGS[@]}" \
+            archive | tee "${ARCHIVE_LOG}"
+          echo "ARCHIVE_PATH=${ARCHIVE_PATH}" >> "$GITHUB_ENV"
+          # Surface a regression of the duplicate link without failing a release.
+          if grep -E '> Task :shared:link[A-Za-z0-9]*Framework[A-Za-z0-9]*$' "${ARCHIVE_LOG}"; then
+            echo "::warning::xcodebuild relinked the shared framework inside the archive (expected SKIPPED); the archive took the slow path."
+          fi
+
+      - name: Export signed IPA
+        working-directory: compose/iosApp
+        shell: bash
+        env:
+          PROFILE_NAME: ${{ steps.signing.outputs.profile_name }}
+          PROFILE_TEAM: ${{ steps.signing.outputs.profile_team }}
+        run: |
+          set -euo pipefail
+          EXPORT_DIR="${RUNNER_TEMP}/ios-release/export"
+          EXPORT_OPTIONS="${RUNNER_TEMP}/ios-release/ExportOptions.plist"
+          mkdir -p "${EXPORT_DIR}"
+          if [ -n "${SLOCK_IOS_EXPORT_OPTIONS_PLIST_BASE64:-}" ]; then
+            echo "${SLOCK_IOS_EXPORT_OPTIONS_PLIST_BASE64}" | base64 --decode > "${EXPORT_OPTIONS}"
+          else
+            TEAM_ID="${SLOCK_IOS_APPLE_TEAM_ID:-${PROFILE_TEAM}}"
+            PROFILE_SPECIFIER="${SLOCK_IOS_PROVISIONING_PROFILE_SPECIFIER:-${PROFILE_NAME}}"
+            /usr/libexec/PlistBuddy -c "Add :method string ${{ needs.resolve.outputs.export_method }}" "${EXPORT_OPTIONS}"
+            /usr/libexec/PlistBuddy -c "Add :signingStyle string manual" "${EXPORT_OPTIONS}"
+            /usr/libexec/PlistBuddy -c "Add :teamID string ${TEAM_ID}" "${EXPORT_OPTIONS}"
+            /usr/libexec/PlistBuddy -c "Add :stripSwiftSymbols bool true" "${EXPORT_OPTIONS}"
+            /usr/libexec/PlistBuddy -c "Add :compileBitcode bool false" "${EXPORT_OPTIONS}"
+            /usr/libexec/PlistBuddy -c "Add :uploadSymbols bool true" "${EXPORT_OPTIONS}"
+            /usr/libexec/PlistBuddy -c "Add :provisioningProfiles dict" "${EXPORT_OPTIONS}"
+            /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:build.raft.app string ${PROFILE_SPECIFIER}" "${EXPORT_OPTIONS}"
+          fi
+          xcodebuild \
+            -exportArchive \
+            -archivePath "${ARCHIVE_PATH}" \
+            -exportPath "${EXPORT_DIR}" \
+            -exportOptionsPlist "${EXPORT_OPTIONS}" | tee "${RUNNER_TEMP}/ios-release/xcodebuild-export.log"
+
+          DIST_DIR="${GITHUB_WORKSPACE}/dist/ios"
+          mkdir -p "${DIST_DIR}"
+          IPA="$(find "${EXPORT_DIR}" -maxdepth 1 -type f -name '*.ipa' | sort | head -n 1)"
+          [ -n "${IPA}" ] || { echo "No IPA exported under ${EXPORT_DIR}" >&2; exit 1; }
+          cp "${IPA}" "${DIST_DIR}/Raft-${RAFT_IOS_VERSION_NAME}-${RAFT_IOS_VERSION_CODE}.ipa"
+          ditto -c -k --keepParent "${ARCHIVE_PATH}/dSYMs" "${DIST_DIR}/Raft-${RAFT_IOS_VERSION_NAME}-${RAFT_IOS_VERSION_CODE}.dSYM.zip"
+          cp "${EXPORT_OPTIONS}" "${DIST_DIR}/ExportOptions.plist"
+          echo "IPA_PATH=${DIST_DIR}/Raft-${RAFT_IOS_VERSION_NAME}-${RAFT_IOS_VERSION_CODE}.ipa" >> "$GITHUB_ENV"
+          echo "DSYM_PATH=${DIST_DIR}/Raft-${RAFT_IOS_VERSION_NAME}-${RAFT_IOS_VERSION_CODE}.dSYM.zip" >> "$GITHUB_ENV"
+
+      - name: Validate IPA + dSYM boundary
+        id: validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          TMP_DIR="$(mktemp -d)"
+          DSYM_TMP="$(mktemp -d)"
+          unzip -q "${IPA_PATH}" -d "${TMP_DIR}/ipa"
+          APP_PATH="$(find "${TMP_DIR}/ipa/Payload" -maxdepth 1 -type d -name '*.app' | head -n 1)"
+          [ -n "${APP_PATH}" ] || { echo "No .app found in IPA" >&2; exit 1; }
+          INFO_PLIST="${APP_PATH}/Info.plist"
+          BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${INFO_PLIST}")"
+          VERSION_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${INFO_PLIST}")"
+          VERSION_CODE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${INFO_PLIST}")"
+          EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${INFO_PLIST}")"
+          [ "${BUNDLE_ID}" = "build.raft.app" ] || { echo "Unexpected bundle id: ${BUNDLE_ID}" >&2; exit 1; }
+          [ "${VERSION_NAME}" = "${RAFT_IOS_VERSION_NAME}" ] || { echo "Unexpected version name: ${VERSION_NAME}" >&2; exit 1; }
+          [ "${VERSION_CODE}" = "${RAFT_IOS_VERSION_CODE}" ] || { echo "Unexpected version code: ${VERSION_CODE}" >&2; exit 1; }
+          [ "${VERSION_CODE}" != "1" ] || { echo "CFBundleVersion must not be the project default 1" >&2; exit 1; }
+          [ -f "${APP_PATH}/embedded.mobileprovision" ] || { echo "embedded.mobileprovision missing" >&2; exit 1; }
+          # App strings and bundled files are Compose Multiplatform resources, copied by the
+          # "[CP-User] Copy Compose resources to app" phase (:ui-cmp:syncComposeResourcesForXcodeApp).
+          APP_RES="${APP_PATH}/compose-resources/composeResources/build.raft.app.resources"
+          for values_dir in values values-ja values-zh-rCN; do
+            find "${APP_RES}/${values_dir}" -name '*.cvr' -type f 2>/dev/null | grep -q . || { echo "Compose string catalog ${values_dir} missing from app" >&2; exit 1; }
+          done
+          [ -f "${APP_RES}/files/reactions/reaction_atlas_v1.png" ] || { echo "reaction atlas missing (expected files/reactions/reaction_atlas_v1.png in compose-resources)" >&2; exit 1; }
+          find "${APP_PATH}" -name 'SDWebImageSVGCoder.framework' -type d | grep -q . || { echo "SDWebImageSVGCoder.framework missing" >&2; exit 1; }
+
+          dwarfdump --uuid "${APP_PATH}/${EXECUTABLE}" | awk '{print $2}' | sort -u > "${TMP_DIR}/app-uuids.txt"
+          unzip -q "${DSYM_PATH}" -d "${DSYM_TMP}"
+          find "${DSYM_TMP}" -type f -path '*/Contents/Resources/DWARF/*' -print0 \
+            | xargs -0 dwarfdump --uuid \
+            | awk '{print $2}' \
+            | sort -u > "${TMP_DIR}/dsym-uuids.txt"
+          if ! comm -12 "${TMP_DIR}/app-uuids.txt" "${TMP_DIR}/dsym-uuids.txt" | grep -q .; then
+            echo "No matching app binary UUID in dSYM zip" >&2
+            echo "app UUIDs:" >&2
+            cat "${TMP_DIR}/app-uuids.txt" >&2
+            echo "dSYM UUIDs:" >&2
+            cat "${TMP_DIR}/dsym-uuids.txt" >&2
+            exit 1
+          fi
+
+          IPA_SHA="$(shasum -a 256 "${IPA_PATH}" | awk '{print $1}')"
+          DSYM_SHA="$(shasum -a 256 "${DSYM_PATH}" | awk '{print $1}')"
+          IPA_SIZE="$(wc -c <"${IPA_PATH}" | tr -d '[:space:]')"
+          DSYM_SIZE="$(wc -c <"${DSYM_PATH}" | tr -d '[:space:]')"
+          echo "ipa_sha256=${IPA_SHA}" >> "$GITHUB_OUTPUT"
+          echo "dsym_sha256=${DSYM_SHA}" >> "$GITHUB_OUTPUT"
+          echo "ipa_size=${IPA_SIZE}" >> "$GITHUB_OUTPUT"
+          echo "dsym_size=${DSYM_SIZE}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-release-ipa
+          path: dist/ios/*.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload dSYM artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-release-dsym
+          path: dist/ios/*.dSYM.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload export diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-release-diagnostics
+          path: |
+            ${{ runner.temp }}/ios-release/*.log
+            dist/ios/ExportOptions.plist
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "### iOS release build summary"
+            echo
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| **versionName** | \`${{ needs.resolve.outputs.version_name }}\` |"
+            echo "| **versionCode / CFBundleVersion** | \`${{ needs.resolve.outputs.version_code }}\` |"
+            echo "| **IPA sha256** | \`${{ steps.validate.outputs.ipa_sha256 || '(not validated)' }}\` |"
+            echo "| **dSYM sha256** | \`${{ steps.validate.outputs.dsym_sha256 || '(not validated)' }}\` |"
+            echo "| **Hands channel target** | \`${{ needs.resolve.outputs.hands_channel }}\` |"
+            echo "| **Create Hands draft** | \`true\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Gradle failure diagnostics
+        if: failure()
+        uses: ./.github/actions/gradle-failure-diagnostics
+
+  create_hands_draft:
+    name: Upload to Hands + create draft
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    timeout-minutes: 15
+    needs: [resolve, build_ios_release]
+    environment:
+      name: production
+    env:
+      HANDS_APP_SLUG: raft-ios
+      HANDS_BEARER_TOKEN: ${{ secrets.QUIVER_IOS_BEARER_TOKEN }}
+      HANDS_AUTH_TOKEN: ${{ secrets.QUIVER_IOS_BEARER_TOKEN }}
+      HANDS_CHANNEL: ${{ needs.resolve.outputs.hands_channel }}
+      HANDS_API: https://hands.build
+      RAFT_IOS_VERSION_NAME: ${{ needs.resolve.outputs.version_name }}
+      RAFT_IOS_VERSION_CODE: ${{ needs.resolve.outputs.version_code }}
+      SLOCK_IOS_EXPORT_METHOD: ${{ needs.resolve.outputs.export_method }}
+      SLOCK_HANDS_RELEASE_TYPE: stable
+      SLOCK_HANDS_DRAFT: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download signed IPA
+        uses: actions/download-artifact@v8
+        with:
+          name: ios-release-ipa
+          path: dist/ios/
+
+      - name: Download dSYM
+        uses: actions/download-artifact@v8
+        with:
+          name: ios-release-dsym
+          path: dist/ios/
+
+      - name: Install Hands CLI (npm)
+        shell: bash
+        run: |
+          npm install -g @botiverse/hands-cli@0.5.31
+          hands --version
+
+      - name: Generate changelog from git history
+        shell: bash
+        run: |
+          set -euo pipefail
+          HANDS_API_BASE="${HANDS_API:-https://hands.build}"
+          HANDS_TOKEN="${HANDS_BEARER_TOKEN}"
+          APP_ID="$(curl -fsS -H "Authorization: Bearer ${HANDS_TOKEN}" \
+            "${HANDS_API_BASE}/api/apps" \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(next((a['id'] for a in d.get('apps',[]) if a.get('slug')=='raft-ios'), ''))" \
+            2>/dev/null || true)"
+          PREV_COMMIT=""
+          if [ -n "${APP_ID}" ]; then
+            PREV_COMMIT="$(curl -fsS -H "Authorization: Bearer ${HANDS_TOKEN}" \
+              "${HANDS_API_BASE}/api/apps/${APP_ID}/builds" \
+              | python3 -c "import json,sys; d=json.load(sys.stdin); bs=d.get('builds') or []; p=(bs[0].get('provenance_json') if bs else None); p=json.loads(p) if isinstance(p,str) else (p or {}); print(p.get('source_commit') or '')" \
+              2>/dev/null || true)"
+          fi
+          if [ -n "${PREV_COMMIT}" ] && git cat-file -e "${PREV_COMMIT}^{commit}" 2>/dev/null; then
+            git log --no-merges --pretty='- %s' --max-count=40 "${PREV_COMMIT}..HEAD" > changelog.txt
+          fi
+          if [ ! -s changelog.txt ]; then
+            git log --no-merges --pretty='- %s' -15 > changelog.txt
+          fi
+          cat changelog.txt
+
+      - name: Publish signed IPA + dSYM to Hands
+        id: publish-hands-release
+        shell: bash
+        env:
+          SLOCK_RELEASE_CHANGELOG_FILE: ${{ github.workspace }}/changelog.txt
+          SLOCK_RELEASE_CHANGELOG_PLATFORM_DIR: ${{ github.workspace }}/change-logs/${{ needs.resolve.outputs.release_notes_version }}/ios
+          SLOCK_RELEASE_CHANGELOG_LEGACY_DIR: ${{ github.workspace }}/change-logs/${{ needs.resolve.outputs.release_notes_version }}
+        run: |
+          set -euo pipefail
+          if [ -s "${SLOCK_RELEASE_CHANGELOG_PLATFORM_DIR}/zh-CN.md" ] && [ -s "${SLOCK_RELEASE_CHANGELOG_PLATFORM_DIR}/en.md" ] && [ -s "${SLOCK_RELEASE_CHANGELOG_PLATFORM_DIR}/ja.md" ]; then
+            export SLOCK_RELEASE_CHANGELOG_ZH_FILE="${SLOCK_RELEASE_CHANGELOG_PLATFORM_DIR}/zh-CN.md"
+            export SLOCK_RELEASE_CHANGELOG_EN_FILE="${SLOCK_RELEASE_CHANGELOG_PLATFORM_DIR}/en.md"
+            export SLOCK_RELEASE_CHANGELOG_JA_FILE="${SLOCK_RELEASE_CHANGELOG_PLATFORM_DIR}/ja.md"
+            echo "Using reviewed iOS changelog from change-logs/${{ needs.resolve.outputs.release_notes_version }}/ios/"
+          elif find "${SLOCK_RELEASE_CHANGELOG_PLATFORM_DIR}" -maxdepth 1 -type f \( -name 'zh-CN.md' -o -name 'en.md' -o -name 'ja.md' \) -print -quit 2>/dev/null | grep -q .; then
+            echo "Reviewed iOS changelog is incomplete; zh-CN.md, en.md, and ja.md are all required." >&2
+            exit 1
+          elif [ -s "${SLOCK_RELEASE_CHANGELOG_LEGACY_DIR}/zh-CN.md" ] && [ -s "${SLOCK_RELEASE_CHANGELOG_LEGACY_DIR}/en.md" ] && [ -s "${SLOCK_RELEASE_CHANGELOG_LEGACY_DIR}/ja.md" ]; then
+            export SLOCK_RELEASE_CHANGELOG_ZH_FILE="${SLOCK_RELEASE_CHANGELOG_LEGACY_DIR}/zh-CN.md"
+            export SLOCK_RELEASE_CHANGELOG_EN_FILE="${SLOCK_RELEASE_CHANGELOG_LEGACY_DIR}/en.md"
+            export SLOCK_RELEASE_CHANGELOG_JA_FILE="${SLOCK_RELEASE_CHANGELOG_LEGACY_DIR}/ja.md"
+            echo "Using legacy reviewed changelog from change-logs/${{ needs.resolve.outputs.release_notes_version }}/"
+          elif find "${SLOCK_RELEASE_CHANGELOG_LEGACY_DIR}" -maxdepth 1 -type f \( -name 'zh-CN.md' -o -name 'en.md' -o -name 'ja.md' \) -print -quit 2>/dev/null | grep -q .; then
+            echo "Legacy reviewed iOS changelog is incomplete; zh-CN.md, en.md, and ja.md are all required." >&2
+            exit 1
+          else
+            unset SLOCK_RELEASE_CHANGELOG_ZH_FILE SLOCK_RELEASE_CHANGELOG_EN_FILE SLOCK_RELEASE_CHANGELOG_JA_FILE
+            echo "Reviewed iOS changelog not found; falling back to generated git history."
+          fi
+          IPA="$(find dist/ios -type f -name '*.ipa' | sort | head -n 1)"
+          DSYM="$(find dist/ios -type f -name '*.dSYM.zip' | sort | head -n 1)"
+          ./scripts/publish_ios_hands_release.sh \
+            --ipa "${IPA}" \
+            --dsym "${DSYM}" \
+            --channel "${HANDS_CHANNEL}" \
+            --release-type "${SLOCK_HANDS_RELEASE_TYPE}" \
+            --export-method "${SLOCK_IOS_EXPORT_METHOD}" \
+            --draft \
+            | tee hands-publish.log
+          RELEASE_ID="$(awk '/^[[:space:]]*release:/ {print $2}' hands-publish.log | tail -n 1)"
+          if [ -n "${RELEASE_ID}" ]; then
+            echo "release_id=${RELEASE_ID}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "### Hands iOS publish summary"
+            echo
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| **Hands channel** | \`${{ needs.resolve.outputs.hands_channel }}\` |"
+            echo "| **Release mode** | \`${{ needs.resolve.outputs.release_mode }}\` |"
+            echo "| **Release notes version** | \`${{ needs.resolve.outputs.release_notes_version }}\` |"
+            echo "| **Release id** | \`${{ steps.publish-hands-release.outputs.release_id || '(none)' }}\` |"
+            echo "| **IPA sha256** | \`${{ needs.build_ios_release.outputs.ipa_sha256 }}\` |"
+            echo "| **dSYM sha256** | \`${{ needs.build_ios_release.outputs.dsym_sha256 }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  testflight_internal:
+    name: TestFlight internal (Botiverse)
+    if: ${{ inputs.testflight_internal && needs.resolve.outputs.export_method == 'app-store-connect' }}
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    timeout-minutes: 75
+    needs: [resolve, build_ios_release, create_hands_draft]
+    environment:
+      name: production
+    env:
+      HANDS_AUTH_TOKEN: ${{ secrets.QUIVER_IOS_BEARER_TOKEN }}
+      HANDS_API: https://hands.build
+      RAFT_IOS_VERSION_CODE: ${{ needs.resolve.outputs.version_code }}
+      WHAT_TO_TEST: ${{ inputs.testflight_what_to_test }}
+    steps:
+      - name: Install Hands CLI (npm)
+        shell: bash
+        run: |
+          npm install -g @botiverse/hands-cli@0.5.31
+          hands --version
+
+      - name: Resolve the Hands build this run published
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Match version code AND source commit: a stale build with the same
+          # code (e.g. an earlier dispatch) must never be distributed.
+          hands --json builds list raft-ios > builds.json
+          read -r BUILD_ID APP_ID <<<"$(python3 - <<'PY'
+          import json, os
+          d = json.load(open("builds.json"))
+          vc = os.environ["RAFT_IOS_VERSION_CODE"]
+          sha = os.environ["GITHUB_SHA"]
+          for b in d.get("builds", []):
+              v = b.get("build_metadata_json")
+              try:
+                  m = v if isinstance(v, dict) else json.loads(v or "{}")
+              except ValueError:
+                  continue
+              if str(b.get("version_code")) == vc and m.get("source_commit") == sha:
+                  print(b["id"], b["app_id"]); break
+          PY
+          )" || true
+          if [ -z "${BUILD_ID:-}" ]; then
+            echo "No Hands build with version_code=${RAFT_IOS_VERSION_CODE} source_commit=${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          echo "build_id=${BUILD_ID}" >> "$GITHUB_OUTPUT"
+          echo "app_id=${APP_ID}" >> "$GITHUB_OUTPUT"
+          echo "Hands build ${BUILD_ID}"
+
+      # Not idempotent: re-running only this job after a successful upload makes
+      # App Store Connect reject the duplicate CFBundleVersion. Re-dispatch with a
+      # new version_build instead.
+      - name: Upload to App Store Connect
+        id: upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          hands --json api POST "/api/apps/${{ steps.build.outputs.app_id }}/builds/${{ steps.build.outputs.build_id }}/testflight-upload" | tee upload.json
+          python3 -c "import json,sys;d=json.load(open('upload.json'));sys.exit(0 if d.get('ok') else 1)"
+          echo "upload_id=$(python3 -c "import json;print(json.load(open('upload.json')).get('build_upload_id',''))")" >> "$GITHUB_OUTPUT"
+
+      - name: Distribute to the internal group and wait
+        shell: bash
+        run: |
+          set -euo pipefail
+          GROUP_ID="$(hands --json builds testflight-groups raft-ios "${{ steps.build.outputs.build_id }}" \
+            | python3 -c "import json,sys;d=json.load(sys.stdin);print(next(g['id'] for g in d['groups'] if g['is_internal'] and g['name']=='Botiverse'))")"
+          if [ -z "${WHAT_TO_TEST}" ]; then
+            WHAT_TO_TEST="内部测试包 ${RAFT_IOS_VERSION_CODE}（${GITHUB_SHA:0:9}）"
+          fi
+          printf '%s\n' "${WHAT_TO_TEST}" > wtt.txt
+          hands builds testflight-publish raft-ios "${{ steps.build.outputs.build_id }}" \
+            --distribution internal \
+            --group-id "${GROUP_ID}" \
+            --what-to-test-file zh-Hans=wtt.txt \
+            --bundle-id build.raft.app \
+            --wait | tee publish.log
+          {
+            echo "### TestFlight internal"
+            echo
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| **Hands build** | \`${{ steps.build.outputs.build_id }}\` |"
+            echo "| **ASC build upload** | \`${{ steps.upload.outputs.upload_id }}\` |"
+            echo "| **Group** | Botiverse (internal) |"
+          } >> "$GITHUB_STEP_SUMMARY"
