@@ -6,8 +6,10 @@
 # 连着好几台 iPhone 时，用 IPHONE=手机名或 Identifier 指定，例如
 #   IPHONE=1F3F2623-6A98-5ABC-ADAA-5C6B0A90F99C bash install-on-iphone.sh Raft-Debug.zip
 #
-# 先决条件：用 Xcode 建过一个同包名的空项目，并往这台 iPhone 上装过一次
-# （这样 Xcode 才会生成你的签名证书和签名文件）。
+# 先决条件：
+# - 用 Xcode 建过一个同包名的空项目，选这台 iPhone 编译过一次
+#   （这样 Xcode 才会生成你的签名证书和签名文件）；
+# - brew install ideviceinstaller（Xcode 比手机系统老时必须）。
 set -euo pipefail
 
 zip="${1:?用法: bash $0 Raft-Debug.zip [包名]}"
@@ -101,10 +103,11 @@ ipa="$HOME/Downloads/Raft-signed.ipa"
 (cd "$work" && rm -f "$ipa" && zip -qry "$ipa" Payload)
 echo "签名完成：$ipa"
 
-# 装上去。devicectl 要往手机上挂调试镜像，Xcode 太老时会失败，就换 ideviceinstaller（不需要调试镜像）
-if ! xcrun devicectl device install app --device "$device" "$app"; then
-  command -v ideviceinstaller >/dev/null || { echo "devicectl 装不上。brew install ideviceinstaller 以后再跑一次。"; exit 1; }
-  echo "devicectl 装不上，换 ideviceinstaller"
+# 装上去。优先用 ideviceinstaller：它不用往手机上挂调试镜像，Xcode 比手机系统老也能装。
+if command -v ideviceinstaller >/dev/null; then
   ideviceinstaller -u "$udid" install "$ipa"
+else
+  xcrun devicectl device install app --device "$device" "$app" ||
+    { echo "装不上。brew install ideviceinstaller 以后再跑一次。"; exit 1; }
 fi
 echo "装好了。第一次打开前：iPhone 设置 → 通用 → VPN 与设备管理 → 信任你的 Apple ID。"
