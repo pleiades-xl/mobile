@@ -145,6 +145,8 @@ internal fun RaftSideDock(
                 verticalArrangement = Arrangement.spacedBy(RaftAppRailDefaults.ItemGap),
             ) {
                 CompositionLocalProvider(LocalRaftContentColor provides colors.foregroundOnFrame) {
+                    // Bottom-aligned: the status bar above grows when the Dynamic Island shows something.
+                    Spacer(Modifier.weight(1f))
                     if (currentServer != null) {
                         // The top bar's workspace button: opens the server panel.
                         Box(
@@ -163,10 +165,10 @@ internal fun RaftSideDock(
                     }
                     if (topItems.isNotEmpty()) {
                         topItems.forEach { RaftNavigationRailTabItem(item = it, onSelect = onSelect) }
-                        Box(Modifier.width(RaftAppRailDefaults.ItemSize).height(RaftStroke.Hairline).background(colors.lineSeam))
+                        RaftSideDockSeam()
                     }
                     items.forEach { RaftNavigationRailTabItem(item = it, onSelect = onSelect) }
-                    Spacer(Modifier.weight(1f))
+                    RaftSideDockSeam()
                     if (onBack != null) {
                         RaftSideDockAction(RaftLucideIconName.ArrowLeft, backLabel, enabled = canGoBack, onClick = onBack)
                     }
@@ -179,6 +181,11 @@ internal fun RaftSideDock(
             }
         }
     }
+}
+
+@Composable
+private fun RaftSideDockSeam() {
+    Box(Modifier.width(RaftAppRailDefaults.ItemSize).height(RaftStroke.Hairline).background(RaftTheme.colors.lineSeam))
 }
 
 @Composable
