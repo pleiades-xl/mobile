@@ -1,19 +1,20 @@
 #!/bin/bash
-# 把云上用 Xcode 27.1 编好的 Raft（Raft-Release.zip 或 Raft-Debug.zip）
+# 把云上用 Xcode 27.1 编好的 Raft（Raft-Debug.zip，或解压出来的 iosApp.app）
 # 用你自己的免费签名重新签名，装到用线连着的 iPhone 上。
 #
-# 用法: ./install-on-iphone.sh Raft-Release.zip [包名，默认 dev.vgent.raft]
+# 用法: bash install-on-iphone.sh Raft-Debug.zip [包名，默认 dev.vgent.raft]
 #
 # 先决条件：用 Xcode 建过一个同包名的空项目，并往这台 iPhone 上装过一次
 # （这样 Xcode 才会生成你的签名证书和签名文件）。
 set -euo pipefail
 
-zip="${1:?用法: $0 Raft-Release.zip [包名]}"
+zip="${1:?用法: bash $0 Raft-Debug.zip [包名]}"
 bundle="${2:-dev.vgent.raft}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-ditto -x -k "$zip" "$work"
+# Safari 可能已经自动解压成 iosApp.app，两种都收
+if [ -d "$zip" ]; then ditto "$zip" "$work/iosApp.app"; else ditto -x -k "$zip" "$work"; fi
 app="$work/iosApp.app"
 [ -d "$app" ] || { echo "zip 里没有 iosApp.app"; exit 1; }
 
