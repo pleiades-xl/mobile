@@ -23480,10 +23480,11 @@ private fun ThreadLazyWindowStats.toDiagnosticsString(result: String): String =
 /**
  * Back in a conversation header. A channel / DM that is the detail pane of a split has the list on
  * its left and nothing to go back to (web desktop has no Back there); a reply thread keeps it (it
- * returns to its channel), and single-pane pages always keep it.
+ * returns to its channel) unless the iPhone Duo side dock carries it, and single-pane pages always
+ * keep it.
  */
 internal fun threadHeaderShowsBack(showBack: Boolean, surfaceKind: String): Boolean =
-    showBack || surfaceKind == RaftThreadSurfaceKind.ReplyThread
+    showBack || (surfaceKind == RaftThreadSurfaceKind.ReplyThread && !RaftSideDockState.active)
 
 /**
  * True when this conversation is the detail pane of a split: an adaptive detail page laid out right

@@ -139,6 +139,8 @@ internal fun RaftAppShellSurface(
     interactionLocked: Boolean = false,
     modalHostState: RaftUnifiedDialogHostState? = null,
     leadingNavigation: (@Composable () -> Unit)? = null,
+    /** After the content, on the end edge (the iPhone Duo side dock, [RaftSideDock]). */
+    trailingNavigation: (@Composable () -> Unit)? = null,
     /** The wide layout's top bar, above [leadingNavigation] and the content (web AppTopBar). */
     topNavigation: (@Composable () -> Unit)? = null,
     /** Drawn over the whole shell, top bar and rail included (the top bar's server panel). */
@@ -204,9 +206,17 @@ internal fun RaftAppShellSurface(
                                         .fillMaxHeight()
                                         // The rail beside it takes the start safe area (its frame
                                         // bleeds to the edge); the content starts past the rail.
+                                        // The side dock takes the end one the same way.
                                         .then(
                                             if (leadingNavigation != null) {
                                                 Modifier.raftConsumeSafeAreaHorizontal(WindowInsetsSides.Start)
+                                            } else {
+                                                Modifier
+                                            }
+                                        )
+                                        .then(
+                                            if (trailingNavigation != null) {
+                                                Modifier.raftConsumeSafeAreaHorizontal(WindowInsetsSides.End)
                                             } else {
                                                 Modifier
                                             }
@@ -218,6 +228,7 @@ internal fun RaftAppShellSurface(
                                     content()
                                 }
                             }
+                            trailingNavigation?.invoke()
                         }
                     }
                 }

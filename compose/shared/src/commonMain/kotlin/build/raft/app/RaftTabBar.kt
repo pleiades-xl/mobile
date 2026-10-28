@@ -529,7 +529,7 @@ internal fun RaftNavigationRailTabBar(
 }
 
 @Composable
-private fun RaftNavigationRailTabItem(
+internal fun RaftNavigationRailTabItem(
     item: RaftBottomTabItemPayload,
     onSelect: (String) -> Unit
 ) {
