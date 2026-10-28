@@ -1,7 +1,8 @@
 package build.raft.app
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -59,6 +60,10 @@ internal val RaftSideDockStatusClearance = 104.dp
 internal fun raftSideDockActive(navRailActive: Boolean, rightSafeArea: Dp): Boolean =
     navRailActive && rightSafeArea >= RaftSideDockMinStrip
 
+/** The log tag the iOS host listens for to open the share sheet with the log files. */
+internal const val RaftShareLogsTag = "RaftShareLogs"
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun RaftSideDock(
     width: Dp,
@@ -93,7 +98,12 @@ internal fun RaftSideDock(
                         Box(
                             Modifier
                                 .size(RaftAppRailDefaults.ItemSize)
-                                .clickable(onClickLabel = currentServer.name, onClick = onServerClick),
+                                .combinedClickable(
+                                    onClickLabel = currentServer.name,
+                                    // Self-build: a long press shares the diagnostics log files (iOS).
+                                    onLongClick = { raftLogInfo(RaftShareLogsTag, "share_logs_request") },
+                                    onClick = onServerClick,
+                                ),
                             contentAlignment = Alignment.Center,
                         ) {
                             ServerSwitcherAvatarTile(currentServer, size = RaftSideDockServerAvatar)
