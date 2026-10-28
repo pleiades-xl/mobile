@@ -5984,8 +5984,11 @@ private fun RaftAppShellReadyContent(
             paneState = shellScope.adaptivePane
         )
     // iPhone Duo landscape: the top bar and the rail move into the status-bar strip on the right.
-    val rightSafeArea = raftHorizontalSafeArea().right
-    val sideDockActive = raftSideDockActive(navRailActive, rightSafeArea)
+    val horizontalSafeArea = raftHorizontalSafeArea()
+    val rightSafeArea = horizontalSafeArea.right
+    val sideDockActive = raftSideDockActive(navRailActive, horizontalSafeArea)
+    // The outer display: the phone layout's bar moves into the same strip.
+    val phoneSideDockActive = raftPhoneSideDockActive(navRailActive, horizontalSafeArea)
     LaunchedEffect(sideDockActive) { RaftSideDockState.active = sideDockActive }
     // stdrc 2026-10-21: Settings is the More tab's root on the phone bar and the pinned rail entry
     // on the wide layout; a selection made for the other layout moves to this layout's root.
@@ -6809,6 +6812,21 @@ private fun RaftAppShellReadyContent(
         railInlineSecondaryDestination = null
         onAppShellTabSelected(key)
     }
+    val onPhoneBarTabSelect: (String) -> Unit = { key ->
+        if (key == AppShellServerTabKey && serverMenuModel != null) {
+            // The server tab opens the server panel, not a page (also the iOS system bar's tap).
+            bridge.log("app_shell_server_menu_toggle open=${!serverMenuState.open}")
+            serverMenuState.toggle()
+        } else {
+            serverMenuState.dismiss()
+            RaftProductEvents.navEntrySelected(
+                destination = appShellNavDestination(key),
+                surface = RaftNavSurface.MobileTabBar,
+                wasActive = appShellPhoneBottomBarSelectedKey(selectedTab) == key,
+            )
+            onAppShellTabSelected(key)
+        }
+    }
     val onShellSearchClick: () -> Unit = {
         // The rail's old Search entry: the inline Search over the current tab.
         serverMenuState.dismiss()
@@ -6839,23 +6857,10 @@ private fun RaftAppShellReadyContent(
                         )
                     }
                 },
-            onBottomTabSelected = { key ->
-                if (key == AppShellServerTabKey && serverMenuModel != null) {
-                    // The server tab opens the server panel, not a page (also the iOS system bar's tap).
-                    bridge.log("app_shell_server_menu_toggle open=${!serverMenuState.open}")
-                    serverMenuState.toggle()
-                    return@RaftAppShellSurface
-                }
-                serverMenuState.dismiss()
-                RaftProductEvents.navEntrySelected(
-                    destination = appShellNavDestination(key),
-                    surface = RaftNavSurface.MobileTabBar,
-                    wasActive = appShellPhoneBottomBarSelectedKey(selectedTab) == key,
-                )
-                onAppShellTabSelected(key)
-            },
+            onBottomTabSelected = onPhoneBarTabSelect,
             networkStatus = hostNetworkStatus,
-            showBottomTabs = showAppShellBottomTabs,
+            // On the outer display the side dock carries the bar.
+            showBottomTabs = showAppShellBottomTabs && !phoneSideDockActive,
             // artin 2026-10-10 (Hands 79db9fe6): the cached Home is usable at once while the
             // session and server list refresh in the background; a failed restore or an expired
             // session still goes to its prompt / sign-in. No blocking overlay.
@@ -6938,7 +6943,29 @@ private fun RaftAppShellReadyContent(
                     null
                 },
             trailingNavigation =
-                if (sideDockActive) {
+                if (phoneSideDockActive && showAppShellBottomTabs) {
+                    {
+                        RaftSideDock(
+                            width = rightSafeArea,
+                            currentServer = serverMenuModel?.currentServer,
+                            onServerClick = { onPhoneBarTabSelect(AppShellServerTabKey) },
+                            topItems = emptyList(),
+                            items =
+                                appShellBottomTabItems.filter {
+                                    it.key != AppShellSearchTabKey && it.key != AppShellServerTabKey
+                                },
+                            onSelect = onPhoneBarTabSelect,
+                            backLabel = stringResource(Res.string.common_back),
+                            canGoBack = false,
+                            onBack = null,
+                            searchLabel = searchTabLabel,
+                            onSearch = {},
+                            bottomSafeArea = shellScope.bottomSafeArea,
+                            statusClearance = RaftSideDockPhoneStatusClearance,
+                            footerItems = appShellBottomTabItems.filter { it.key == AppShellSearchTabKey },
+                        )
+                    }
+                } else if (sideDockActive) {
                     {
                         RaftSideDock(
                             width = rightSafeArea,

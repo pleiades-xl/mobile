@@ -54,11 +54,25 @@ private val RaftSideDockEndNudge = 12.dp
 /** The inner display's rounded top-left corner: the panes start this much lower. */
 internal val RaftSideDockCornerClearance = 12.dp
 
-/** The status bar's clock, Wi-Fi and battery sit at the top of the strip. */
+/** The status bar's clock, Wi-Fi and battery sit at the top of the strip (inner display). */
 internal val RaftSideDockStatusClearance = 104.dp
 
-internal fun raftSideDockActive(navRailActive: Boolean, rightSafeArea: Dp): Boolean =
-    navRailActive && rightSafeArea >= RaftSideDockMinStrip
+/** The outer display's status icons sit lower, under the phone layout's header. */
+internal val RaftSideDockPhoneStatusClearance = 160.dp
+
+/**
+ * The outer display (phone layout) puts the system tab bar on the same strip, where its taps never
+ * reach the app; the dock replaces it there.
+ */
+internal fun raftPhoneSideDockActive(navRailActive: Boolean, safeArea: RaftHorizontalSafeArea): Boolean =
+    !navRailActive && raftSideDockStrip(safeArea)
+
+internal fun raftSideDockActive(navRailActive: Boolean, safeArea: RaftHorizontalSafeArea): Boolean =
+    navRailActive && raftSideDockStrip(safeArea)
+
+/** A strip on the right only (iPhone Duo); a phone in landscape has one on each side. */
+private fun raftSideDockStrip(safeArea: RaftHorizontalSafeArea): Boolean =
+    safeArea.right >= RaftSideDockMinStrip && safeArea.left < RaftSideDockMinStrip / 2
 
 /** The log tag the iOS host listens for to open the share sheet with the log files. */
 internal const val RaftShareLogsTag = "RaftShareLogs"
@@ -74,10 +88,14 @@ internal fun RaftSideDock(
     onSelect: (String) -> Unit,
     backLabel: String,
     canGoBack: Boolean,
-    onBack: () -> Unit,
+    /** Null draws no Back (the phone layout's pages have their own). */
+    onBack: (() -> Unit)?,
     searchLabel: String,
     onSearch: () -> Unit,
     bottomSafeArea: Dp,
+    statusClearance: Dp = RaftSideDockStatusClearance,
+    /** The phone layout's Search is a tab: drawn at the foot as one, instead of [onSearch]. */
+    footerItems: List<RaftBottomTabItemPayload> = emptyList(),
 ) {
     RaftDesignSystemTheme {
         val colors = RaftTheme.colors
@@ -88,7 +106,7 @@ internal fun RaftSideDock(
                     .fillMaxHeight()
                     .width(width)
                     .background(colors.layerFrame)
-                    .padding(top = RaftSideDockStatusClearance, bottom = RaftAppRailDefaults.Inset + bottomSafeArea, end = RaftSideDockEndNudge),
+                    .padding(top = statusClearance, bottom = RaftAppRailDefaults.Inset + bottomSafeArea, end = RaftSideDockEndNudge),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(RaftAppRailDefaults.ItemGap),
             ) {
@@ -109,12 +127,20 @@ internal fun RaftSideDock(
                             ServerSwitcherAvatarTile(currentServer, size = RaftSideDockServerAvatar)
                         }
                     }
-                    topItems.forEach { RaftNavigationRailTabItem(item = it, onSelect = onSelect) }
-                    Box(Modifier.width(RaftAppRailDefaults.ItemSize).height(RaftStroke.Hairline).background(colors.lineSeam))
+                    if (topItems.isNotEmpty()) {
+                        topItems.forEach { RaftNavigationRailTabItem(item = it, onSelect = onSelect) }
+                        Box(Modifier.width(RaftAppRailDefaults.ItemSize).height(RaftStroke.Hairline).background(colors.lineSeam))
+                    }
                     items.forEach { RaftNavigationRailTabItem(item = it, onSelect = onSelect) }
                     Spacer(Modifier.weight(1f))
-                    RaftSideDockAction(RaftLucideIconName.ArrowLeft, backLabel, enabled = canGoBack, onClick = onBack)
-                    RaftSideDockAction(RaftLucideIconName.Search, searchLabel, enabled = true, onClick = onSearch)
+                    if (onBack != null) {
+                        RaftSideDockAction(RaftLucideIconName.ArrowLeft, backLabel, enabled = canGoBack, onClick = onBack)
+                    }
+                    if (footerItems.isEmpty()) {
+                        RaftSideDockAction(RaftLucideIconName.Search, searchLabel, enabled = true, onClick = onSearch)
+                    } else {
+                        footerItems.forEach { RaftNavigationRailTabItem(item = it, onSelect = onSelect) }
+                    }
                 }
             }
         }
