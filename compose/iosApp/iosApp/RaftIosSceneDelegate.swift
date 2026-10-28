@@ -44,7 +44,7 @@ final class RaftIosSceneDelegate: UIResponder, UIWindowSceneDelegate {
         // With a custom scene delegate the App's WindowGroup is inert; the
         // delegate owns window creation.
         if let windowScene = scene as? UIWindowScene {
-            let window = UIWindow(windowScene: windowScene)
+            let window = RaftShakeWindow(windowScene: windowScene)
             window.rootViewController = UIHostingController(rootView: ContentView())
             // Settings > Appearance > Theme: an explicit Light/Dark choice overrides the OS
             // style for the whole window (keyboards, system menus, the native tab bar);
@@ -250,5 +250,42 @@ final class RaftTouchProbe: UIGestureRecognizer {
             )
         }
         state = .failed
+    }
+}
+
+/// Self-build (xuheng-li 2026-10-28): shake the phone to share the app's diagnostics log files,
+/// the newest launches in full (the Settings export keeps only the last ~120 KB).
+final class RaftShakeWindow: UIWindow {
+    override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
+        guard motion == .motionShake else { return super.motionEnded(motion, with: event) }
+        RaftIosDiagnosticsRecord("info", "RaftShakeShare", "shake_share")
+        shareLogs()
+    }
+
+    private func shareLogs() {
+        let files = FileManager.default
+        guard let support = files.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+        let root = support.appendingPathComponent("raft_diagnostics_logs", isDirectory: true)
+        let launches = ((try? files.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix("launch-") }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+            .prefix(2)
+        let out = files.temporaryDirectory.appendingPathComponent("raft-logs-\(Int(Date().timeIntervalSince1970))", isDirectory: true)
+        try? files.createDirectory(at: out, withIntermediateDirectories: true)
+        var copies: [URL] = []
+        for launch in launches {
+            for file in (try? files.contentsOfDirectory(at: launch, includingPropertiesForKeys: nil)) ?? [] {
+                let copy = out.appendingPathComponent("\(launch.lastPathComponent)-\(file.lastPathComponent)")
+                if (try? files.copyItem(at: file, to: copy)) != nil { copies.append(copy) }
+            }
+        }
+        guard !copies.isEmpty else { return }
+        var presenter = rootViewController
+        while let next = presenter?.presentedViewController { presenter = next }
+        guard let presenter, !(presenter is UIActivityViewController) else { return }
+        let sheet = UIActivityViewController(activityItems: copies, applicationActivities: nil)
+        sheet.popoverPresentationController?.sourceView = presenter.view
+        sheet.popoverPresentationController?.sourceRect = CGRect(x: presenter.view.bounds.midX, y: presenter.view.bounds.midY, width: 1, height: 1)
+        presenter.present(sheet, animated: true)
     }
 }
