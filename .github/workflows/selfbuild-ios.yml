@@ -8,6 +8,10 @@ jobs:
   build:
     runs-on: xcode-27
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
     steps:
       - uses: actions/checkout@v7
 
@@ -32,16 +36,17 @@ jobs:
         working-directory: compose/iosApp
         run: pod install
 
-      - name: Build for iPhone (Debug, unsigned)
+      - name: Build for iPhone (${{ matrix.configuration }}, unsigned)
         working-directory: compose/iosApp
         run: |
           xcodebuild \
             -workspace iosApp.xcworkspace \
             -scheme iosApp \
-            -configuration Debug \
+            -configuration ${{ matrix.configuration }} \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
+            ENABLE_DEBUG_DYLIB=NO \
             build > "$GITHUB_WORKSPACE/xcodebuild.log" 2>&1 || true
           tail -30 "$GITHUB_WORKSPACE/xcodebuild.log"
           grep -q "BUILD SUCCEEDED" "$GITHUB_WORKSPACE/xcodebuild.log"
@@ -51,8 +56,20 @@ jobs:
         run: |
           grep -nE "(^|[[:space:]])e: |: error:|FAILURE:|Execution failed|OutOfMemory" xcodebuild.log | grep -v "Using response file" | tail -80 || true
 
+      - name: Zip app
+        run: |
+          app=compose/iosApp/build/DerivedData/Build/Products/${{ matrix.configuration }}-iphoneos/iosApp.app
+          ditto -c -k --keepParent "$app" "Raft-${{ matrix.configuration }}.zip"
+          ls -lh "Raft-${{ matrix.configuration }}.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Raft-${{ matrix.configuration }}
+          path: Raft-${{ matrix.configuration }}.zip
+          compression-level: 0
+
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: xcodebuild-log
+          name: xcodebuild-log-${{ matrix.configuration }}
           path: xcodebuild.log
