@@ -3,6 +3,7 @@ import SafariServices
 import shared
 import SwiftUI
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
 
 // task #471: scene plumbing for iPad multi-window.
 //
@@ -53,6 +54,7 @@ final class RaftIosSceneDelegate: UIResponder, UIWindowSceneDelegate {
             window.overrideUserInterfaceStyle = UIUserInterfaceStyle(
                 rawValue: Int(RaftAppAppearanceRuntime.shared.hostStyleCode)
             ) ?? .unspecified
+            window.addGestureRecognizer(RaftTouchProbe(target: nil, action: nil))
             self.window = window
             RaftIosAppearanceHost.attach()
             window.makeKeyAndVisible()
@@ -219,5 +221,34 @@ extension UIColor {
             blue: CGFloat(value & 0xFF) / 255.0,
             alpha: CGFloat((value >> 24) & 0xFF) / 255.0
         )
+    }
+}
+
+/// Self-build diagnostics (iPhone Duo dead taps, 2026-10-28): logs the view each touch lands on.
+/// It fails at once, so it never takes part in gesture handling.
+final class RaftTouchProbe: UIGestureRecognizer {
+    override init(target: Any?, action: Selector?) {
+        super.init(target: target, action: action)
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        if let touch = touches.first, let window = view {
+            let point = touch.location(in: window)
+            var chain: [String] = []
+            var hit = touch.view
+            while let current = hit, chain.count < 4 {
+                chain.append(String(describing: type(of: current)))
+                hit = current.superview
+            }
+            RaftIosDiagnosticsRecord(
+                "info",
+                "RaftTouchProbe",
+                "touch_down x=\(Int(point.x)) y=\(Int(point.y)) view=\(chain.joined(separator: "<"))"
+            )
+        }
+        state = .failed
     }
 }
