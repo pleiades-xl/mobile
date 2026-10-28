@@ -23492,7 +23492,8 @@ internal fun threadHeaderShowsBack(showBack: Boolean, surfaceKind: String): Bool
  * workspace, full width) and a page not measured yet count as not split, so Back never flickers off.
  */
 internal fun threadSplitDetailPane(adaptiveDetailPage: Boolean, originMeasured: Boolean, windowOriginX: Float): Boolean =
-    adaptiveDetailPage && originMeasured && windowOriginX > 0f
+    // With the side dock the list is on the end side, so the split's detail starts at x = 0.
+    adaptiveDetailPage && ((originMeasured && windowOriginX > 0f) || RaftSideDockState.active)
 
 @Composable
 internal fun threadInSplitDetailPane(): Boolean {
@@ -23506,7 +23507,7 @@ internal fun threadMenuUsesShellHost(
     adaptiveDetailPage: Boolean,
     originMeasured: Boolean,
     windowOriginX: Float,
-): Boolean = adaptiveDetailPage && (!originMeasured || windowOriginX > 0f)
+): Boolean = adaptiveDetailPage && (!originMeasured || windowOriginX > 0f || RaftSideDockState.active)
 
 internal fun threadInitialFirstVisibleItemIndex(latestItemIndex: Int): Int =
     latestItemIndex.coerceAtLeast(0)

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -19,7 +20,9 @@ import androidx.compose.foundation.layout.WindowInsetsSides
 import build.raft.designsystem.components.raftConsumeSafeAreaHorizontal
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import build.raft.app.data.KeyValueChatLayoutPreferenceStore
 import build.raft.app.data.RAFT_LIST_PANE_DIVIDER_DP
@@ -82,72 +85,86 @@ internal fun RaftAdaptiveListDetailSplit(
     listPane: @Composable (Boolean) -> Unit,
     detailPane: @Composable (Modifier) -> Unit,
     fillListWhenNothingPicked: Boolean = false,
+    /** iPhone Duo side dock: the list on the end side, beside the dock; the detail at the start. */
+    listOnEnd: Boolean = false,
     onResizingChange: (Boolean) -> Unit = {},
     log: (String) -> Unit = {},
 ) {
-    val density = LocalDensity.current
-    var rowWidthDp by remember { mutableStateOf<Float?>(null) }
-    val listWidthDp = widths.renderedDp(kind, rowWidthDp)
-    val listFillsRow = dualPane && fillListWhenNothingPicked && !hasSelection
-    val split = dualPane && !listFillsRow
-    Box(
-        modifier =
-            Modifier
-                .fillMaxSize()
-                .onSizeChanged { size ->
-                    val widthDp = with(density) { size.width.toDp().value }
-                    if (rowWidthDp != widthDp) rowWidthDp = widthDp
+    // The row is laid out mirrored and each pane restores the outer direction, so the slots (and
+    // the list's state) stay the same either way.
+    val outerDirection = LocalLayoutDirection.current
+    CompositionLocalProvider(LocalLayoutDirection provides if (listOnEnd) LayoutDirection.Rtl else outerDirection) {
+        val density = LocalDensity.current
+        var rowWidthDp by remember { mutableStateOf<Float?>(null) }
+        val listWidthDp = widths.renderedDp(kind, rowWidthDp)
+        val listFillsRow = dualPane && fillListWhenNothingPicked && !hasSelection
+        val split = dualPane && !listFillsRow
+        Box(
+            modifier =
+                Modifier
+                    .fillMaxSize()
+                    .onSizeChanged { size ->
+                        val widthDp = with(density) { size.width.toDp().value }
+                        if (rowWidthDp != widthDp) rowWidthDp = widthDp
+                    }
+        ) {
+            Row(modifier = Modifier.fillMaxSize()) {
+                Box(
+                    modifier =
+                        when {
+                            listFillsRow -> Modifier.weight(1f)
+                            split -> Modifier.width(listWidthDp.dp)
+                            else -> Modifier.width(0.dp)
+                        }.fillMaxHeight()
+                            // Split: the list's inner side is away from the screen edge, so its rows
+                            // pad no horizontal safe area there (the detail pane's start likewise).
+                            .then(if (split) Modifier.raftConsumeSafeAreaHorizontal(WindowInsetsSides.End) else Modifier),
+                ) {
+                    CompositionLocalProvider(LocalLayoutDirection provides outerDirection) {
+                        if (dualPane) listPane(active)
+                    }
                 }
-    ) {
-        Row(modifier = Modifier.fillMaxSize()) {
-            Box(
-                modifier =
-                    when {
-                        listFillsRow -> Modifier.weight(1f)
-                        split -> Modifier.width(listWidthDp.dp)
-                        else -> Modifier.width(0.dp)
-                    }.fillMaxHeight()
-                        // Split: the list's inner side is away from the screen edge, so its rows
-                        // pad no horizontal safe area there (the detail pane's start likewise).
-                        .then(if (split) Modifier.raftConsumeSafeAreaHorizontal(WindowInsetsSides.End) else Modifier),
-            ) {
-                if (dualPane) listPane(active)
-            }
-            Spacer(
-                modifier =
-                    Modifier
-                        .width(if (split) RAFT_LIST_PANE_DIVIDER_DP.dp else 0.dp)
-                        .fillMaxHeight()
-                        .background(RaftColor.BorderSeam), // raft-ui: one line-seam between regions, as the rail's
-            )
-            Box(
-                modifier =
-                    (if (listFillsRow) Modifier.width(0.dp) else Modifier.weight(1f))
-                        .fillMaxHeight()
-                        .then(if (split) Modifier.raftConsumeSafeAreaHorizontal(WindowInsetsSides.Start) else Modifier)
-            ) {
-                if (split || hasSelection) {
-                    detailPane(Modifier.fillMaxSize().padding(bottom = detailBottomInset))
-                } else if (!dualPane) {
-                    listPane(active)
+                Spacer(
+                    modifier =
+                        Modifier
+                            .width(if (split) RAFT_LIST_PANE_DIVIDER_DP.dp else 0.dp)
+                            .fillMaxHeight()
+                            .background(RaftColor.BorderSeam), // raft-ui: one line-seam between regions, as the rail's
+                )
+                Box(
+                    modifier =
+                        (if (listFillsRow) Modifier.width(0.dp) else Modifier.weight(1f))
+                            .fillMaxHeight()
+                            .then(if (split) Modifier.raftConsumeSafeAreaHorizontal(WindowInsetsSides.Start) else Modifier)
+                ) {
+                    CompositionLocalProvider(LocalLayoutDirection provides outerDirection) {
+                        if (split || hasSelection) {
+                            detailPane(Modifier.fillMaxSize().padding(bottom = detailBottomInset))
+                        } else if (!dualPane) {
+                            listPane(active)
+                        }
+                    }
                 }
             }
-        }
-        if (split) {
-            RaftListPaneResizeHandle(
-                active = active,
-                listWidthDp = listWidthDp,
-                onDragStart = {
-                    onResizingChange(true)
-                    log("adaptive_list_pane_resize start kind=$kind width=$listWidthDp row=$rowWidthDp")
-                },
-                onDrag = { startWidthDp, deltaDp -> widths.drag(kind, startWidthDp, deltaDp, rowWidthDp) },
-                onDragEnd = { reason ->
-                    onResizingChange(false)
-                    widths.save(kind)
-                    log("adaptive_list_pane_resize end=$reason kind=$kind width=${widths.preferredDp(kind)} row=$rowWidthDp")
-                },
-            )
+            if (split) {
+                RaftListPaneResizeHandle(
+                    active = active,
+                    listWidthDp = listWidthDp,
+                    onDragStart = {
+                        onResizingChange(true)
+                        log("adaptive_list_pane_resize start kind=$kind width=$listWidthDp row=$rowWidthDp")
+                    },
+                    // Mirrored, the list widens as the finger moves toward the start.
+                    onDrag = { startWidthDp, deltaDp ->
+                        widths.drag(kind, startWidthDp, if (listOnEnd) -deltaDp else deltaDp, rowWidthDp)
+                    },
+                    onDragEnd = { reason ->
+                        onResizingChange(false)
+                        widths.save(kind)
+                        log("adaptive_list_pane_resize end=$reason kind=$kind width=${widths.preferredDp(kind)} row=$rowWidthDp")
+                    },
+                )
+            }
         }
     }
 }

@@ -7345,12 +7345,15 @@ private fun RaftAppShellReadyContent(
                         val workspace = adaptiveWorkspaceState
                         val selection = workspace?.selection?.takeIf { detailAccepted }
                         val detailPane: @Composable (Modifier) -> Unit = { modifier ->
-                            adaptiveDetailPane(modifier, active, detailAccepted, true)
+                            // With the side dock the detail sits in the rounded top-left corner.
+                            val paneModifier = if (sideDockActive) modifier.padding(top = RaftSideDockCornerClearance) else modifier
+                            adaptiveDetailPane(paneModifier, active, detailAccepted, true)
                         }
                         if (enabled) {
                             // task #37 / artin task #20: per-kind list width and the split live in
                             // RaftAdaptiveListDetailSplit.kt.
                             RaftAdaptiveListDetailSplit(
+                                listOnEnd = sideDockActive,
                                 kind = listKind,
                                 widths = adaptiveListPaneWidths,
                                 dualPane = workspace?.pane?.layout == RaftAdaptivePaneLayout.DualPane,
