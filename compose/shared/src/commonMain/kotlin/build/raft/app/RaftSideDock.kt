@@ -44,6 +44,15 @@ private val RaftSideDockMinStrip = 44.dp
 
 private val RaftSideDockServerAvatar = 32.dp
 
+/**
+ * The status bar's icons are centred about 6dp left of the strip's centre (measured on an iPhone
+ * Duo); the dock's items line up under them.
+ */
+private val RaftSideDockEndNudge = 12.dp
+
+/** The inner display's rounded top-left corner: the panes start this much lower. */
+internal val RaftSideDockCornerClearance = 12.dp
+
 /** The status bar's clock, Wi-Fi and battery sit at the top of the strip. */
 internal val RaftSideDockStatusClearance = 104.dp
 
@@ -74,7 +83,7 @@ internal fun RaftSideDock(
                     .fillMaxHeight()
                     .width(width)
                     .background(colors.layerFrame)
-                    .padding(top = RaftSideDockStatusClearance, bottom = RaftAppRailDefaults.Inset + bottomSafeArea),
+                    .padding(top = RaftSideDockStatusClearance, bottom = RaftAppRailDefaults.Inset + bottomSafeArea, end = RaftSideDockEndNudge),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(RaftAppRailDefaults.ItemGap),
             ) {

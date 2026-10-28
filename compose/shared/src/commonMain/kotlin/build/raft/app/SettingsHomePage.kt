@@ -6990,7 +6990,12 @@ private fun RaftAppShellReadyContent(
         ) {
                     // The wide top bar clears the status bar: the pages under it start at its seam.
                     @Suppress("NAME_SHADOWING")
-                    val shellScope = if (navRailActive && !sideDockActive) shellScope.copy(topSafeArea = 0.dp) else shellScope
+                    val shellScope =
+                        when {
+                            sideDockActive -> shellScope.copy(topSafeArea = shellScope.topSafeArea + RaftSideDockCornerClearance)
+                            navRailActive -> shellScope.copy(topSafeArea = 0.dp)
+                            else -> shellScope
+                        }
                     if (!navRailActive && showAppShellBottomTabs) serverMenuOverlay(false)
                     serverSwitcherInviteServerId?.let { inviteServerId ->
                         val inviteMembersDataSource =
