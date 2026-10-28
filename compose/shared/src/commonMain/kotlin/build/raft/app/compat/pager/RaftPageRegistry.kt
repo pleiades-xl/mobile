@@ -37,7 +37,9 @@ import build.raft.app.cmp.host.RaftCmpPageArgs
 import build.raft.app.LocalRaftNativeTabBarBridge
 import build.raft.app.RaftNativeTabBarHostIdPageDataKey
 import build.raft.app.RaftNativeTabBarRegistry
+import build.raft.app.RAFT_APP_SHELL_PAGE
 import build.raft.app.RaftPageHorizontalSafeAreaShell
+import build.raft.app.RaftPushedPageDockFrame
 import build.raft.app.compat.json.JSONObject
 import build.raft.app.image.raftInstallImageLoader
 import build.raft.app.toKuiklyJson
@@ -68,7 +70,7 @@ object RaftPageRegistry {
         val factory = factories[pageName] ?: return null
         // Hosts load the stored theme at startup; this covers a host that did not (idempotent).
         RaftAppAppearanceRuntime.ensureLoaded()
-        return { RaftPagerHost(factory) }
+        return { RaftPagerHost(factory, root = true) }
     }
 
     /** Hosts call this once at startup (Android: `RaftApplication.onCreate`). */
@@ -87,13 +89,15 @@ private val pagerIdSequence = atomic(0)
  * events while the host lifecycle is resumed and [active] is true, and provides [LocalActivity]
  * (for `getPager()` callers) and [LocalRaftPageArgs] (= [args]) to the page.
  *
- * Child pages (`RaftChildPage`) nest a second host with their own [args].
+ * Child pages (`RaftChildPage`) nest a second host with their own [args]. A [root] page (a
+ * window's or a pushed page's own) other than the app shell draws the shell's side dock.
  */
 @Composable
 fun RaftPagerHost(
     factory: () -> Pager,
     args: RaftCmpPageArgs = LocalRaftPageArgs.current,
     active: Boolean = true,
+    root: Boolean = false,
 ) {
     val host = LocalRaftHost.current
     // The Raft Coil loader must be the singleton before any page asks Coil for an image.
@@ -213,7 +217,9 @@ fun RaftPagerHost(
                             // Left/right safe area for every page (landscape sensor housing,
                             // a side status bar): content and controls never run under it.
                             RaftPageHorizontalSafeAreaShell {
-                                (pager as? ComposeContainer)?.composedContent?.invoke()
+                                RaftPushedPageDockFrame(enabled = root && args.pageName != RAFT_APP_SHELL_PAGE) {
+                                    (pager as? ComposeContainer)?.composedContent?.invoke()
+                                }
                             }
                         }
                     }

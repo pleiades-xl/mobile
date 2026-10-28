@@ -8,7 +8,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -25,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import build.raft.app.components.RaftDesignSystemTheme
 import build.raft.designsystem.components.RaftAppRailDefaults
 import build.raft.designsystem.components.RaftAppRailItem
+import build.raft.designsystem.components.raftConsumeSafeAreaHorizontal
 import build.raft.designsystem.theme.LocalRaftContentColor
 import build.raft.designsystem.theme.RaftTheme
 import build.raft.designsystem.tokens.RaftStroke
@@ -38,6 +41,12 @@ import build.raft.designsystem.tokens.RaftStroke
 /** Set by the app shell; a conversation header in the split detail drops its Back while it is on. */
 internal object RaftSideDockState {
     var active by mutableStateOf(false)
+
+    /**
+     * The shell's dock, for a page pushed over the shell to draw too ([RaftPushedPageDockFrame]).
+     * The page passes `leavePage`, run before each action to go back to the shell; the shell null.
+     */
+    var pushedPageDock: (@Composable (leavePage: (() -> Unit)?, width: Dp) -> Unit)? by mutableStateOf(null)
 }
 
 /** The right strip is at least this wide: the dock goes there. */
@@ -71,11 +80,36 @@ internal fun raftSideDockActive(navRailActive: Boolean, safeArea: RaftHorizontal
     navRailActive && raftSideDockStrip(safeArea)
 
 /** A strip on the right only (iPhone Duo); a phone in landscape has one on each side. */
-private fun raftSideDockStrip(safeArea: RaftHorizontalSafeArea): Boolean =
+internal fun raftSideDockStrip(safeArea: RaftHorizontalSafeArea): Boolean =
     safeArea.right >= RaftSideDockMinStrip && safeArea.left < RaftSideDockMinStrip / 2
 
 /** The log tag the iOS host listens for to open the share sheet with the log files. */
 internal const val RaftShareLogsTag = "RaftShareLogs"
+
+/** The log tag the iOS host listens for to pop the pushed pages back to the app shell. */
+private const val RaftPopToShellTag = "RaftPopToShell"
+
+/**
+ * A page pushed over the app shell keeps the shell's dock in the strip (xuheng-li 2026-10-28);
+ * a dock action pops back to the shell first. Same nodes whether or not the dock shows, so a
+ * fold or a rotation keeps the page's state.
+ */
+@Composable
+internal fun RaftPushedPageDockFrame(enabled: Boolean, content: @Composable () -> Unit) {
+    val safeArea = if (enabled) raftHorizontalSafeArea() else RaftHorizontalSafeArea.Zero
+    val dock = RaftSideDockState.pushedPageDock?.takeIf { raftSideDockStrip(safeArea) }
+    Row(Modifier.fillMaxSize()) {
+        Box(
+            Modifier
+                .weight(1f)
+                .fillMaxHeight()
+                .then(if (dock != null) Modifier.raftConsumeSafeAreaHorizontal(WindowInsetsSides.End) else Modifier)
+        ) {
+            content()
+        }
+        dock?.invoke({ raftLogInfo(RaftPopToShellTag, "pop_to_shell") }, safeArea.right)
+    }
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable

@@ -6839,6 +6839,93 @@ private fun RaftAppShellReadyContent(
         railInlineSecondaryDestination = AppShellRailSearchKey
         bridge.log("app_shell_rail_secondary_open destination=search from=top_bar")
     }
+    // The side dock (iPhone Duo): drawn by the shell (leavePage null) and by the pages pushed over
+    // it (RaftPushedPageDockFrame), whose leavePage pops back to the shell first.
+    val phoneSideDock: @Composable (leavePage: (() -> Unit)?, width: Dp) -> Unit = { leavePage, width ->
+        val leave = {
+            leavePage?.invoke()
+            // A conversation kept alone on the outer display steps aside as a pushed page does.
+            if (appShellAdaptiveDetailCoversTabRoot(desktopModeOnLargeScreen, selectedTab, adaptiveWorkspaceState?.presentation)) {
+                dismissAdaptiveDetailSelection()
+            }
+        }
+        RaftSideDock(
+            width = width,
+            currentServer = serverMenuModel?.currentServer,
+            onServerClick = {
+                leave()
+                onPhoneBarTabSelect(AppShellServerTabKey)
+            },
+            topItems = emptyList(),
+            items =
+                appShellBottomTabItems.filter {
+                    it.key != AppShellSearchTabKey && it.key != AppShellServerTabKey
+                },
+            onSelect = {
+                leave()
+                onPhoneBarTabSelect(it)
+            },
+            backLabel = stringResource(Res.string.common_back),
+            canGoBack = false,
+            onBack = null,
+            searchLabel = searchTabLabel,
+            onSearch = {},
+            bottomSafeArea = shellScope.bottomSafeArea,
+            statusClearance = RaftSideDockPhoneStatusClearance,
+            footerItems = appShellBottomTabItems.filter { it.key == AppShellSearchTabKey },
+        )
+    }
+    val wideSideDock: @Composable (leavePage: (() -> Unit)?, width: Dp) -> Unit = { leavePage, width ->
+        RaftSideDock(
+            width = width,
+            currentServer = serverMenuModel?.currentServer,
+            onServerClick = {
+                leavePage?.invoke()
+                bridge.log("app_shell_server_menu_toggle open=${!serverMenuState.open} from=side_dock")
+                serverMenuState.toggle()
+            },
+            topItems =
+                listOf(
+                    RaftBottomTabItemPayload(
+                        key = "settings",
+                        label = settingsTabLabel,
+                        iconName = RaftLucideIconName.Settings,
+                        selected = retainedAppShellSelectedTab(selectedTab) == "settings",
+                    )
+                ),
+            items = appShellRailTabItems.orderedLikePhoneBar { it.key },
+            onSelect = {
+                leavePage?.invoke()
+                onRailTabSelect(it)
+            },
+            backLabel = stringResource(Res.string.common_back),
+            // The conversation header's Back (a reply thread back to its channel), which the
+            // header drops while the dock is on. A pushed page keeps its own Back.
+            canGoBack =
+                adaptiveWorkspaceState?.selection != null &&
+                    (
+                        adaptiveDetailLaunchPayload?.surfaceKind == RaftThreadSurfaceKind.ReplyThread ||
+                            adaptiveWorkspaceSession.hasVisibleDetailBackHistory()
+                    ),
+            onBack = if (leavePage == null) ::dismissAdaptiveDetailSelection else null,
+            searchLabel = searchTabLabel,
+            onSearch = {
+                leavePage?.invoke()
+                onShellSearchClick()
+            },
+            bottomSafeArea = shellScope.bottomSafeArea,
+        )
+    }
+    val pushedPageDock =
+        when {
+            phoneSideDockActive -> phoneSideDock
+            sideDockActive -> wideSideDock
+            else -> null
+        }
+    DisposableEffect(pushedPageDock) {
+        RaftSideDockState.pushedPageDock = pushedPageDock
+        onDispose { if (RaftSideDockState.pushedPageDock === pushedPageDock) RaftSideDockState.pushedPageDock = null }
+    }
     val mainRouteSurface: @Composable () -> Unit = {
         CompositionLocalProvider(LocalRaftAppShellTopBar provides appShellTopBar.takeIf { navRailActive }) {
         RaftAppShellSurface(
@@ -6943,63 +7030,10 @@ private fun RaftAppShellReadyContent(
                     null
                 },
             trailingNavigation =
-                if (phoneSideDockActive && showAppShellBottomTabs) {
-                    {
-                        RaftSideDock(
-                            width = rightSafeArea,
-                            currentServer = serverMenuModel?.currentServer,
-                            onServerClick = { onPhoneBarTabSelect(AppShellServerTabKey) },
-                            topItems = emptyList(),
-                            items =
-                                appShellBottomTabItems.filter {
-                                    it.key != AppShellSearchTabKey && it.key != AppShellServerTabKey
-                                },
-                            onSelect = onPhoneBarTabSelect,
-                            backLabel = stringResource(Res.string.common_back),
-                            canGoBack = false,
-                            onBack = null,
-                            searchLabel = searchTabLabel,
-                            onSearch = {},
-                            bottomSafeArea = shellScope.bottomSafeArea,
-                            statusClearance = RaftSideDockPhoneStatusClearance,
-                            footerItems = appShellBottomTabItems.filter { it.key == AppShellSearchTabKey },
-                        )
-                    }
+                if (phoneSideDockActive) {
+                    { phoneSideDock(null, rightSafeArea) }
                 } else if (sideDockActive) {
-                    {
-                        RaftSideDock(
-                            width = rightSafeArea,
-                            currentServer = serverMenuModel?.currentServer,
-                            onServerClick = {
-                                bridge.log("app_shell_server_menu_toggle open=${!serverMenuState.open} from=side_dock")
-                                serverMenuState.toggle()
-                            },
-                            topItems =
-                                listOf(
-                                    RaftBottomTabItemPayload(
-                                        key = "settings",
-                                        label = settingsTabLabel,
-                                        iconName = RaftLucideIconName.Settings,
-                                        selected = retainedAppShellSelectedTab(selectedTab) == "settings",
-                                    )
-                                ),
-                            items = appShellRailTabItems.orderedLikePhoneBar { it.key },
-                            onSelect = onRailTabSelect,
-                            backLabel = stringResource(Res.string.common_back),
-                            // The conversation header's Back (a reply thread back to its channel),
-                            // which the header drops while the dock is on.
-                            canGoBack =
-                                adaptiveWorkspaceState?.selection != null &&
-                                    (
-                                        adaptiveDetailLaunchPayload?.surfaceKind == RaftThreadSurfaceKind.ReplyThread ||
-                                            adaptiveWorkspaceSession.hasVisibleDetailBackHistory()
-                                    ),
-                            onBack = { dismissAdaptiveDetailSelection() },
-                            searchLabel = searchTabLabel,
-                            onSearch = onShellSearchClick,
-                            bottomSafeArea = shellScope.bottomSafeArea,
-                        )
-                    }
+                    { wideSideDock(null, rightSafeArea) }
                 } else {
                     null
                 },
@@ -7023,7 +7057,7 @@ private fun RaftAppShellReadyContent(
                             navRailActive -> shellScope.copy(topSafeArea = 0.dp)
                             else -> shellScope
                         }
-                    if (!navRailActive && showAppShellBottomTabs) serverMenuOverlay(false)
+                    if (!navRailActive && (showAppShellBottomTabs || phoneSideDockActive)) serverMenuOverlay(false)
                     serverSwitcherInviteServerId?.let { inviteServerId ->
                         val inviteMembersDataSource =
                             remember(memberRepository, settingsRepository, appShellServerMembersStore) {

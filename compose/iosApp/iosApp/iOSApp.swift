@@ -645,6 +645,9 @@ private enum RaftIosSharedLogBridge {
             if tag == "RaftShareLogs" {
                 DispatchQueue.main.async { RaftLogShare.present() }
             }
+            if tag == "RaftPopToShell" {
+                DispatchQueue.main.async { RaftPopToShell.run() }
+            }
         }
     }
 }

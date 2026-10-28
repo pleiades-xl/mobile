@@ -292,6 +292,27 @@ final class RaftShakeDetector {
     }
 }
 
+/// Self-build: the side dock on a page pushed over the app shell goes back to the shell first.
+enum RaftPopToShell {
+    static func run() {
+        let window = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow }
+            .first
+        guard let window, let root = window.rootViewController else { return }
+        if root.presentedViewController != nil { root.dismiss(animated: false) }
+        navigation(in: window)?.popToRootViewController(animated: true)
+    }
+
+    /// The page stack's navigation controller, found through the views (SwiftUI hosts it).
+    private static func navigation(in view: UIView) -> UINavigationController? {
+        if let navigation = view.next as? UINavigationController { return navigation }
+        for subview in view.subviews {
+            if let found = navigation(in: subview) { return found }
+        }
+        return nil
+    }
+}
+
 enum RaftLogShare {
     static func present() {
         let files = FileManager.default
