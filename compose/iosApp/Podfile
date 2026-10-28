@@ -57,6 +57,10 @@ post_install do |installer|
       config.build_settings['CODE_SIGNING_REQUIRED'] = 'NO'
       config.build_settings['CODE_SIGN_IDENTITY'] = ''
       config.build_settings['EXPANDED_CODE_SIGN_IDENTITY'] = ''
+      # Xcode 27.1 accepts deployment targets 15.0 and up only.
+      if config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'].to_f < 15.0
+        config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
+      end
     end
   end
 end
