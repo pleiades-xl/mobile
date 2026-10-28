@@ -6740,7 +6740,12 @@ private fun RaftAppShellReadyContent(
             RaftAppServerMenuOverlay(
                 model = serverMenuModel,
                 state = serverMenuState,
-                anchor = if (topBar) RaftServerMenuAnchor.TopBar else RaftServerMenuAnchor.BottomBar,
+                anchor =
+                    when {
+                        !topBar -> RaftServerMenuAnchor.BottomBar
+                        sideDockActive -> RaftServerMenuAnchor.SideDock
+                        else -> RaftServerMenuAnchor.TopBar
+                    },
                 entries =
                     raftServerMenuEntriesFor(
                         serverMenuModel.entries,
@@ -6765,7 +6770,13 @@ private fun RaftAppShellReadyContent(
                         serverMenuContent.snapshot.server,
                         { serverId -> serverSwitcherInviteServerId = serverId }
                     ) { serverMenuState.dismiss() },
-                topInset = if (topBar) raftAppShellTopBarMenuTopInset(shellScope.topSafeArea) else shellScope.topSafeArea,
+                topInset =
+                    when {
+                        !topBar -> shellScope.topSafeArea
+                        sideDockActive -> RaftSideDockStatusClearance
+                        else -> raftAppShellTopBarMenuTopInset(shellScope.topSafeArea)
+                    },
+                endInset = if (topBar && sideDockActive) rightSafeArea else 0.dp,
                 screenHeight =
                     shellScope.adaptivePane
                         .takeIf { it.heightPx > 0 && it.density > 0f }

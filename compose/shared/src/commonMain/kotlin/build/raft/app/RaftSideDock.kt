@@ -45,7 +45,7 @@ private val RaftSideDockMinStrip = 44.dp
 private val RaftSideDockServerAvatar = 32.dp
 
 /** The status bar's clock, Wi-Fi and battery sit at the top of the strip. */
-private val RaftSideDockStatusClearance = 104.dp
+internal val RaftSideDockStatusClearance = 104.dp
 
 internal fun raftSideDockActive(navRailActive: Boolean, rightSafeArea: Dp): Boolean =
     navRailActive && rightSafeArea >= RaftSideDockMinStrip

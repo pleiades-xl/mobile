@@ -1,6 +1,7 @@
 package build.raft.app
 
 import build.raft.app.resources.*
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
@@ -139,6 +140,9 @@ internal enum class RaftServerMenuAnchor {
      * one server entry.
      */
     TopBar,
+
+    /** Beside the iPhone Duo side dock's server button: [RaftSideDock]'s inner edge, at the top. */
+    SideDock,
 }
 
 /**
@@ -161,6 +165,8 @@ internal fun RaftAppServerMenuOverlay(
     onInviteHumanClick: (() -> Unit)?,
     bottomInset: Dp = 0.dp,
     topInset: Dp = 0.dp,
+    /** Room kept free at the end edge (the side dock). */
+    endInset: Dp = 0.dp,
     screenHeight: Dp? = null,
     /** The pages in the bottom row ([raftServerMenuEntriesFor]); none draws no row. */
     entries: List<RaftServerMenuEntry> = model.entries,
@@ -209,19 +215,21 @@ internal fun RaftAppServerMenuOverlay(
         RaftDesignSystemTheme {
             RaftMobileNavServerPopover(
                 state = state,
+                modifier = Modifier.padding(end = endInset),
                 bottomInset = bottomInset,
                 topInset = topInset,
                 screenHeight = screenHeight,
                 alignment =
                     when (anchor) {
                         RaftServerMenuAnchor.TopBar -> Alignment.TopStart
+                        RaftServerMenuAnchor.SideDock -> Alignment.TopEnd
                         RaftServerMenuAnchor.BottomBar -> Alignment.BottomCenter
                     },
             ) {
                 RaftMobileNavServerPopoverContent(
                     modifier =
                         Modifier
-                            .then(if (anchor == RaftServerMenuAnchor.TopBar) Modifier.width(RaftServerMenuTopBarWidth) else Modifier)
+                            .then(if (anchor != RaftServerMenuAnchor.BottomBar) Modifier.width(RaftServerMenuTopBarWidth) else Modifier)
                             .raftFloatingContentClickTarget(),
                     paneTitle = panelTitle,
                 ) {
