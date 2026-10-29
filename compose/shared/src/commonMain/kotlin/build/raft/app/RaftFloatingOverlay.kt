@@ -1,6 +1,7 @@
 package build.raft.app
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -201,6 +202,11 @@ internal fun RaftFloatingOverlayHost(
             delay(dismissActivationDelayMillis)
             dismissClickableActive = true
         }
+    }
+    // Self-build diagnostics (iPhone Duo dead rail taps, 2026-10-29).
+    DisposableEffect(Unit) {
+        raftLogInfo("RaftTouchProbe", "floating_overlay_open mode=$outsidePointerMode")
+        onDispose { raftLogInfo("RaftTouchProbe", "floating_overlay_close") }
     }
     Box(
         modifier = modifier
