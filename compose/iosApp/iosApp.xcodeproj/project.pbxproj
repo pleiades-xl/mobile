@@ -990,7 +990,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = build.raft.app;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.vgent.raft;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SLOCK_OAUTH_CALLBACK_SCHEME = "raft-debug";
 				SWIFT_OBJC_BRIDGING_HEADER = "iosApp-Bridging-Header.h";
@@ -1020,7 +1020,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = build.raft.app;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.vgent.raft;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SLOCK_OAUTH_CALLBACK_SCHEME = raft;
 				SWIFT_OBJC_BRIDGING_HEADER = "iosApp-Bridging-Header.h";
