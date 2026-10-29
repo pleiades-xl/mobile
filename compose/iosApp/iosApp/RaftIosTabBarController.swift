@@ -157,6 +157,7 @@ final class RaftIosTabBarController: UIViewController {
         overlayView.addSubview(tabs.view)
         tabs.didMove(toParent: self)
         overlayView.tabBar = tabs.tabBar
+        overlayView.barHost = tabs.view
         RaftIosTabBarController.setLiveTabBarProvider { [weak tabs] in tabs?.tabBar }
         tabs.tabBar.tintColor = .label
         applyAppearance()
@@ -282,6 +283,7 @@ final class RaftIosTabBarController: UIViewController {
                 "RaftIosTabBar",
                 "tab_bar_edge edge=\(band.edge.rawValue) points=\(band.points)"
             )
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.overlayView.dumpBar() }
         }
         reportedBand = band
         bridge.updateBand(edge: band.edge.rawValue, points: Double(band.points))
@@ -403,16 +405,75 @@ private final class RaftIosTabBarOverlayView: UIView {
         fatalError("init(coder:) is not supported")
     }
 
+    /// The system tab bar controller's view. Self-build (iPhone Duo, iOS 27.1 SDK): with the bar in
+    /// the vertical strip, the buttons iOS draws there need not be descendants of `tabBar`.
+    weak var barHost: UIView?
+    private var loggedTouchAt: TimeInterval?
+
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         guard let hit = super.hitTest(point, with: event),
               let tabBar = tabBar else {
             return nil
         }
-        guard hit.isDescendant(of: tabBar) else { return nil }
+        let inBar = hit.isDescendant(of: tabBar)
+        let claimed = inBar || isBarControl(hit)
+        if let event = event, event.type == .touches, loggedTouchAt != event.timestamp {
+            loggedTouchAt = event.timestamp
+            RaftIosDiagnosticsRecord(
+                "info",
+                "RaftIosTabBar",
+                "overlay_hit x=\(Int(point.x)) y=\(Int(point.y)) inBar=\(inBar) claimed=\(claimed) view=\(Self.chain(hit, upTo: self))"
+            )
+        }
+        guard claimed else { return nil }
         if let event = event, event.type == .touches {
             lastTouchBeganAt = event.timestamp
         }
         return hit
+    }
+
+    /// A control (or a view inside one) in the tab bar controller's own views: a bar button.
+    private func isBarControl(_ view: UIView) -> Bool {
+        guard let host = barHost, view !== host, view.isDescendant(of: host) else { return false }
+        var current: UIView? = view
+        while let candidate = current, candidate !== host {
+            if candidate is UIControl || String(describing: type(of: candidate)).contains("TabBar") { return true }
+            current = candidate.superview
+        }
+        return false
+    }
+
+    /// Self-build diagnostics: every view of the window that reaches into the bar's band.
+    func dumpBar() {
+        guard let window = window, let tabBar = tabBar else { return }
+        let band = tabBar.convert(tabBar.bounds, to: window)
+        var lines = ["bar_dump window=\(Int(window.bounds.width))x\(Int(window.bounds.height)) tabBar=\(Self.rect(band)) hidden=\(tabBar.isHidden) alpha=\(tabBar.alpha)"]
+        func visit(_ view: UIView, depth: Int) {
+            guard lines.count < 150 else { return }
+            let frame = view.convert(view.bounds, to: window)
+            if frame.maxX > window.bounds.width - 120 || frame.intersects(band) {
+                lines.append("\(String(repeating: ".", count: depth))\(type(of: view)) \(Self.rect(frame)) ui=\(view.isUserInteractionEnabled) hidden=\(view.isHidden) alpha=\(view.alpha)")
+            }
+            view.subviews.forEach { visit($0, depth: depth + 1) }
+        }
+        visit(window, depth: 0)
+        for chunk in stride(from: 0, to: lines.count, by: 20) {
+            RaftIosDiagnosticsRecord("info", "RaftIosTabBar", lines[chunk..<min(chunk + 20, lines.count)].joined(separator: " | "))
+        }
+    }
+
+    private static func chain(_ view: UIView, upTo stop: UIView) -> String {
+        var names: [String] = []
+        var current: UIView? = view
+        while let candidate = current, candidate !== stop, names.count < 8 {
+            names.append(String(describing: type(of: candidate)))
+            current = candidate.superview
+        }
+        return names.joined(separator: "<")
+    }
+
+    private static func rect(_ r: CGRect) -> String {
+        "\(Int(r.minX)),\(Int(r.minY)),\(Int(r.width))x\(Int(r.height))"
     }
 }
 
