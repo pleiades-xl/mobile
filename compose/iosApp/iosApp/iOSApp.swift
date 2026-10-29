@@ -646,6 +646,9 @@ private enum RaftIosSharedLogBridge {
             let timestampMillis = (userInfo["timestampMillis"] as? NSNumber)?.int64Value ?? 0
             let forceCritical = (userInfo["critical"] as? NSNumber)?.boolValue ?? false
             RaftIosDiagnosticsRecordWithContext(level, tag, message, timestampMillis, true, forceCritical)
+            if tag == "RaftShareLogs" {
+                DispatchQueue.main.async { RaftLogShare.present() }
+            }
         }
     }
 }

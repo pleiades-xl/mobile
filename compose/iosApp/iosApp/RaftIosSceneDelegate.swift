@@ -3,6 +3,7 @@ import SafariServices
 import shared
 import SwiftUI
 import UIKit
+import CoreMotion
 
 // task #471: scene plumbing for iPad multi-window.
 //
@@ -43,7 +44,7 @@ final class RaftIosSceneDelegate: UIResponder, UIWindowSceneDelegate {
         // With a custom scene delegate the App's WindowGroup is inert; the
         // delegate owns window creation.
         if let windowScene = scene as? UIWindowScene {
-            let window = UIWindow(windowScene: windowScene)
+            let window = RaftShakeWindow(windowScene: windowScene)
             window.rootViewController = UIHostingController(rootView: ContentView())
             // Settings > Appearance > Theme: an explicit Light/Dark choice overrides the OS
             // style for the whole window (keyboards, system menus, the native tab bar);
@@ -53,6 +54,7 @@ final class RaftIosSceneDelegate: UIResponder, UIWindowSceneDelegate {
             window.overrideUserInterfaceStyle = UIUserInterfaceStyle(
                 rawValue: Int(RaftAppAppearanceRuntime.shared.hostStyleCode)
             ) ?? .unspecified
+            RaftShakeDetector.shared.start()
             self.window = window
             RaftIosAppearanceHost.attach()
             window.makeKeyAndVisible()
@@ -219,5 +221,101 @@ extension UIColor {
             blue: CGFloat(value & 0xFF) / 255.0,
             alpha: CGFloat((value >> 24) & 0xFF) / 255.0
         )
+    }
+}
+
+/// Self-build (xuheng-li 2026-10-28): shake the phone, or long-press the server button, to share
+/// the app's diagnostics log files, the newest launches in full (the Settings export keeps only
+/// the last ~120 KB).
+final class RaftShakeWindow: UIWindow {
+    override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
+        guard motion == .motionShake else { return super.motionEnded(motion, with: event) }
+        RaftIosDiagnosticsRecordCriticalSynchronously("RaftShakeShare", "shake_share")
+        RaftLogShare.present()
+    }
+
+    /// Self-build diagnostics (iPhone Duo dead taps, 2026-10-29): every touch-down the system hands
+    /// this window, where it landed and the view chain it hit, written at once. A tap that never
+    /// shows up here never reached the app.
+    override func sendEvent(_ event: UIEvent) {
+        if event.type == .touches, let touches = event.allTouches {
+            for touch in touches where touch.phase == .began {
+                let point = touch.location(in: self)
+                var chain: [String] = []
+                var hit = touch.view
+                while let current = hit, chain.count < 5 {
+                    chain.append(String(describing: type(of: current)))
+                    hit = current.superview
+                }
+                RaftIosDiagnosticsRecordCriticalSynchronously(
+                    "RaftTouchProbe",
+                    "touch_down x=\(Int(point.x)) y=\(Int(point.y)) view=\(chain.joined(separator: "<"))"
+                )
+            }
+        }
+        super.sendEvent(event)
+    }
+}
+
+/// iOS hands the shake gesture to the first responder only, which Raft's views never pass on (and
+/// with nothing focused there is none), so the accelerometer detects the shake itself: three
+/// readings over 1.8 g within 0.8 s.
+final class RaftShakeDetector {
+    static let shared = RaftShakeDetector()
+    private let motion = CMMotionManager()
+    private var peaks: [TimeInterval] = []
+    private var lastShare: TimeInterval = 0
+
+    func start() {
+        guard motion.isAccelerometerAvailable, !motion.isAccelerometerActive else { return }
+        motion.accelerometerUpdateInterval = 1.0 / 30.0
+        motion.startAccelerometerUpdates(to: .main) { [weak self] data, _ in
+            guard let self, let a = data?.acceleration else { return }
+            guard (a.x * a.x + a.y * a.y + a.z * a.z).squareRoot() > 1.8 else { return }
+            let now = Date().timeIntervalSince1970
+            self.peaks = self.peaks.filter { now - $0 < 0.8 } + [now]
+            guard self.peaks.count >= 3, now - self.lastShare > 3 else { return }
+            self.peaks.removeAll()
+            self.lastShare = now
+            RaftIosDiagnosticsRecordCriticalSynchronously("RaftShakeShare", "shake_share source=accelerometer")
+            RaftLogShare.present()
+        }
+    }
+}
+
+enum RaftLogShare {
+    /// The diagnostics queue writes entries asynchronously: wait a moment so the latest ones (the
+    /// taps just before the share) are in the files.
+    static func present() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { presentNow() }
+    }
+
+    private static func presentNow() {
+        let files = FileManager.default
+        guard let support = files.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+        let root = support.appendingPathComponent("raft_diagnostics_logs", isDirectory: true)
+        let launches = ((try? files.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix("launch-") }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+            .prefix(2)
+        let out = files.temporaryDirectory.appendingPathComponent("raft-logs-\(Int(Date().timeIntervalSince1970))", isDirectory: true)
+        try? files.createDirectory(at: out, withIntermediateDirectories: true)
+        var copies: [URL] = []
+        for launch in launches {
+            for file in (try? files.contentsOfDirectory(at: launch, includingPropertiesForKeys: nil)) ?? [] {
+                let copy = out.appendingPathComponent("\(launch.lastPathComponent)-\(file.lastPathComponent)")
+                if (try? files.copyItem(at: file, to: copy)) != nil { copies.append(copy) }
+            }
+        }
+        let window = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow }
+            .first
+        var presenter = window?.rootViewController
+        while let next = presenter?.presentedViewController { presenter = next }
+        guard !copies.isEmpty, let presenter, !(presenter is UIActivityViewController) else { return }
+        let sheet = UIActivityViewController(activityItems: copies, applicationActivities: nil)
+        sheet.popoverPresentationController?.sourceView = presenter.view
+        sheet.popoverPresentationController?.sourceRect = CGRect(x: presenter.view.bounds.midX, y: presenter.view.bounds.midY, width: 1, height: 1)
+        presenter.present(sheet, animated: true)
     }
 }

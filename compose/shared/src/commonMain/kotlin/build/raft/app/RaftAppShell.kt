@@ -174,6 +174,7 @@ internal fun RaftAppShellSurface(
             modifier =
                 modifier
                     .then(focusDismissModifier)
+                    .raftShellTouchProbe()
                     .fillMaxSize()
                     .background(RaftColor.SurfaceWhite)
         ) {
@@ -439,3 +440,15 @@ private fun RaftAppShellNetworkBanner() {
         )
     }
 }
+
+/** Self-build diagnostics (iPhone Duo dead taps, 2026-10-29): every touch that reaches the shell. */
+private fun Modifier.raftShellTouchProbe(): Modifier =
+    pointerInput(Unit) {
+        awaitPointerEventScope {
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                val change = event.changes.firstOrNull { it.pressed && !it.previousPressed } ?: continue
+                raftLogInfo("RaftTouchProbe", "shell_pointer_down x=${change.position.x.toInt()} y=${change.position.y.toInt()}")
+            }
+        }
+    }

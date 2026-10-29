@@ -1,7 +1,8 @@
 package build.raft.app
 
 import build.raft.app.resources.*
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
@@ -52,6 +53,7 @@ internal fun raftAppRailWithoutTopBar(navRailActive: Boolean): Boolean =
  * over its whole face, image avatars too (raft-design #875, States "Medium on an ink sticker";
  * Kirby 10-28).
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun RaftAppRailServerTile(
     model: RaftServerMenuModel,
@@ -72,11 +74,13 @@ internal fun RaftAppRailServerTile(
             Modifier
                 .size(RaftAppRailDefaults.ItemSize)
                 .raftPointerHover(source)
-                .clickable(
+                .combinedClickable(
                     interactionSource = source,
                     indication = null,
                     role = Role.Button,
                     onClickLabel = actionLabel,
+                    // Self-build: a long press shares the diagnostics log files (iOS host, tag RaftShareLogs).
+                    onLongClick = { raftLogInfo("RaftShareLogs", "share_logs_request") },
                     onClick = onClick,
                 )
                 .semantics {
