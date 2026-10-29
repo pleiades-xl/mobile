@@ -1,5 +1,6 @@
 package build.raft.app.data
 
+import build.raft.app.network.sync.CanonicalMessageEnvelopeV2
 import build.raft.app.network.sync.CanonicalMessageV2IncrementalFrame
 import build.raft.app.network.sync.CanonicalMessageV2SnapshotFrame
 import build.raft.app.network.sync.CanonicalMessageV2Store
@@ -86,6 +87,31 @@ internal class RecordingStore : CanonicalMessageV2Store {
     override suspend fun clearScope(scope: SyncScopeKey): Set<SyncScopeKey> = setOf(scope)
 
     override suspend fun clearPartition(partition: DurablePartitionKey) = Unit
+
+    /** Phase 2a: the enter / catch-up / prewarm write, recorded like a snapshot under the header it commits. */
+    override suspend fun applyCoverage(
+        scope: SyncScopeKey,
+        envelopes: List<CanonicalMessageEnvelopeV2>,
+        coverage: build.raft.app.network.sync.CanonicalMessageV2Coverage?,
+        revAtRequest: Long,
+        userDriven: Boolean,
+        threadParent: build.raft.app.network.sync.CanonicalMessageV2ThreadParent?,
+        insertOnly: Boolean,
+        unknownFieldsByFactId: Map<String, Set<build.raft.app.canonical.message.MessageAggregateField>>,
+        runPartitionRetention: Boolean,
+        excludedSeqs: Set<Long>,
+    ): CanonicalMessageV2StoreWriteResult {
+        snapshotFailure?.let { throw it }
+        coverages += coverage
+        val segments = coverage?.excluding(excludedSeqs).orEmpty().fold(emptyList<build.raft.app.network.sync.CanonicalMessageV2Segment>()) { acc, piece ->
+            build.raft.app.network.sync.CanonicalMessageV2SegmentAlgebra.union(acc, piece.toSegment(0L))
+        }
+        val written = coverageHeader(null, segments, envelopes, threadParent, envelopes)
+        snapshots += CanonicalMessageV2SnapshotFrame(scope, envelopes, written)
+        return CanonicalMessageV2StoreWriteResult(committedCursor = written)
+    }
+
+    val coverages = mutableListOf<build.raft.app.network.sync.CanonicalMessageV2Coverage?>()
 }
 
 /**

@@ -1,5 +1,8 @@
 package build.raft.app
 
+import build.raft.designsystem.motion.rememberRaftReducedMotion
+import build.raft.app.data.TaskConversationDetailsRepository
+import build.raft.app.data.TASK_V2_CONVERSATIONS_FEATURE_FLAG_KEY
 import build.raft.designsystem.components.raftSafeAreaHorizontalPadding
 import build.raft.app.resources.*
 import build.raft.app.format.RaftFormat
@@ -21,6 +24,8 @@ import build.raft.app.data.SHELL_OVERLAY_MESSAGE_TYPE
 import build.raft.app.data.SHELL_OVERLAY_REQUEST_ID
 import build.raft.app.data.AuthenticatedRouteOwner
 import build.raft.app.data.normalizedOrNull
+import build.raft.app.data.isMarkedUnreadIn
+import build.raft.app.data.RaftReadToggleNotice
 import build.raft.app.data.DEFAULT_ACTIVITY_TASK_STATUS_BADGES_ENABLED
 import build.raft.app.data.backFromDetail
 import build.raft.app.data.closeFromDetailPage
@@ -171,10 +176,11 @@ import build.raft.app.data.ServerSwitcherOrderPreference
 import build.raft.app.data.PushPreviewMode
 import build.raft.app.data.toSettingsMobileSelectionSnapshot
 import build.raft.app.data.RaftAuthApi
-import build.raft.app.data.RaftDatabaseLaunchAttempt
 import build.raft.app.data.RaftEventBus
 import build.raft.app.data.RaftSharedStoreRegistry
 import build.raft.app.data.RaftSharedStoreProvider
+import build.raft.app.data.AgentProfileRefreshCoalescer
+import build.raft.app.data.isAgentProfileUpdate
 import build.raft.app.data.RAFT_SHELL_OVERLAY_REQUEST_EVENT
 import build.raft.app.data.RAFT_SHELL_OVERLAY_RESULT_EVENT
 import build.raft.app.data.SHELL_OVERLAY_TYPE_CANCEL
@@ -184,7 +190,6 @@ import build.raft.app.data.raftShellShouldDropOverlayRequest
 import build.raft.app.data.shellOverlayRequestIdOrNull
 import build.raft.app.data.toRaftShellOverlayRequestOrNull
 import build.raft.app.data.RaftShellStoreScope
-import build.raft.app.data.attemptRaftDatabaseLaunch
 import build.raft.app.data.ScreenLoadState
 import build.raft.app.data.isAuthSessionError
 import build.raft.app.data.isEdgeBlockedMarker
@@ -295,6 +300,7 @@ import build.raft.app.model.ChannelId
 import build.raft.app.model.DirectMessageCreated
 import build.raft.app.model.InboxItemKind
 import build.raft.app.model.MemberPresenceUpdated
+import build.raft.app.model.AgentActivitySubscribed
 import build.raft.app.model.MemberId
 import build.raft.app.model.MemberKind
 import build.raft.app.model.MemberProfile
@@ -371,6 +377,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.ui.layout.onSizeChanged
+import build.raft.app.cmp.host.LocalRaftHost
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
@@ -460,6 +467,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
+import kotlin.time.Clock
 import kotlin.time.TimeSource
 import build.raft.app.model.isExternalAgent
 
@@ -1436,7 +1444,23 @@ internal data class AppShellVisibleRefreshKey(
     val target: String
 )
 
-internal class AppShellVisibleRefreshGate {
+/**
+ * Hands f6c3f3a6: a process foreground this long after the gate's last refresh always refreshes
+ * the visible route, whatever the appearance bookkeeping says. Wall clock: the monotonic clock
+ * does not advance while an iOS device sleeps, and a suspension is exactly that.
+ */
+internal const val AppShellResumeStaleRefreshMillis: Long = 60_000L
+
+internal class AppShellVisibleRefreshGate(
+    private val nowEpochMillis: () -> Long = { Clock.System.now().toEpochMilliseconds() },
+    private val staleRefreshMillis: Long = AppShellResumeStaleRefreshMillis
+) {
+    private var lastRefreshAtMillis: Long? = null
+
+    /** Why the last [shouldRefresh] refreshed or skipped, for the shell's diagnostics line. */
+    var lastDecisionCause: String = "none"
+        private set
+
     private val seenSignalsByKey =
         mutableMapOf<AppShellVisibleRefreshKey, MutableSet<AppShellVisibleRefreshSignal>>()
     private val keyOrder = mutableListOf<AppShellVisibleRefreshKey>()
@@ -1478,8 +1502,37 @@ internal class AppShellVisibleRefreshGate {
             effectiveForegroundEpoch <=
                 (refreshedProcessForegroundEpoch ?: Long.MIN_VALUE)
         ) {
+            lastDecisionCause = "same_foreground_epoch"
             return false
         }
+        // A lifecycle signal past the check above carries a process foreground not refreshed yet.
+        val newProcessForeground =
+            signal == AppShellVisibleRefreshSignal.Lifecycle && foregroundEpoch != null && effectiveForegroundEpoch != null
+        val refresh = shouldRefreshForAppearance(signal, appearanceGeneration, target, effectiveForegroundEpoch, newProcessForeground)
+        val now = nowEpochMillis()
+        val lastRefreshAt = lastRefreshAtMillis
+        if (refresh) {
+            lastRefreshAtMillis = now
+            return true
+        }
+        if (newProcessForeground && (lastRefreshAt == null || now - lastRefreshAt >= staleRefreshMillis)) {
+            // Backstop: the bookkeeping above judged this foreground already served, but the route
+            // was last refreshed long ago (an app suspended for 1h44m stayed on old Activity rows).
+            refreshedProcessForegroundEpoch = effectiveForegroundEpoch
+            lastRefreshAtMillis = now
+            lastDecisionCause = "stale_since_last_refresh"
+            return true
+        }
+        return false
+    }
+
+    private fun shouldRefreshForAppearance(
+        signal: AppShellVisibleRefreshSignal,
+        appearanceGeneration: Int,
+        target: String,
+        effectiveForegroundEpoch: Long?,
+        newProcessForeground: Boolean
+    ): Boolean {
         val currentKey = AppShellVisibleRefreshKey(appearanceGeneration, target)
         val currentSignals = seenSignalsByKey[currentKey]
         val retiredThroughGeneration =
@@ -1514,17 +1567,24 @@ internal class AppShellVisibleRefreshGate {
             if (signal == AppShellVisibleRefreshSignal.Lifecycle && effectiveForegroundEpoch != null) {
                 refreshedProcessForegroundEpoch = effectiveForegroundEpoch
             }
+            lastDecisionCause = if (newProcessForeground) "retired_appearance_new_epoch" else "retired_appearance"
             return false
         }
         val seenSignals = seenSignalsByKey[key]
         if (seenSignals != null) {
+            // Hands f6c3f3a6: hide -> show -> hide -> show with no page appearance in between
+            // maps both shows to the same pending appearance key. The second show is a new
+            // process foreground (the epoch moved), not a duplicate of the first, so it refreshes.
+            val repeatedForeground = newProcessForeground && AppShellVisibleRefreshSignal.Lifecycle in seenSignals
             seenSignals += signal
             if (signal == AppShellVisibleRefreshSignal.Lifecycle && effectiveForegroundEpoch != null) {
                 refreshedProcessForegroundEpoch = effectiveForegroundEpoch
             }
-            return false
+            lastDecisionCause = if (repeatedForeground) "repeated_foreground_same_appearance" else "same_appearance"
+            return repeatedForeground
         }
         seenSignalsByKey[key] = mutableSetOf(signal)
+        lastDecisionCause = "new_appearance"
         if (effectiveForegroundEpoch != null) {
             refreshedProcessForegroundEpoch = effectiveForegroundEpoch
         }
@@ -1896,6 +1956,8 @@ private fun AppShellTabPager(
     mountedTabs: Set<String>,
     childTabSwitchEpoch: Int,
     childPageTabKeys: List<String> = AppShellChildPageTabKeys,
+    /** Android's phone bottom tabs: Material fade through between child tabs (see the stack). */
+    fadeThrough: Boolean = false,
     log: (String) -> Unit = {},
     content: @Composable (tab: String, active: Boolean) -> Unit
 ) {
@@ -1921,16 +1983,23 @@ private fun AppShellTabPager(
                 "retained=$retainedChildTabs mountedTabs=$mountedTabs"
         )
     }
+    // The fade through (Android phone bar) animates these kept-alive layers; it never re-creates a
+    // tab, so a switch keeps each tab's state and reloads nothing. Reduced motion: at once.
+    val reducedMotion = rememberRaftReducedMotion()
     Box(modifier = Modifier.fillMaxSize()) {
         if (activeChildTab != null) {
-            retainedChildTabs.forEach { tab ->
-                key("app-shell-$tab") {
-                    RaftAppShellChildTabHost(
-                        shellId = childHostShellId,
-                        tab = tab,
-                        active = tab == activeChildTab
-                    )
-                }
+            AppShellTabFadeThroughStack(
+                activeTab = activeChildTab,
+                tabs = retainedChildTabs,
+                fadeThrough = fadeThrough,
+                reducedMotion = reducedMotion,
+            ) { tab, active, placed ->
+                RaftAppShellChildTabHost(
+                    shellId = childHostShellId,
+                    tab = tab,
+                    active = active,
+                    placed = placed
+                )
             }
         } else {
             key("app-shell-$activeTab") {
@@ -1944,7 +2013,8 @@ private fun AppShellTabPager(
 private fun RaftAppShellChildTabHost(
     shellId: String,
     tab: String,
-    active: Boolean
+    active: Boolean,
+    placed: Boolean = active
 ) {
     val glassStyle = appShellChildPageGlassStyle(raftAppBottomTabBarOverlaysContent())
     val pageData =
@@ -1962,6 +2032,7 @@ private fun RaftAppShellChildTabHost(
                 Modifier
                     .fillMaxSize(),
             active = active,
+            placed = placed,
             glassStyle = glassStyle
         )
     }
@@ -2009,47 +2080,21 @@ internal fun RaftAppShellContent(
     RememberKmmResourceLocaleSeedFromLocalActivity(pageVisibleTick)
     val pager = LocalActivity.current.getPager() as Pager
     val bridge = remember { Utils.bridgeModule(pager.pagerId) }
-    var databaseLaunchRetryEpoch by remember { mutableStateOf(0) }
-    val databaseLaunchAttempt =
-        remember(bridge, databaseLaunchRetryEpoch) {
-            attemptRaftDatabaseLaunch { RaftSharedStoreRegistry.get(bridge) }
-        }
-    when (databaseLaunchAttempt) {
-        is RaftDatabaseLaunchAttempt.Ready ->
-            RaftAppShellReadyContent(
-                pageVisibleTick = pageVisibleTick,
-                initialAuthRestoreTick = initialAuthRestoreTick,
-                pageVisible = pageVisible,
-                adaptivePane = adaptivePane,
-                conversationForwardRequestTick = conversationForwardRequestTick,
-                wideHistoryRequest = wideHistoryRequest,
-                searchHandoff = searchHandoff,
-                onSearchHandoffApplied = onSearchHandoffApplied,
-                sharedStores = databaseLaunchAttempt.value,
-            )
-        is RaftDatabaseLaunchAttempt.UpgradeRequired -> {
-            val mismatch = databaseLaunchAttempt.mismatch
-            LaunchedEffect(mismatch) {
-                bridge.logWarn(
-                    "database_launch_guard result=upgrade_required " +
-                        "databaseVersion=${mismatch.databaseVersion} " +
-                        "supportedVersion=${mismatch.supportedVersion}",
-                )
-            }
-            RaftDatabaseLaunchRecoveryContent(
-                mismatch = mismatch,
-                onRetry = {
-                    bridge.logWarn(
-                        "database_launch_guard action=retry " +
-                            "databaseVersion=${mismatch.databaseVersion} " +
-                            "supportedVersion=${mismatch.supportedVersion}",
-                    )
-                    databaseLaunchRetryEpoch += 1
-                },
-            )
-        }
-        is RaftDatabaseLaunchAttempt.Fatal -> throw databaseLaunchAttempt.throwable
-    }
+    // The shell page's RaftDatabaseLaunchGate (BasePager, outside the environment indicator) has
+    // already created the provider or shown the database recovery page, so this is the same
+    // instance and never the first database open.
+    val sharedStores = remember(bridge) { RaftSharedStoreRegistry.get(bridge) }
+    RaftAppShellReadyContent(
+        pageVisibleTick = pageVisibleTick,
+        initialAuthRestoreTick = initialAuthRestoreTick,
+        pageVisible = pageVisible,
+        adaptivePane = adaptivePane,
+        conversationForwardRequestTick = conversationForwardRequestTick,
+        wideHistoryRequest = wideHistoryRequest,
+        searchHandoff = searchHandoff,
+        onSearchHandoffApplied = onSearchHandoffApplied,
+        sharedStores = sharedStores,
+    )
 }
 
 @Composable
@@ -2125,6 +2170,9 @@ private fun RaftAppShellReadyContent(
     // destination rendered INLINE in the AppShell middle pane — never a pushed secondary page
     // (the rail must stay). Narrow or flag-off keeps the legacy push path unchanged.
     var railInlineSecondaryDestination by remember { mutableStateOf<String?>(null) }
+    // The inline Search's field focuses as it opens; opening it again while it is open (top bar
+    // search field, the Duo rail's Search) focuses the field again, like web's search shortcut.
+    var railInlineSearchFocusRequest by remember { mutableStateOf(0) }
     // page_viewed for the wide rail's inline list panes (Search, Saved): they are not pages of their own.
     val railInlineProductPageSlot = remember(pager.pagerId) { "${pager.pagerId}#rail-inline" }
     val railInlineProductPageView = appShellRailInlineProductPageView(railInlineSecondaryDestination)
@@ -2846,6 +2894,15 @@ private fun RaftAppShellReadyContent(
                 diagnostics = raftLogger("SlockDmPreviewPrefetch", "dm_preview_prefetch", RaftLogLevel.Debug),
             )
         }
+    // botiverse/slock #11792: the sidebar's Mark as Unread found nothing to mark; say why.
+    val markUnreadNothingMessage by rememberUpdatedState(stringResource(Res.string.home_action_mark_unread_nothing))
+    LaunchedEffect(homeStore) {
+        homeStore.readToggleNotices.collect { notice ->
+            when (notice) {
+                RaftReadToggleNotice.MarkUnreadNothing -> bridge.toast(markUnreadNothingMessage)
+            }
+        }
+    }
     val homeActivityReplyThreadPrewarmDataSource =
         remember(
             shellAuthStore,
@@ -3406,6 +3463,8 @@ private fun RaftAppShellReadyContent(
     val listPanePreferenceStore = remember { KeyValueChatLayoutPreferenceStore(raftSharedPreferenceStore()) }
     val adaptiveListPaneWidths = rememberRaftListPaneWidths(listPanePreferenceStore)
     var adaptiveListPaneResizing by remember { mutableStateOf(false) }
+    // artin 2026-10-29: the section the wide Settings detail shows (null: the default, Account).
+    var settingsWidePicked by remember { mutableStateOf<String?>(null) }
     // A drag only defers the fold while it can still be in progress: desktop mode on, dual pane.
     // (The handle also reports the end when it goes inactive or leaves composition.)
     val listPaneResizeDefersFold =
@@ -4253,14 +4312,14 @@ private fun RaftAppShellReadyContent(
         ) {
             bridge.log(
                 "app_shell_visible_refresh_skip reason=$reason " +
-                    "cause=same_appearance_or_foreground_epoch tab=${latestSelectedTab} " +
-                    "homeDestination=${latestSelectedHomeDestination.orEmpty()}"
+                    "cause=same_appearance_or_foreground_epoch detail=${visibleRefreshGate.lastDecisionCause} " +
+                    "tab=${latestSelectedTab} homeDestination=${latestSelectedHomeDestination.orEmpty()}"
             )
             return false
         }
         bridge.log(
-            "app_shell_visible_refresh reason=$reason tab=${latestSelectedTab} " +
-                "homeDestination=${latestSelectedHomeDestination.orEmpty()}"
+            "app_shell_visible_refresh reason=$reason cause=${visibleRefreshGate.lastDecisionCause} " +
+                "tab=${latestSelectedTab} homeDestination=${latestSelectedHomeDestination.orEmpty()}"
         )
         when (retainedAppShellSelectedTab(latestSelectedTab)) {
             "home" ->
@@ -5507,6 +5566,14 @@ private fun RaftAppShellReadyContent(
         { eventData -> handleRealtimeAuthRefreshRequest(eventData) }
     )
     val latestResetAppShellSessionState by rememberUpdatedState<() -> Unit>({ resetAppShellSessionState() })
+    val agentProfileRefreshCoalescer = remember(appShellCoroutineScope, appShellServerMembersStore) {
+        AgentProfileRefreshCoalescer(appShellCoroutineScope) { serverId ->
+            appShellServerMembersStore.refreshAgents(
+                serverId = build.raft.app.model.ServerId(serverId),
+                reason = "realtime_${build.raft.app.data.realtime.RealtimeSocketEvents.AgentUpdated}"
+            )
+        }
+    }
     DisposableEffect(
         appShellRealtimeDomainEventOwner,
         homeShellStore,
@@ -5534,7 +5601,12 @@ private fun RaftAppShellReadyContent(
                     // Server-membership/profile mutations must invalidate the in-session
                     // roster cache; otherwise updated fields (e.g. avatarUrl) stay stale
                     // until process restart. Agents/Machines scopes already refresh through
-                    // their own projections, so only ServerMembers pays for a roster refetch.
+                    // their own projections, so only ServerMembers pays for a roster refetch —
+                    // except agent:updated (a profile edit, e.g. a new avatar), which re-reads
+                    // only the agents, as web re-reads /api/agents.
+                    if (event.isAgentProfileUpdate()) {
+                        agentProfileRefreshCoalescer.request(serverId)
+                    }
                     if (
                         event.scope == build.raft.app.model.RealtimeRefreshScope.ServerMembers &&
                         (
@@ -5983,18 +6055,22 @@ private fun RaftAppShellReadyContent(
             desktopModeEnabled = desktopModeOnLargeScreen,
             paneState = shellScope.adaptivePane
         )
-    // iPhone Duo landscape: the top bar and the rail move into the status-bar strip on the right.
-    val horizontalSafeArea = raftHorizontalSafeArea()
-    val rightSafeArea = horizontalSafeArea.right
-    val sideDockActive = raftSideDockActive(navRailActive, horizontalSafeArea)
-    // The outer display: the phone layout's bar moves into the same strip.
-    val phoneSideDockActive = raftPhoneSideDockActive(navRailActive, horizontalSafeArea)
-    LaunchedEffect(sideDockActive) { RaftSideDockState.active = sideDockActive }
+    // Wide pane roles (RaftWidePanes.kt): the pages the conversation opened in the supporting pane
+    // beside it. They belong to that conversation: picking another one closes them. When the window
+    // leaves the wide layout they reopen as pages on the platform stack, as they would have opened there.
+    var supportingPanes by remember { mutableStateOf(RaftPaneStack()) }
+    // Whether the pane is drawn right now (set where it is drawn); Back goes by this, not the stack alone.
+    var supportingPaneShown by remember { mutableStateOf(false) }
+    val shellHostNavigator = LocalRaftHost.current.navigator
+    LaunchedEffect(adaptiveWorkspaceState?.selection?.identity?.key) { supportingPanes = supportingPanes.cleared() }
+    LaunchedEffect(navRailActive) {
+        if (navRailActive || !supportingPanes.isOpen) return@LaunchedEffect
+        supportingPanes.entries.forEach { shellHostNavigator.openPage(it.pageName, it.pageData) }
+        supportingPanes = supportingPanes.cleared()
+    }
     // stdrc 2026-10-21: Settings is the More tab's root on the phone bar and the pinned rail entry
     // on the wide layout; a selection made for the other layout moves to this layout's root.
     LaunchedEffect(selectedTab, navRailActive) {
-        // The inline Search / Saved belongs to the wide layout; it must not outlive it.
-        if (!navRailActive) railInlineSecondaryDestination = null
         if (appShellSearchTabMovesToRailSearch(selectedTab, navRailActive)) {
             // The rail has no Search tab: a phone Search tab left open when the window widens
             // becomes the rail's inline Search over Home.
@@ -6089,6 +6165,14 @@ private fun RaftAppShellReadyContent(
     fun navigateWideHistory(direction: RaftWideNavDirection, source: String) {
         val serverId = readyServerId ?: return
         if (!navRailActive) return
+        if (
+            direction == RaftWideNavDirection.Back &&
+            raftWideBackStep(supportingPanes, supportingPaneShown, overlayOpen = tasksDetailOverlayOpen) == RaftWideBackStep.PopSupportingPane
+        ) {
+            bridge.log("wide_history_back source=$source pops=supporting_pane")
+            supportingPanes = supportingPanes.pop()
+            return
+        }
         val before = wideNavHistories.of(serverId)
         val after = before.go(direction)
         val target = after.current?.takeIf { after != before } ?: return
@@ -6414,7 +6498,7 @@ private fun RaftAppShellReadyContent(
     val serverDrawerUserHeader = rememberRaftServerDrawerUserHeader(readySession)
     // "Open workspaces in separate app windows": another server opens in (or brings to front) its
     // own window, the way the Choose workspace page does; false means switch in place.
-    fun openServerInSeparateWindowIfEnabled(serverId: String, source: String): Boolean {
+    fun openServerInSeparateWindowIfEnabled(serverId: String, source: String, keepTab: String? = null): Boolean {
         val session = readySession ?: return false
         // The server this window shows now (the shell's selected server, else what Home renders,
         // else the session's) — never the launch-time scope server.
@@ -6436,11 +6520,12 @@ private fun RaftAppShellReadyContent(
                         environmentId = sharedStores.apiEnvironmentStore.current().apiBaseUrl,
                         accountId = session.user.id,
                         serverId = serverId
-                    ).normalizedOrNull()
+                    ).normalizedOrNull(),
+                keepTab = keepTab
             ) ?: return false
         bridge.log(
             "app_shell_server_switch_new_window source=$source " +
-                "from=${currentServerId.orEmpty()} to=${serverId.trim()}"
+                "from=${currentServerId.orEmpty()} to=${serverId.trim()} tab=${keepTab.orEmpty()}"
         )
         pager.openAppShellReplacingCurrentPage(pageData)
         return true
@@ -6663,7 +6748,7 @@ private fun RaftAppShellReadyContent(
         serverMenuState.dismiss()
         val current = serverMenuModel?.currentServer?.id.orEmpty()
         val plan = appShellServerMenuSwitchPlan(current, serverId, selectedTab) ?: return
-        if (openServerInSeparateWindowIfEnabled(plan.serverId, source = "server_menu")) return
+        if (openServerInSeparateWindowIfEnabled(plan.serverId, source = "server_menu", keepTab = plan.tab)) return
         val homeServerId = appShellHomeListServerId(renderedServerId = renderedHomeServerId, readyServerId = readyServerId)
         pendingHomeServerSwitchId = plan.serverId.takeIf { it != homeServerId }
         observedHomeServerSwitchId = null
@@ -6686,8 +6771,6 @@ private fun RaftAppShellReadyContent(
     // belong to no tab; Back returns to the page that showed when the panel opened them.
     fun openServerMenuEntry(entry: RaftServerMenuEntry) {
         serverMenuState.dismiss()
-        // The inline Search / Saved covers the content pane; a server-panel page must replace it.
-        railInlineSecondaryDestination = null
         prewarmAdmissionGate.invalidate("server_menu_open:${entry.key}")
         bridge.log("app_shell_server_menu_open row=${entry.key} from=$selectedTab")
         if (!navRailActive) serverPageOrigin = appShellServerPageOrigin(selectedTab, serverPageOrigin)
@@ -6736,8 +6819,11 @@ private fun RaftAppShellReadyContent(
         }
     }
 
+    // iPhone Duo's inner screen (raft-design #859): the wide layout without the top bar; the rail
+    // holds the server tile, Search and the bell.
+    val railWithoutTopBar = raftAppRailWithoutTopBar(navRailActive)
     // The server panel: over the content on the phone (above its bar), over the whole shell under
-    // the wide top bar's workspace button ([topBar]).
+    // the wide top bar's workspace button ([topBar]), or next to the rail header's tile.
     val serverMenuOverlay: @Composable (topBar: Boolean) -> Unit = { topBar ->
         if (serverMenuState.open && serverMenuModel != null && serverMenuContent != null) {
             RaftAppServerMenuOverlay(
@@ -6746,7 +6832,7 @@ private fun RaftAppShellReadyContent(
                 anchor =
                     when {
                         !topBar -> RaftServerMenuAnchor.BottomBar
-                        sideDockActive -> RaftServerMenuAnchor.SideDock
+                        railWithoutTopBar -> RaftServerMenuAnchor.RailHeader
                         else -> RaftServerMenuAnchor.TopBar
                     },
                 entries =
@@ -6774,12 +6860,7 @@ private fun RaftAppShellReadyContent(
                         { serverId -> serverSwitcherInviteServerId = serverId }
                     ) { serverMenuState.dismiss() },
                 topInset =
-                    when {
-                        !topBar -> shellScope.topSafeArea
-                        sideDockActive -> RaftSideDockStatusClearance
-                        else -> raftAppShellTopBarMenuTopInset(shellScope.topSafeArea)
-                    },
-                endInset = if (topBar && sideDockActive) rightSafeArea else 0.dp,
+                    if (topBar && !railWithoutTopBar) raftAppShellTopBarMenuTopInset(shellScope.topSafeArea) else shellScope.topSafeArea,
                 screenHeight =
                     shellScope.adaptivePane
                         .takeIf { it.heightPx > 0 && it.density > 0f }
@@ -6797,135 +6878,10 @@ private fun RaftAppShellReadyContent(
 
     // artin task #8: the wide top bar's bell, and the sign to the list panes under it that they
     // have no head of their own.
-    val appShellTopBar = remember { RaftAppShellTopBarState() }
-    val onRailTabSelect: (String) -> Unit = { key ->
-        RaftProductEvents.navEntrySelected(
-            destination = appShellNavDestination(key),
-            surface = RaftNavSurface.Rail,
-            wasActive =
-                railInlineSecondaryDestination == null &&
-                    retainedAppShellSelectedTab(selectedTab) == key,
-        )
-        // Tapping a real rail item dismisses the inline secondary destination even when the
-        // underlying tab is already selected (Activity -> Search -> Activity must land back on
-        // Activity, Search -> Settings on Settings).
-        railInlineSecondaryDestination = null
-        onAppShellTabSelected(key)
-    }
-    val onPhoneBarTabSelect: (String) -> Unit = { key ->
-        if (key == AppShellServerTabKey && serverMenuModel != null) {
-            // The server tab opens the server panel, not a page (also the iOS system bar's tap).
-            bridge.log("app_shell_server_menu_toggle open=${!serverMenuState.open}")
-            serverMenuState.toggle()
-        } else {
-            serverMenuState.dismiss()
-            RaftProductEvents.navEntrySelected(
-                destination = appShellNavDestination(key),
-                surface = RaftNavSurface.MobileTabBar,
-                wasActive = appShellPhoneBottomBarSelectedKey(selectedTab) == key,
-            )
-            onAppShellTabSelected(key)
-        }
-    }
-    val onShellSearchClick: () -> Unit = {
-        // The rail's old Search entry: the inline Search over the current tab.
-        serverMenuState.dismiss()
-        appShellTopBar.bellOpen.value = false
-        RaftProductEvents.navEntrySelected(
-            destination = appShellNavDestination(AppShellRailSearchKey),
-            surface = RaftNavSurface.TopBar,
-            wasActive = railInlineSecondaryDestination == AppShellRailSearchKey,
-        )
-        railInlineSecondaryDestination = AppShellRailSearchKey
-        bridge.log("app_shell_rail_secondary_open destination=search from=top_bar")
-    }
-    // The side dock (iPhone Duo): drawn by the shell (leavePage null) and by the pages pushed over
-    // it (RaftPushedPageDockFrame), whose leavePage pops back to the shell first.
-    val phoneSideDock: @Composable (leavePage: (() -> Unit)?, width: Dp) -> Unit = { leavePage, width ->
-        val leave = {
-            leavePage?.invoke()
-            // A conversation kept alone on the outer display steps aside as a pushed page does.
-            if (appShellAdaptiveDetailCoversTabRoot(desktopModeOnLargeScreen, selectedTab, adaptiveWorkspaceState?.presentation)) {
-                dismissAdaptiveDetailSelection()
-            }
-        }
-        RaftSideDock(
-            width = width,
-            currentServer = serverMenuModel?.currentServer,
-            onServerClick = {
-                leave()
-                onPhoneBarTabSelect(AppShellServerTabKey)
-            },
-            topItems = emptyList(),
-            items =
-                appShellBottomTabItems.filter {
-                    it.key != AppShellSearchTabKey && it.key != AppShellServerTabKey
-                },
-            onSelect = {
-                leave()
-                onPhoneBarTabSelect(it)
-            },
-            backLabel = stringResource(Res.string.common_back),
-            canGoBack = false,
-            onBack = null,
-            searchLabel = searchTabLabel,
-            onSearch = {},
-            bottomSafeArea = shellScope.bottomSafeArea,
-            statusClearance = RaftSideDockPhoneStatusClearance,
-            footerItems = appShellBottomTabItems.filter { it.key == AppShellSearchTabKey },
-        )
-    }
-    val wideSideDock: @Composable (leavePage: (() -> Unit)?, width: Dp) -> Unit = { leavePage, width ->
-        RaftSideDock(
-            width = width,
-            currentServer = serverMenuModel?.currentServer,
-            onServerClick = {
-                leavePage?.invoke()
-                bridge.log("app_shell_server_menu_toggle open=${!serverMenuState.open} from=side_dock")
-                serverMenuState.toggle()
-            },
-            topItems =
-                listOf(
-                    RaftBottomTabItemPayload(
-                        key = "settings",
-                        label = settingsTabLabel,
-                        iconName = RaftLucideIconName.Settings,
-                        selected = retainedAppShellSelectedTab(selectedTab) == "settings",
-                    )
-                ),
-            items = appShellRailTabItems.orderedLikePhoneBar { it.key },
-            onSelect = {
-                leavePage?.invoke()
-                onRailTabSelect(it)
-            },
-            backLabel = stringResource(Res.string.common_back),
-            // The conversation header's Back (a reply thread back to its channel), which the
-            // header drops while the dock is on. A pushed page keeps its own Back.
-            canGoBack =
-                adaptiveWorkspaceState?.selection != null &&
-                    (
-                        adaptiveDetailLaunchPayload?.surfaceKind == RaftThreadSurfaceKind.ReplyThread ||
-                            adaptiveWorkspaceSession.hasVisibleDetailBackHistory()
-                    ),
-            onBack = if (leavePage == null) ::dismissAdaptiveDetailSelection else null,
-            searchLabel = searchTabLabel,
-            onSearch = {
-                leavePage?.invoke()
-                onShellSearchClick()
-            },
-            bottomSafeArea = shellScope.bottomSafeArea,
-        )
-    }
-    val pushedPageDock =
-        when {
-            phoneSideDockActive -> phoneSideDock
-            sideDockActive -> wideSideDock
-            else -> null
-        }
-    DisposableEffect(pushedPageDock) {
-        RaftSideDockState.pushedPageDock = pushedPageDock
-        onDispose { if (RaftSideDockState.pushedPageDock === pushedPageDock) RaftSideDockState.pushedPageDock = null }
-    }
+    // Starts with this layout's value, so the first frame's panes are right; later changes (the
+    // posture arriving, the window turning) land after composition (sindresorhus, #3906).
+    val appShellTopBar = remember { RaftAppShellTopBarState().apply { drawn = !railWithoutTopBar } }
+    SideEffect { appShellTopBar.drawn = !railWithoutTopBar }
     val mainRouteSurface: @Composable () -> Unit = {
         CompositionLocalProvider(LocalRaftAppShellTopBar provides appShellTopBar.takeIf { navRailActive }) {
         RaftAppShellSurface(
@@ -6944,17 +6900,30 @@ private fun RaftAppShellReadyContent(
                         )
                     }
                 },
-            onBottomTabSelected = onPhoneBarTabSelect,
+            onBottomTabSelected = { key ->
+                if (key == AppShellServerTabKey && serverMenuModel != null) {
+                    // The server tab opens the server panel, not a page (also the iOS system bar's tap).
+                    bridge.log("app_shell_server_menu_toggle open=${!serverMenuState.open}")
+                    serverMenuState.toggle()
+                    return@RaftAppShellSurface
+                }
+                serverMenuState.dismiss()
+                RaftProductEvents.navEntrySelected(
+                    destination = appShellNavDestination(key),
+                    surface = RaftNavSurface.MobileTabBar,
+                    wasActive = appShellPhoneBottomBarSelectedKey(selectedTab) == key,
+                )
+                onAppShellTabSelected(key)
+            },
             networkStatus = hostNetworkStatus,
-            // On the outer display the side dock carries the bar.
-            showBottomTabs = showAppShellBottomTabs && !phoneSideDockActive,
+            showBottomTabs = showAppShellBottomTabs,
             // artin 2026-10-10 (Hands 79db9fe6): the cached Home is usable at once while the
             // session and server list refresh in the background; a failed restore or an expired
             // session still goes to its prompt / sign-in. No blocking overlay.
             interactionLocked = false,
             modalHostState = appShellModalHostState,
             leadingNavigation =
-                if (navRailActive && !sideDockActive) {
+                if (navRailActive) {
                     // task #31: Web LeftRail parity — icon-only tabs, settings pinned to the bottom.
                     // artin task #8: the top bar holds the server and Search, so the rail has
                     // neither (web LeftRail with the top bar).
@@ -6970,25 +6939,121 @@ private fun RaftAppShellReadyContent(
                                     )
                                 )
                             }
-                        val railItems = appShellRailTabItems.orderedLikePhoneBar { it.key }
+                        val railItems =
+                            appShellRailTabItems.orderedLikePhoneBar { it.key }.let { items ->
+                                if (railWithoutTopBar) {
+                                    appShellRailItemsWithSearch(
+                                        items = items,
+                                        searchLabel = searchTabLabel,
+                                        searchOpen = railInlineSecondaryDestination == AppShellRailSearchKey,
+                                    )
+                                } else {
+                                    items
+                                }
+                            }
+                        if (railWithoutTopBar) {
+                            // Without the top bar the system's side column holds the history's Back.
+                            raftSideColumnFallbackBack(
+                                raftSideColumnBackAction(
+                                    onBack = {
+                                        appShellTopBar.bellOpen.value = false
+                                        navigateWideHistory(RaftWideNavDirection.Back, source = "side_column")
+                                    },
+                                    enabled = wideNavHistory.canGoBack,
+                                )
+                            )
+                        }
                         RaftNavigationRailTabBar(
                             items = railItems,
-                            onSelect = onRailTabSelect,
+                            onSelect = { key ->
+                                if (key == AppShellRailSearchKey) {
+                                    // The rail's Search: the inline Search over the current tab.
+                                    serverMenuState.dismiss()
+                                    appShellTopBar.bellOpen.value = false
+                                    RaftProductEvents.navEntrySelected(
+                                        destination = appShellNavDestination(AppShellRailSearchKey),
+                                        surface = RaftNavSurface.Rail,
+                                        wasActive = railInlineSecondaryDestination == AppShellRailSearchKey,
+                                    )
+                                    if (railInlineSecondaryDestination == AppShellRailSearchKey) railInlineSearchFocusRequest += 1
+                                    railInlineSecondaryDestination = AppShellRailSearchKey
+                                    bridge.log("app_shell_rail_secondary_open destination=search from=rail")
+                                    return@RaftNavigationRailTabBar
+                                }
+                                RaftProductEvents.navEntrySelected(
+                                    destination = appShellNavDestination(key),
+                                    surface = RaftNavSurface.Rail,
+                                    wasActive =
+                                        railInlineSecondaryDestination == null &&
+                                            retainedAppShellSelectedTab(selectedTab) == key,
+                                )
+                                // Tapping a real rail item dismisses the inline secondary destination
+                                // even when the underlying tab is already selected (Activity -> Search
+                                // -> Activity must land back on Activity).
+                                railInlineSecondaryDestination = null
+                                onAppShellTabSelected(key)
+                            },
                             modifier = Modifier.fillMaxHeight(),
                             // The server tab at the foot is the phone's; the top bar holds the server.
-                            bottomItems = railBottomItems,
-                            onBottomItemSelect = onRailTabSelect,
-                            // The top bar above the rail clears the status bar.
-                            topSafeArea = 0.dp,
-                            bottomSafeArea = shellScope.bottomSafeArea
+                            bottomItems =
+                                if (railWithoutTopBar && railInlineSecondaryDestination == AppShellRailSearchKey) {
+                                    railBottomItems.map { it.copy(selected = false) }
+                                } else {
+                                    railBottomItems
+                                },
+                            onBottomItemSelect = { key ->
+                                RaftProductEvents.navEntrySelected(
+                                    destination = appShellNavDestination(key),
+                                    surface = RaftNavSurface.Rail,
+                                    wasActive = retainedAppShellSelectedTab(selectedTab) == key,
+                                )
+                                onAppShellTabSelected(key)
+                            },
+                            // The top bar above the rail clears the status bar; without it the rail does.
+                            topSafeArea = if (railWithoutTopBar) shellScope.topSafeArea else 0.dp,
+                            bottomSafeArea = shellScope.bottomSafeArea,
+                            header =
+                                if (railWithoutTopBar && serverMenuModel != null) {
+                                    {
+                                        RaftAppRailServerTile(
+                                            model = serverMenuModel,
+                                            open = serverMenuState.open,
+                                            onClick = {
+                                                appShellTopBar.bellOpen.value = false
+                                                bridge.log("app_shell_server_menu_toggle open=${!serverMenuState.open} from=rail")
+                                                serverMenuState.toggle()
+                                            },
+                                        )
+                                    }
+                                } else {
+                                    null
+                                },
+                            footerTools =
+                                if (railWithoutTopBar) {
+                                    { RaftAppRailNotificationBell(appShellTopBar, onToggle = { serverMenuState.dismiss() }) }
+                                } else {
+                                    null
+                                },
                         )
                     }
                 } else {
                     null
                 },
             topNavigation =
-                if (navRailActive && !sideDockActive) {
+                if (navRailActive && !railWithoutTopBar) {
                     {
+                        // iPhone Duo's inner screen held sideways (raft-design #859): the system's
+                        // side column holds Back (the wide history's), so the bar draws no arrows.
+                        val historyBackInColumn =
+                            raftSideColumnFallbackBack(
+                                raftSideColumnBackAction(
+                                    onBack = {
+                                        appShellTopBar.bellOpen.value = false
+                                        navigateWideHistory(RaftWideNavDirection.Back, source = "side_column")
+                                    },
+                                    enabled = wideNavHistory.canGoBack,
+                                )
+                            )
                         RaftAppShellTopBar(
                             currentServer = serverMenuModel?.currentServer,
                             servers = serverMenuModel?.servers.orEmpty(),
@@ -7003,7 +7068,19 @@ private fun RaftAppShellReadyContent(
                                 switchServerFromServerMenu(serverId)
                             },
                             searchLabel = searchTabLabel,
-                            onSearchClick = onShellSearchClick,
+                            onSearchClick = {
+                                // The rail's old Search entry: the inline Search over the current tab.
+                                serverMenuState.dismiss()
+                                appShellTopBar.bellOpen.value = false
+                                RaftProductEvents.navEntrySelected(
+                                    destination = appShellNavDestination(AppShellRailSearchKey),
+                                    surface = RaftNavSurface.TopBar,
+                                    wasActive = railInlineSecondaryDestination == AppShellRailSearchKey,
+                                )
+                                if (railInlineSecondaryDestination == AppShellRailSearchKey) railInlineSearchFocusRequest += 1
+                                railInlineSecondaryDestination = AppShellRailSearchKey
+                                bridge.log("app_shell_rail_secondary_open destination=search from=top_bar")
+                            },
                             windowWidth =
                                 shellScope.adaptivePane
                                     .takeIf { it.widthPx > 0 && it.density > 0f }
@@ -7012,7 +7089,7 @@ private fun RaftAppShellReadyContent(
                             bell = appShellTopBar,
                             onBellToggle = { serverMenuState.dismiss() },
                             history =
-                                RaftAppShellTopBarHistory(
+                                if (historyBackInColumn) null else RaftAppShellTopBarHistory(
                                     canGoBack = wideNavHistory.canGoBack,
                                     canGoForward = wideNavHistory.canGoForward,
                                     onBack = {
@@ -7029,21 +7106,18 @@ private fun RaftAppShellReadyContent(
                 } else {
                     null
                 },
-            trailingNavigation =
-                if (phoneSideDockActive) {
-                    { phoneSideDock(null, rightSafeArea) }
-                } else if (sideDockActive) {
-                    { wideSideDock(null, rightSafeArea) }
-                } else {
-                    null
-                },
             // The top bar's server panel opens under its workspace button, and the bell's popover
             // under the bell, over the rail.
             shellOverlay =
                 if (navRailActive) {
                     {
                         serverMenuOverlay(true)
-                        RaftAppTopBarNotificationOverlay(appShellTopBar, raftAppShellTopBarMenuTopInset(shellScope.topSafeArea))
+                        RaftAppTopBarNotificationOverlay(
+                            appShellTopBar,
+                            raftAppShellTopBarMenuTopInset(shellScope.topSafeArea),
+                            besideRail = railWithoutTopBar,
+                            bottomInset = shellScope.bottomSafeArea,
+                        )
                     }
                 } else {
                     null
@@ -7051,13 +7125,8 @@ private fun RaftAppShellReadyContent(
         ) {
                     // The wide top bar clears the status bar: the pages under it start at its seam.
                     @Suppress("NAME_SHADOWING")
-                    val shellScope =
-                        when {
-                            sideDockActive -> shellScope.copy(topSafeArea = shellScope.topSafeArea + RaftSideDockCornerClearance)
-                            navRailActive -> shellScope.copy(topSafeArea = 0.dp)
-                            else -> shellScope
-                        }
-                    if (!navRailActive && (showAppShellBottomTabs || phoneSideDockActive)) serverMenuOverlay(false)
+                    val shellScope = if (navRailActive && !railWithoutTopBar) shellScope.copy(topSafeArea = 0.dp) else shellScope
+                    if (!navRailActive && showAppShellBottomTabs) serverMenuOverlay(false)
                     serverSwitcherInviteServerId?.let { inviteServerId ->
                         val inviteMembersDataSource =
                             remember(memberRepository, settingsRepository, appShellServerMembersStore) {
@@ -7183,7 +7252,14 @@ private fun RaftAppShellReadyContent(
                                 }
                             }
                         }
-                        Row(
+                        // Wide pane roles (RaftWidePanes.kt): a page the conversation opens with a
+                        // Supporting role shows in the pane on the right; the conversation stays.
+                        // The task overlay has no room for one: its pages open as before.
+                        val supportingPaneHost = navRailActive && allowSideColumn
+                        val supportingOpen = supportingPaneHost && detailAccepted && supportingPanes.isOpen
+                        // Only the main detail pane reports whether the pane is shown (RaftWidePanes.kt).
+                        RaftSupportingPaneShownReport(host = supportingPaneHost, shown = supportingOpen) { supportingPaneShown = it }
+                        RaftSupportingPaneLayout(
                             modifier =
                                 paneModifier
                                     .fillMaxSize()
@@ -7193,8 +7269,19 @@ private fun RaftAppShellReadyContent(
                                         adaptiveWorkspaceStore.update {
                                             if (it.detailPaneWidthDp == widthDp) it else it.copy(detailPaneWidthDp = widthDp)
                                         }
-                                    }
+                                    },
+                            supporting =
+                                if (supportingOpen) {
+                                    { RaftSupportingPaneStack(supportingPanes, active, onStackChange = { supportingPanes = it }) }
+                                } else {
+                                    null
+                                },
+                        ) { detailModifier ->
+                        RaftPaneHost(
+                            wide = supportingPaneHost,
+                            openInPane = { _, pageName, pageData -> supportingPanes = supportingPanes.replace(pageName, pageData) },
                         ) {
+                        Row(modifier = detailModifier) {
                         // task #180: in Focus mode the thread owns the row and the parent channel/DM
                         // gets no space. It is collapsed by WIDTH, never by weight -- `weight(0f)` is
                         // illegal in Compose and threw IllegalArgumentException "invalid weight 0.0"
@@ -7268,7 +7355,9 @@ private fun RaftAppShellReadyContent(
                                     },
                                 )
                             }
-                        if (showSideColumn && sideThread != null && workspace != null) {
+                        // One right-hand column at a time: the side thread steps aside while the
+                        // supporting pane is open and comes back when it closes.
+                        if (showSideColumn && sideThread != null && workspace != null && !supportingOpen) {
                             // task #180: the page data key is deliberately independent of Focus mode.
                             // Toggling re-lays-out the same child page instead of recreating it, which is
                             // what keeps the reader's scroll position across Focus <-> Standard.
@@ -7302,12 +7391,124 @@ private fun RaftAppShellReadyContent(
                             )
                         }
                         }
+                        }
+                        }
                     }
                     val tasksTabContent: @Composable (active: Boolean) -> Unit = { active ->
+                        // Task v2: a task opened without a page of its own (its empty conversation, a legacy panel).
+                        val tasksOpenSurfaceFlow = remember { TaskOpenSurfaceFlow() }
+                        val tasksOpenGate = remember { TaskOpenGate() }
+                        val latestTasksOpenServerId by rememberUpdatedState(readyServerId)
+                        val tasksSendFailedLabel = stringResource(Res.string.task_conversation_send_failed)
+                        val tasksUpdateFailedLabel = stringResource(Res.string.thread_error_update_task)
+                        val tasksAssignFailedLabel = stringResource(Res.string.thread_error_update_assignee)
                         PerformanceSceneEffect(bridge, "kuikly_tasks", active = active)
                         // Foreground is the shell's visible-route refresh; a socket reconnect re-reads missed task pushes.
                         RaftLiveCatchUpEffect(serverId = selectedServerId, visible = active, foreground = false) {
                             tasksViewModel.dispatch(SharedTasksRouteIntent.CatchUp)
+                        }
+                        /**
+                         * [animated] false: the conversation takes the pending task page's place (its
+                         * first send); the page goes once it is covered, or at once where it opened in place.
+                         */
+                        fun openTaskPage(task: TaskSummary, resolvedConversationChannelId: ChannelId?, animated: Boolean = true) {
+                            val taskLaunchPayload =
+                                buildStandaloneTaskThreadLaunchPayload(
+                                    task = task,
+                                    serverId = readyServerId.orEmpty(),
+                                    conversationDirectory = appShellConversationDirectory,
+                                    timeContext = threadTimeContext,
+                                    alignOwnMessagesRight = myMessageAlignment == MyMessageAlignmentPreference.Right,
+                                    compactConsecutiveMessages = compactConsecutiveMessages,
+                                    resolvedConversationChannelId = resolvedConversationChannelId,
+                                )
+                            if (taskLaunchPayload == null) {
+                                bridge.logWarn("tasks_open_rejected task=${task.id.value} reason=launch_unresolved")
+                                return
+                            }
+                            // page_viewed: the thread page this opens counts as `task`.
+                            RaftProductEvents.recorder.markTaskThreadOpening(taskLaunchPayload.instanceId)
+                            // task #34: wide desktop mode keeps the board and opens the task's
+                            // thread in a bounded overlay; otherwise the full-page push stays.
+                            val overlaySelection = openLaunchPayloadInAdaptiveDetail(taskLaunchPayload)
+                            if (overlaySelection != null) {
+                                tasksDetailOverlayActive = true
+                                bridge.log(
+                                    "tasks_detail_overlay_open task=${task.id} " +
+                                        "selection=${overlaySelection.identity.key} generation=${overlaySelection.generation}"
+                                )
+                                tasksOpenSurfaceFlow.finishHandOff()
+                                return
+                            }
+                            pager.openStandaloneThreadLaunchPayload(taskLaunchPayload, navigationStoreScope, animated)
+                        }
+                        val tasksOpenTaskV2Enabled =
+                            readyServerId?.takeIf { it.isNotBlank() }?.let { id ->
+                                sharedStores.serverFeatureFlags.isEnabled(ServerId(id), TASK_V2_CONVERSATIONS_FEATURE_FLAG_KEY)
+                            } == true
+                        TaskOpenSurfaceHost(
+                            flow = tasksOpenSurfaceFlow,
+                            detailsRepository = remember(appShellNetworkClient) { TaskConversationDetailsRepository(appShellNetworkClient) },
+                            serverId = readyServerId,
+                            timeContext = threadTimeContext,
+                            membersStore = appShellServerMembersStore,
+                            // The conversation page's head writes: the same task channel store and gates.
+                            editing =
+                                TaskPageEditing(
+                                    authStore = shellAuthStore,
+                                    tasksDataSource = tasksDataSource,
+                                    tasksDataStore = sharedStores.tasksDataStore,
+                                    serverRole = readySession?.servers?.firstOrNull { it.id == readyServerId }?.role,
+                                    onFailed = { code ->
+                                        when {
+                                            code.startsWith("tasks_status") -> bridge.toast(tasksUpdateFailedLabel)
+                                            code.startsWith("tasks_assign") -> bridge.toast(tasksAssignFailedLabel)
+                                        }
+                                    },
+                                    log = { bridge.log(it) },
+                                ),
+                            hostVisible = pageVisible,
+                            taskV2Enabled = tasksOpenTaskV2Enabled,
+                            onConversationArrived = { arrived ->
+                                bridge.log("tasks_pending_conversation_arrived task=${arrived.id.value}")
+                                openTaskPage(arrived, null)
+                            },
+                            onSend = { task, text ->
+                                val serverId = readyServerId?.takeIf { it.isNotBlank() }
+                                if (serverId != null) {
+                                    appShellCoroutineScope.launch {
+                                        val opened =
+                                            tasksOpenSurfaceFlow.send(
+                                                text = text,
+                                                serverId = serverId,
+                                                tasksDataSource = tasksDataSource,
+                                                sendMessage = { channelId, body, randomId ->
+                                                    homeActivityReplyThreadPrewarmDataSource.sendMessage(
+                                                        channelId = channelId,
+                                                        body = body,
+                                                        asTask = false,
+                                                        randomId = randomId,
+                                                    )
+                                                },
+                                                currentServerId = { latestTasksOpenServerId },
+                                                fallbackError = tasksSendFailedLabel,
+                                            )
+                                        bridge.log("tasks_task_first_send task=${task.id.value} opened=${opened != null}")
+                                        opened?.let { (sentTask, conversationId) -> openTaskPage(sentTask, conversationId, animated = false) }
+                                    }
+                                }
+                            },
+                        )
+                        // The open pending page follows the board's copy of its task; when its conversation
+                        // appears (someone wrote first) the conversation page opens instead.
+                        val tasksOpenSurfaceTaskId = tasksOpenSurfaceFlow.surface?.task?.id
+                        LaunchedEffect(tasksOpenSurfaceTaskId, tasksState, tasksOpenTaskV2Enabled) {
+                            val taskId = tasksOpenSurfaceTaskId ?: return@LaunchedEffect
+                            val fresh = (tasksState.loadState as? build.raft.app.data.ScreenLoadState.Content)?.data?.tasks.orEmpty().firstOrNull { it.id == taskId }
+                            tasksOpenSurfaceFlow.onTaskChanged(fresh, tasksOpenTaskV2Enabled)?.let { arrived ->
+                                bridge.log("tasks_pending_conversation_arrived task=${arrived.id.value}")
+                                openTaskPage(arrived, null)
+                            }
                         }
                         Box(modifier = Modifier.fillMaxSize()) {
                         key(tasksRoute) {
@@ -7327,52 +7528,43 @@ private fun RaftAppShellReadyContent(
                             },
                             identityOptions = tasksServerMembersEntry.members,
                             timeContext = threadTimeContext,
-                            onOpenTask = { task ->
+                            onOpenTask = open@{ task ->
                                 prewarmAdmissionGate.invalidate("tasks_open_task")
-                                fun openTaskLaunchPayload(taskLaunchPayload: WireThreadLaunchPayload?) {
-                                    if (taskLaunchPayload == null) {
-                                        bridge.logWarn("tasks_open_rejected task=${task.id.value} reason=launch_unresolved")
-                                        return
-                                    }
-                                    // page_viewed: the thread page this opens counts as `task`.
-                                    RaftProductEvents.recorder.markTaskThreadOpening(taskLaunchPayload.instanceId)
-                                    // task #34: wide desktop mode keeps the board and opens the task's
-                                    // thread in a bounded overlay; otherwise the full-page push stays.
-                                    val overlaySelection = openLaunchPayloadInAdaptiveDetail(taskLaunchPayload)
-                                    if (overlaySelection != null) {
-                                        tasksDetailOverlayActive = true
-                                        bridge.log(
-                                            "tasks_detail_overlay_open task=${task.id} " +
-                                                "selection=${overlaySelection.identity.key} generation=${overlaySelection.generation}"
-                                        )
-                                        return
-                                    }
-                                    pager.openStandaloneThreadLaunchPayload(taskLaunchPayload, navigationStoreScope)
+                                // Task v2 (web useOpenTask): with the flag on every non-legacy task opens as its conversation.
+                                val taskV2Enabled =
+                                    readyServerId?.takeIf { it.isNotBlank() }?.let { id ->
+                                        sharedStores.serverFeatureFlags.isEnabled(ServerId(id), TASK_V2_CONVERSATIONS_FEATURE_FLAG_KEY)
+                                    } == true
+                                // The legacy panel, or the empty conversation of a task without one (opening never creates it).
+                                task.taskOpenSurface(taskV2Enabled)?.let { surface ->
+                                    bridge.log("tasks_open_surface kind=${surface::class.simpleName} task=${task.id.value}")
+                                    tasksOpenSurfaceFlow.open(surface)
+                                    return@open
                                 }
-                                fun buildLaunch(resolvedConversationChannelId: ChannelId?) =
-                                    buildStandaloneTaskThreadLaunchPayload(
-                                        task = task,
-                                        serverId = readyServerId.orEmpty(),
-                                        conversationDirectory = appShellConversationDirectory,
-                                        timeContext = threadTimeContext,
-                                        alignOwnMessagesRight = myMessageAlignment == MyMessageAlignmentPreference.Right,
-                                        compactConsecutiveMessages = compactConsecutiveMessages,
-                                        resolvedConversationChannelId = resolvedConversationChannelId,
-                                    )
-                                if (task.taskOpenTarget() == TaskOpenTarget.ResolveConversation) {
-                                    // Task v2: the local conversation id comes from the server first.
+                                if (!tasksOpenGate.tryBegin(task.id.value)) {
+                                    bridge.log("tasks_open_ignored reason=in_flight task=${task.id.value}")
+                                    return@open
+                                }
+                                if (task.taskOpenTarget(taskV2Enabled) == TaskOpenTarget.ResolveConversation) {
+                                    // Task v2: a joint surface's local conversation id comes from the server first.
                                     appShellCoroutineScope.launch {
-                                        val conversationId =
-                                            resolveTaskOpenConversationChannelId(
-                                                task = task,
-                                                serverId = readyServerId.orEmpty(),
-                                                tasksDataSource = tasksDataSource,
-                                                log = bridge::log,
-                                            )
-                                        openTaskLaunchPayload(buildLaunch(conversationId))
+                                        try {
+                                            val conversationId =
+                                                resolveTaskOpenConversationChannelId(
+                                                    task = task,
+                                                    serverId = readyServerId.orEmpty(),
+                                                    tasksDataSource = tasksDataSource,
+                                                    taskV2Enabled = taskV2Enabled,
+                                                    log = bridge::log,
+                                                )
+                                            openTaskPage(task, conversationId)
+                                        } finally {
+                                            tasksOpenGate.finish(task.id.value)
+                                        }
                                     }
                                 } else {
-                                    openTaskLaunchPayload(buildLaunch(null))
+                                    openTaskPage(task, null)
+                                    tasksOpenGate.finish(task.id.value)
                                 }
                             }
                         )
@@ -7406,15 +7598,12 @@ private fun RaftAppShellReadyContent(
                         val workspace = adaptiveWorkspaceState
                         val selection = workspace?.selection?.takeIf { detailAccepted }
                         val detailPane: @Composable (Modifier) -> Unit = { modifier ->
-                            // With the side dock the detail sits in the rounded top-left corner.
-                            val paneModifier = if (sideDockActive) modifier.padding(top = RaftSideDockCornerClearance) else modifier
-                            adaptiveDetailPane(paneModifier, active, detailAccepted, true)
+                            adaptiveDetailPane(modifier, active, detailAccepted, true)
                         }
                         if (enabled) {
                             // task #37 / artin task #20: per-kind list width and the split live in
                             // RaftAdaptiveListDetailSplit.kt.
                             RaftAdaptiveListDetailSplit(
-                                listOnEnd = sideDockActive,
                                 kind = listKind,
                                 widths = adaptiveListPaneWidths,
                                 dualPane = workspace?.pane?.layout == RaftAdaptivePaneLayout.DualPane,
@@ -7555,7 +7744,7 @@ private fun RaftAppShellReadyContent(
                                     homeShellStore.dispatch(SharedHomeShellIntent.SetSelectedConversation(null))
                                 },
                                 onOpenServerInSeparateWindow = { serverId ->
-                                    openServerInSeparateWindowIfEnabled(serverId, source = "home_switcher")
+                                    openServerInSeparateWindowIfEnabled(serverId, source = "home_switcher", keepTab = selectedTab)
                                 },
                                 onOpenSearch = {
                                     openSearchTab(source = "home_head")
@@ -7573,10 +7762,10 @@ private fun RaftAppShellReadyContent(
                                                 RaftNavSurface.MobileHomeShortcuts
                                             },
                                         wasActive =
-                                            navRailActive &&
+                                            desktopModeOnLargeScreen &&
                                                 railInlineSecondaryDestination == AppShellRailSavedKey,
                                     )
-                                    if (navRailActive) {
+                                    if (desktopModeOnLargeScreen) {
                                         // Large screens keep the rail and open Saved as the
                                         // list pane with the shared detail beside it.
                                         railInlineSecondaryDestination = AppShellRailSavedKey
@@ -7761,7 +7950,94 @@ private fun RaftAppShellReadyContent(
                     // from the server panel, with Back (Members and Computers are on the panel now,
                     // so they no longer lead it); its rows keep their attention dots. The wide rail
                     // keeps its Settings page as before.
-                    val settingsTabContent: @Composable (active: Boolean) -> Unit = {
+                    val openSettingsRow: (String) -> Unit = { key ->
+                        prewarmAdmissionGate.invalidate("settings_open_page:$key")
+                        settingsHeaderTapCount = 0
+                        when (key) {
+                            SettingsMoreMembersRowKey -> {
+                                RaftProductEvents.navEntrySelected(
+                                    destination = RaftNavDestination.Members,
+                                    surface = RaftNavSurface.MobileMore,
+                                    wasActive = false,
+                                )
+                                bridge.log("app_shell_more_open row=$key from=$selectedTab")
+                                selectAppShellTab("members", directChildSwitch = true)
+                                retainedAppShellTabs = retainedAppShellTabs + "members"
+                            }
+                            SettingsDestinationAccount -> pager.openSettingsAccountPage(storeScope)
+                            SettingsDestinationStorage -> pager.openSettingsStoragePage(storeScope)
+                            SettingsDestinationReleaseNotes -> pager.openReleaseNotesPage(storeScope = storeScope)
+                            SettingsDestinationBilling -> pager.openSettingsBillingPage(storeScope)
+                            SettingsDestinationComputers -> {
+                                if (!navRailActive) {
+                                    RaftProductEvents.navEntrySelected(
+                                        destination = RaftNavDestination.Computers,
+                                        surface = RaftNavSurface.MobileMore,
+                                        wasActive = false,
+                                    )
+                                }
+                                openComputersPage()
+                            }
+                            SettingsDestinationAdministration -> pager.openSettingsAdministrationPage(storeScope)
+                            SettingsDestinationConnectedApps -> pager.openSettingsMarketplacePage(storeScope)
+                            SettingsDestinationHandsFeedback ->
+                                if (sharedStores.serverFeatureFlags.isEnabled(readyServerId?.let(::ServerId), PRODUCT_FEEDBACK_MULTI_APP_FEATURE_FLAG_KEY)) {
+                                    pager.openSettingsFeedbackWebViewPage(storeScope)
+                                } else {
+                                    pager.openSettingsHandsFeedbackPage(storeScope)
+                                }
+                            else -> {
+                                val page = SettingsNativeDetailPage.fromKey(key)
+                                if (page == null || !pager.openSettingsNativeDetailPage(page, storeScope)) {
+                                    bridge.logWarn("settings_native_detail_rejected page=$key")
+                                }
+                            }
+                        }
+                    }
+                    val settingsSession = (authGateState as? SharedAuthGateState.Ready)?.session
+                    val settingsTabContent: @Composable (active: Boolean) -> Unit = { active ->
+                        if (navRailActive) {
+                            // artin 2026-10-29: the wide Settings is list + detail like the web's; the
+                            // section opens beside the list (SettingsWideSplit.kt).
+                            SettingsWideListDetail(
+                                payload = appShellSettingsHomePayload(settingsSession),
+                                widths = adaptiveListPaneWidths,
+                                active = active,
+                                picked = settingsWidePicked,
+                                onPick = { key ->
+                                    when (val pick = settingsWidePick(key)) {
+                                        is SettingsWidePick.Detail -> {
+                                            if (pick.key == SettingsDestinationComputers) {
+                                                writeComputerAttentionSeen(
+                                                    build.raft.app.data.raftComputerAttentionMarkSeen(computerAttentionSeen, currentComputerAttention)
+                                                )
+                                            }
+                                            bridge.log("settings_wide_pick row=$key")
+                                            settingsWidePicked = pick.key
+                                        }
+                                        SettingsWidePick.Push -> openSettingsRow(key)
+                                    }
+                                },
+                                onBackToDefault = {
+                                    bridge.log("settings_wide_back from=$settingsWidePicked")
+                                    settingsWidePicked = null
+                                },
+                                detailBottomInset = shellScope.embeddedChildBottomInset(showAppShellBottomTabs),
+                                bottomContentPadding = appShellBottomContentInset,
+                                onResizingChange = { adaptiveListPaneResizing = it },
+                                detailPane = { key, modifier ->
+                                    val detailPage = remember(key, storeScope) { settingsWideDetailPage(key, storeScope) }
+                                    if (detailPage != null) {
+                                        RaftChildPage(
+                                            pageName = detailPage.first,
+                                            pageData = detailPage.second,
+                                            modifier = modifier,
+                                            active = active,
+                                        )
+                                    }
+                                },
+                            )
+                        } else {
                         SettingsAppShellHomeContent(
                             moreRoot =
                                 if (navRailActive) {
@@ -7775,7 +8051,7 @@ private fun RaftAppShellReadyContent(
                                     )
                                 },
                             onBack = moreChildBack,
-                            session = (authGateState as? SharedAuthGateState.Ready)?.session,
+                            session = settingsSession,
                             bottomContentPadding = appShellBottomContentInset,
                             scrollToTopRequest = tabScrollToTopRequests.more,
                             onSettingsHeaderClick = {
@@ -7788,51 +8064,9 @@ private fun RaftAppShellReadyContent(
                                     settingsHeaderTapCount = nextTapCount
                                 }
                             },
-                            onSelect = { key ->
-                                prewarmAdmissionGate.invalidate("settings_open_page:$key")
-                                settingsHeaderTapCount = 0
-                                when (key) {
-                                    SettingsMoreMembersRowKey -> {
-                                        RaftProductEvents.navEntrySelected(
-                                            destination = RaftNavDestination.Members,
-                                            surface = RaftNavSurface.MobileMore,
-                                            wasActive = false,
-                                        )
-                                        bridge.log("app_shell_more_open row=$key from=$selectedTab")
-                                        selectAppShellTab("members", directChildSwitch = true)
-                                        retainedAppShellTabs = retainedAppShellTabs + "members"
-                                    }
-                                    SettingsDestinationAccount -> pager.openSettingsAccountPage(storeScope)
-                                    SettingsDestinationStorage -> pager.openSettingsStoragePage(storeScope)
-                                    SettingsDestinationReleaseNotes -> pager.openReleaseNotesPage(storeScope = storeScope)
-                                    SettingsDestinationBilling -> pager.openSettingsBillingPage(storeScope)
-                                    SettingsDestinationComputers -> {
-                                        if (!navRailActive) {
-                                            RaftProductEvents.navEntrySelected(
-                                                destination = RaftNavDestination.Computers,
-                                                surface = RaftNavSurface.MobileMore,
-                                                wasActive = false,
-                                            )
-                                        }
-                                        openComputersPage()
-                                    }
-                                    SettingsDestinationAdministration -> pager.openSettingsAdministrationPage(storeScope)
-                                    SettingsDestinationConnectedApps -> pager.openSettingsMarketplacePage(storeScope)
-                                    SettingsDestinationHandsFeedback ->
-                                        if (sharedStores.serverFeatureFlags.isEnabled(readyServerId?.let(::ServerId), PRODUCT_FEEDBACK_MULTI_APP_FEATURE_FLAG_KEY)) {
-                                            pager.openSettingsFeedbackWebViewPage(storeScope)
-                                        } else {
-                                            pager.openSettingsHandsFeedbackPage(storeScope)
-                                        }
-                                    else -> {
-                                        val page = SettingsNativeDetailPage.fromKey(key)
-                                        if (page == null || !pager.openSettingsNativeDetailPage(page, storeScope)) {
-                                            bridge.logWarn("settings_native_detail_rejected page=$key")
-                                        }
-                                    }
-                                }
-                            }
+                            onSelect = openSettingsRow,
                         )
+                        }
                     }
                     val currentChildTab = retainedAppShellSelectedTab(selectedTab)
                     val moreTabContent: @Composable (active: Boolean) -> Unit = { active ->
@@ -7950,12 +8184,14 @@ private fun RaftAppShellReadyContent(
                             AppShellRailSavedKey -> HomeDestinationSaved
                             else -> null
                         }
-                    if (railInlineDestination != null && navRailActive) {
+                    if (railInlineDestination != null) {
                         val searchListPane: @Composable (Boolean) -> Unit = { listActive ->
                             HomeSecondaryRouterContent(
                                 destination = railInlineDestination,
                                 routeVisibleTick = pageVisibleTick,
+                                // The field focuses as the inline Search opens (homeSearchPageChrome).
                                 initialSearchFocusInput = false,
+                                searchFocusInputRequest = railInlineSearchFocusRequest,
                                 adaptivePane = shellScope.adaptivePane,
                                 searchQueryRequest = searchTabQueryRequest.takeIf { railInlineDestination == HomeDestinationSearch },
                                 onSearchQueryApplied = { searchTabQueryRequest = null },
@@ -8029,6 +8265,8 @@ private fun RaftAppShellReadyContent(
                         mountedTabs = retainedAppShellTabs + prewarmedAppShellTabs,
                         childTabSwitchEpoch = childTabSwitchEpoch,
                         childPageTabKeys = slackNavTabKeys,
+                        // Android's phone bottom bar only: the wide rail keeps its instant switch.
+                        fadeThrough = raftPlatformAppShellTabFadeThrough() && !navRailActive,
                         log = { bridge.log(it) }
                     ) { tab, active ->
                         CompositionLocalProvider(LocalRaftTimeContextProvider provides hostThreadTimeContextProvider) {
@@ -8909,6 +9147,10 @@ internal fun raftMultiShellHostEnabled(): Boolean =
  * window and stale after in-place switches), the page data that opens (or brings to front) that
  * server's own window — the launch the Choose workspace page uses, minus replacing the source page.
  * Null means switch in place; so does an unknown current server.
+ *
+ * [keepTab] is the top-level tab the switch keeps (D1a, as the in-place switch does): the window
+ * opens on it (`slockInitialTab`, an intent, not product state) instead of the default Home. Null
+ * or "home" opens Home. Pushed pages are not carried.
  */
 internal fun appShellServerSwitchNewWindowPageDataOrNull(
     sourceStoreScope: RaftShellStoreScope,
@@ -8916,7 +9158,8 @@ internal fun appShellServerSwitchNewWindowPageDataOrNull(
     sourceDocumentShell: Boolean,
     selectedServerId: String,
     multiShellHostEnabled: Boolean,
-    routeOwner: AuthenticatedRouteOwner?
+    routeOwner: AuthenticatedRouteOwner?,
+    keepTab: String? = null
 ): JSONObject? {
     if (routeOwner == null) return null
     val current = currentServerId?.trim()?.takeIf { it.isNotBlank() } ?: return null
@@ -8931,7 +9174,10 @@ internal fun appShellServerSwitchNewWindowPageDataOrNull(
         suppressRestoreLanding = true,
         routeOwner = routeOwner,
         replaceCurrent = false
-    )
+    ).apply {
+        val tab = keepTab?.let(::retainedAppShellSelectedTab)
+        if (tab != null && tab != "home") put(AppShellInitialTabKey, tab)
+    }
 }
 
 internal fun isMultiShellCrossServerSelection(
@@ -9677,7 +9923,7 @@ private fun SharedMembersScreen(
         SharedMembersUiState.Loading ->
             Column(modifier = Modifier.fillMaxSize().background(RaftColor.Canvas)) {
                 // No head under the wide top bar, as the loaded list (MembersListContent).
-                if (LocalRaftAppShellTopBar.current == null || onBack != null) {
+                if (!raftUnderAppShellTopBar() || onBack != null) {
                     MembersPageHeader(title = membersTitle, onBack = onBack)
                 }
                 RaftCenteredLoading()
@@ -9739,37 +9985,6 @@ private fun SharedMembersScreen(
                     )
                 }
             }
-            val createAgentRuntimeModelScope = rememberCoroutineScope()
-            var createAgentRuntimeModels by remember(serverId) {
-                mutableStateOf<Map<Pair<String, String>, SharedCreateAgentRuntimeModelCatalog>>(emptyMap())
-            }
-            var createAgentRuntimeModelLoadsInFlight by remember(serverId) {
-                mutableStateOf<Set<Pair<String, String>>>(emptySet())
-            }
-            val loadRuntimeModels: (String, String, Boolean) -> Unit = { machineId, runtime, force ->
-                onForegroundActivity("load_runtime_models")
-                val key = machineId.trim() to runtime.trim()
-                if (serverId.isBlank() || key.first.isBlank() || key.second.isBlank()) {
-                    // no-op: the dialog keeps using the static runtime catalog fallback
-                } else if (!force && (key in createAgentRuntimeModels || key in createAgentRuntimeModelLoadsInFlight)) {
-                    // no-op: cached or already loading
-                } else {
-                    createAgentRuntimeModelLoadsInFlight = createAgentRuntimeModelLoadsInFlight + key
-                    createAgentRuntimeModelScope.launch {
-                        when (val result = createAgentCoordinator.loadRuntimeModels(serverId, key.first, key.second)) {
-                            is DataResult.Content -> {
-                                createAgentRuntimeModels = createAgentRuntimeModels + (key to result.data)
-                            }
-                            is DataResult.Empty -> Unit
-                            is DataResult.Error ->
-                                bridge.log("create_agent_runtime_models_failed source=shared_members code=${result.error.code}")
-                            is DataResult.NoPermission ->
-                                bridge.log("create_agent_runtime_models_blocked source=shared_members code=${result.blocker.code}")
-                        }
-                        createAgentRuntimeModelLoadsInFlight = createAgentRuntimeModelLoadsInFlight - key
-                    }
-                }
-            }
             // task #79: wire Settings → Members humans "+" invite flow.
             // Mirror the MembersPage.kt path: build a SharedMembersDataSource
             // on the fly from the host memberRepository + settingsRepository,
@@ -9814,9 +10029,6 @@ private fun SharedMembersScreen(
                 val result =
                     createAgentCoordinator
                         .createAgent(submit.toCreateAgentRequest())
-                        .recoverRejectedCreateAgentFormOrRetry(createAgentFormStore, serverId, submit) { retrySubmit ->
-                            createAgentCoordinator.createAgent(retrySubmit.toCreateAgentRequest())
-                        }
                 if (result is DataResult.Content) {
                     val profile = createdAgentMemberProfile(result.data, submit, computersSlice.machines)
                     val nextState =
@@ -9940,9 +10152,6 @@ private fun SharedMembersScreen(
                             createAgentCurrentAgentCount = current.members.count { it.kind == MemberKind.Agent },
                             createAgentLoadMachines = loadMachines,
                             createAgentRetryMachines = retryMachines,
-                            createAgentRuntimeModelsByMachineAndRuntime = createAgentRuntimeModels,
-                            createAgentRuntimeModelLoadsInFlight = createAgentRuntimeModelLoadsInFlight,
-                            createAgentLoadRuntimeModels = loadRuntimeModels,
                             createAgentFormStore = createAgentFormStore,
                             createAgentServerId = serverId,
                             createAgentTakenAgentNames = current.members.takenAgentNames()
@@ -10216,12 +10425,14 @@ private fun rememberProjectedDirectMessageItems(
             }
         }
     val conversationDirectoryProjections by conversationDirectoryFlow.collectAsState(emptyMap())
+    val markedUnreadIds = snapshot?.markedUnreadIds.orEmpty()
     val conversationRowProjector =
-        remember(conversationDirectoryProjections, draftProjection, restoredRowHints) {
+        remember(conversationDirectoryProjections, draftProjection, restoredRowHints, markedUnreadIds) {
             SharedHomeConversationRowProjector(
                 directoryProjections = conversationDirectoryProjections,
                 draftProjection = draftProjection,
-                restoredRowHints = restoredRowHints
+                restoredRowHints = restoredRowHints,
+                markedUnreadIds = markedUnreadIds
             )
         }
     return remember(snapshot?.directMessages, conversationRowProjector) {
@@ -10591,12 +10802,19 @@ private fun SharedHomeScreen(
                     }
                 }
             val conversationRowProjector =
-                remember(conversationDirectoryProjections, draftProjection, restoredRowHints, threadUnreadByParent) {
+                remember(
+                    conversationDirectoryProjections,
+                    draftProjection,
+                    restoredRowHints,
+                    threadUnreadByParent,
+                    snapshot.markedUnreadIds
+                ) {
                     SharedHomeConversationRowProjector(
                         directoryProjections = conversationDirectoryProjections,
                         draftProjection = draftProjection,
                         restoredRowHints = restoredRowHints,
-                        threadUnreadByParent = threadUnreadByParent
+                        threadUnreadByParent = threadUnreadByParent,
+                        markedUnreadIds = snapshot.markedUnreadIds
                     )
                 }
             val servers =
@@ -11291,6 +11509,9 @@ internal fun SharedHomeSearchPanel(
     draftProjection: SharedThreadComposerDraftProjection = SharedThreadComposerDraftProjection.Empty,
     onIntent: (SharedHomeSearchSavedIntent) -> Unit,
     onClose: (() -> Unit)? = null,
+    // False for the wide layout's inline Search: [onClose] still reaches a system side column, but
+    // the head draws no Back button (Esc / system Back close it through the shell).
+    showCloseButton: Boolean = true,
     interactiveSearchField: Boolean = true,
     includeTopSafeArea: Boolean = true,
     showSenderFilter: Boolean = true,
@@ -11515,6 +11736,7 @@ internal fun SharedHomeSearchPanel(
                     onSubmit = { onIntent(SharedHomeSearchSavedIntent.SubmitSearch) },
                     onClear = { onIntent(SharedHomeSearchSavedIntent.SearchQueryChanged("")) },
                     onClose = onClose,
+                    showCloseButton = showCloseButton,
                     interactive = interactiveSearchField,
                     tabHead = tabHead,
                     topSafeAreaPadding = shellScope.topInset(includeTopSafeArea),
@@ -12199,6 +12421,7 @@ private fun SharedHomeSearchToolbar(
     onSubmit: () -> Unit,
     onClear: () -> Unit,
     onClose: (() -> Unit)?,
+    showCloseButton: Boolean = true,
     interactive: Boolean = true,
     autoFocus: Boolean = false,
     tabHead: Boolean = false,
@@ -12231,6 +12454,10 @@ private fun SharedHomeSearchToolbar(
         }
         return
     }
+    // iPhone Duo (raft-design #859): beside the system's side column Back is the column's.
+    val backInColumn = onClose != null && raftSideColumnControls(back = raftSideColumnBackAction(onClose))
+    @Suppress("NAME_SHADOWING")
+    val onClose = onClose.takeUnless { backInColumn || !showCloseButton }
     SharedHomeSearchControlsRow(
         topSafeAreaPadding = topSafeAreaPadding,
         // Back sits at the top-bar edge inset, its arrow 14dp in, like every page header.
@@ -12611,7 +12838,7 @@ private fun SharedHomeSavedHeader(
 }
 
 @Composable
-private fun SharedHomeSearchFilters(
+internal fun SharedHomeSearchFilters(
     state: SharedHomeSearchPanelState,
     channelFilters: List<SearchChannelFilterItem>,
     scopeAnchorChanged: (RaftPopoverAnchorResolver) -> Unit,
@@ -12638,90 +12865,103 @@ private fun SharedHomeSearchFilters(
     val scopeLabel = stringResource(Res.string.search_filter_scope)
     val channelLabel = stringResource(Res.string.search_filter_channel)
     // raft-ui PickerTriggerButton: an applied filter (web `appliedFilterProps`) is the
-    // `info-soft` wash.
+    // `info-soft` wash. Web MessageSearchPage labels every chip (From, Scope, Channel, the time
+    // range, the sort) and wraps them; a phone row scrolls sideways instead, its first and last
+    // chips 16dp in from the edges (content padding, so a scrolled chip runs to the edge). A chip
+    // is never wider than the row (web `max-w-full`): a long sender or channel name ends in an
+    // ellipsis.
     SharedHomeSearchControlsBlock {
         val backSwipeRowState = rememberLazyListState()
         val backSwipeRow = rememberRaftBackSwipeScroll(backSwipeRowState)
-        LazyRow(
-            state = backSwipeRowState,
-            userScrollEnabled = backSwipeRow.userScrollEnabled,
-            modifier = Modifier.then(backSwipeRow.modifier).fillMaxWidth().raftSafeAreaHorizontalPadding().padding(horizontal = SearchControlsHorizontalPadding),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            homeSearchFilterOrder(showSenderFilter).forEach { filter ->
-                item(key = "search-filter-${filter.id}") {
-                    when (filter) {
-                        HomeSearchFilter.Sender ->
-                            RaftAnchoredPickerTrigger(
-                                label = state.localizedSenderFilterLabel(),
-                                anchorIdentity = "search_filter:sender",
-                                hasValue = senderActive,
-                                iconName = RaftLucideIconName.CircleUser,
-                                onAnchorChanged = senderAnchorChanged,
-                                onClick = { anchor ->
-                                    onOpenFilter("sender", anchor)
-                                }
-                            )
-                        HomeSearchFilter.Scope ->
-                            RaftAnchoredPickerTrigger(
-                                label = if (scopeActive) "$scopeLabel ${state.selectedScopes.size}" else scopeLabel,
-                                anchorIdentity = "search_filter:scope",
-                                hasValue = scopeActive,
-                                iconName = RaftLucideIconName.AtSign,
-                                onAnchorChanged = scopeAnchorChanged,
-                                onClick = { anchor ->
-                                    onOpenFilter("scope", anchor)
-                                }
-                            )
-                        HomeSearchFilter.Channel ->
-                            RaftAnchoredPickerTrigger(
-                                label = selectedChannel?.label ?: channelLabel,
-                                anchorIdentity = "search_filter:channel",
-                                hasValue = channelActive,
-                                iconName = selectedChannel?.iconName ?: RaftLucideIconName.Hash,
-                                onAnchorChanged = channelAnchorChanged,
-                                onClick = { anchor ->
-                                    onOpenFilter("channel", anchor)
-                                }
-                            )
-                        HomeSearchFilter.Time ->
-                            RaftAnchoredPickerTrigger(
-                                label = state.timeRange.localizedSearchLabel(),
-                                anchorIdentity = "search_filter:time",
-                                hasValue = timeActive,
-                                iconName = RaftLucideIconName.Calendar,
-                                onAnchorChanged = timeAnchorChanged,
-                                onClick = { anchor ->
-                                    onOpenFilter("time", anchor)
-                                }
-                            )
+        BoxWithConstraints(Modifier.fillMaxWidth().raftSafeAreaHorizontalPadding()) {
+            val chipModifier = Modifier.widthIn(max = (maxWidth - SearchControlsHorizontalPadding * 2).coerceAtLeast(0.dp))
+            LazyRow(
+                state = backSwipeRowState,
+                userScrollEnabled = backSwipeRow.userScrollEnabled,
+                modifier = Modifier.then(backSwipeRow.modifier).fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = SearchControlsHorizontalPadding),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                homeSearchFilterOrder(showSenderFilter).forEach { filter ->
+                    item(key = "search-filter-${filter.id}") {
+                        when (filter) {
+                            HomeSearchFilter.Sender ->
+                                RaftAnchoredPickerTrigger(
+                                    modifier = chipModifier,
+                                    label = state.localizedSenderFilterLabel(),
+                                    anchorIdentity = "search_filter:sender",
+                                    hasValue = senderActive,
+                                    iconName = RaftLucideIconName.CircleUser,
+                                    onAnchorChanged = senderAnchorChanged,
+                                    onClick = { anchor ->
+                                        onOpenFilter("sender", anchor)
+                                    }
+                                )
+                            HomeSearchFilter.Scope ->
+                                RaftAnchoredPickerTrigger(
+                                    modifier = chipModifier,
+                                    label = if (scopeActive) "$scopeLabel ${state.selectedScopes.size}" else scopeLabel,
+                                    anchorIdentity = "search_filter:scope",
+                                    hasValue = scopeActive,
+                                    iconName = RaftLucideIconName.AtSign,
+                                    onAnchorChanged = scopeAnchorChanged,
+                                    onClick = { anchor ->
+                                        onOpenFilter("scope", anchor)
+                                    }
+                                )
+                            HomeSearchFilter.Channel ->
+                                RaftAnchoredPickerTrigger(
+                                    modifier = chipModifier,
+                                    label = selectedChannel?.label ?: channelLabel,
+                                    anchorIdentity = "search_filter:channel",
+                                    hasValue = channelActive,
+                                    iconName = selectedChannel?.iconName ?: RaftLucideIconName.Hash,
+                                    onAnchorChanged = channelAnchorChanged,
+                                    onClick = { anchor ->
+                                        onOpenFilter("channel", anchor)
+                                    }
+                                )
+                            HomeSearchFilter.Time ->
+                                RaftAnchoredPickerTrigger(
+                                    modifier = chipModifier,
+                                    label = state.timeRange.localizedSearchLabel(),
+                                    anchorIdentity = "search_filter:time",
+                                    hasValue = timeActive,
+                                    iconName = RaftLucideIconName.Calendar,
+                                    onAnchorChanged = timeAnchorChanged,
+                                    onClick = { anchor ->
+                                        onOpenFilter("time", anchor)
+                                    }
+                                )
+                        }
                     }
                 }
-            }
-            item {
-                RaftAnchoredPickerTrigger(
-                    label = state.sort.localizedSearchLabel(),
-                    anchorIdentity = "search_filter:sort",
-                    hasValue = sortActive,
-                    iconName = RaftLucideIconName.ArrowUpDown,
-                    onAnchorChanged = sortAnchorChanged,
-                    onClick = { anchor ->
-                        onOpenFilter("sort", anchor)
-                    }
-                )
-            }
-            if (hasActiveFilters) {
                 item {
-                    RaftPickerTriggerButton(
-                        text = stringResource(Res.string.search_filter_clear_all),
-                        showIndicator = false,
-                        onClick = { onIntent(SharedHomeSearchSavedIntent.ClearSearchFilters) }
+                    RaftAnchoredPickerTrigger(
+                        modifier = chipModifier,
+                        label = state.sort.localizedSearchLabel(),
+                        anchorIdentity = "search_filter:sort",
+                        hasValue = sortActive,
+                        iconName = RaftLucideIconName.ArrowUpDown,
+                        onAnchorChanged = sortAnchorChanged,
+                        onClick = { anchor ->
+                            onOpenFilter("sort", anchor)
+                        }
                     )
                 }
-            }
-            if (!showSenderFilter) {
-                item {
-                    Spacer(Modifier.width(0.dp))
+                if (hasActiveFilters) {
+                    item {
+                        RaftPickerTriggerButton(
+                            text = stringResource(Res.string.search_filter_clear_all),
+                            showIndicator = false,
+                            onClick = { onIntent(SharedHomeSearchSavedIntent.ClearSearchFilters) }
+                        )
+                    }
+                }
+                if (!showSenderFilter) {
+                    item {
+                        Spacer(Modifier.width(0.dp))
+                    }
                 }
             }
         }
@@ -14714,7 +14954,9 @@ internal data class SharedHomeConversationRowSeed(
     /** Unread summary `hasMention` (or a followed thread's), carried by the store. */
     val mentioned: Boolean = false,
     /** Followed threads under this channel with new replies, carried by the store. */
-    val followedThreadUnreadCount: Int = 0
+    val followedThreadUnreadCount: Int = 0,
+    /** Marked unread with no count ([HomeSnapshot.markedUnreadIds]), carried by the store. */
+    val markedUnread: Boolean = false
 )
 
 internal data class SharedHomeConversationRowProjector(
@@ -14726,7 +14968,9 @@ internal data class SharedHomeConversationRowProjector(
      * [HomeSnapshot.followedThreadUnread] folded per parent channel. Empty when the server gates the
      * thread mark off (web `thread_unread_badge_v0`), which hides both the count and the thread's @.
      */
-    val threadUnreadByParent: Map<ChannelId, HomeParentThreadUnread> = emptyMap()
+    val threadUnreadByParent: Map<ChannelId, HomeParentThreadUnread> = emptyMap(),
+    /** [HomeSnapshot.markedUnreadIds]: rows marked unread with no count (botiverse/slock #11795). */
+    val markedUnreadIds: Set<String> = emptySet()
 ) {
     fun project(conversation: HomeConversationRow): RaftHomeConversationItem {
         // Only channel rows carry the followed-thread segment (web `SidebarChannelItem`).
@@ -14736,7 +14980,8 @@ internal data class SharedHomeConversationRowProjector(
             conversation.toSharedHomeConversationRowSeed()
                 .copy(
                     mentioned = conversation.mentionCount > 0 || threadUnread?.hasMention == true,
-                    followedThreadUnreadCount = threadUnread?.count ?: 0
+                    followedThreadUnreadCount = threadUnread?.count ?: 0,
+                    markedUnread = conversation.isMarkedUnreadIn(markedUnreadIds)
                 )
                 .withRestoredHint(
                     // A known count (read prediction, realtime) is newer than anything restored.
@@ -14888,7 +15133,8 @@ private fun SharedHomeConversationRowSeed.toSharedHomeConversationItem(
         // sparse source (inbox) never carries guestVisible, so it may only add, not clear.
         guestVisible = fallbackGuestVisible || directoryProjection?.guestVisible == true,
         mentioned = mentioned,
-        followedThreadUnreadCount = followedThreadUnreadCount
+        followedThreadUnreadCount = followedThreadUnreadCount,
+        markedUnread = markedUnread
     )
 }
 
@@ -15309,11 +15555,13 @@ internal data class ThreadLaunchAccessState(
 
 private fun Pager.openStandaloneThreadLaunchPayload(
     launchPayload: WireThreadLaunchPayload,
-    storeScope: RaftShellStoreScope
+    storeScope: RaftShellStoreScope,
+    /** False: shown without the push ([RAFT_OPEN_WITHOUT_ANIMATION]). */
+    animated: Boolean = true,
 ) {
     openRaftPage(
         pageName = THREAD_PAGE,
-        pageData = threadLaunchPageData(launchPayload),
+        pageData = threadLaunchPageData(launchPayload).withRaftOpenAnimation(animated),
         storeScopeOverride = storeScope
     )
 }
@@ -15651,6 +15899,7 @@ private fun RealtimeEvent.performanceMarkerName(): String =
         is TaskUpdated -> "task_updated"
         is TaskDeleted -> "task_deleted"
         is MemberPresenceUpdated -> "presence_updated"
+        is AgentActivitySubscribed -> "agent_activity_subscribed"
         is RealtimeRefreshRequired -> "refresh_${scope.name}"
         is ServerMembershipRemoved -> "server_membership_removed"
         is ServerDeleted -> "server_deleted"
@@ -15671,7 +15920,8 @@ private fun RealtimeEvent.performanceMarkerName(): String =
 
 private fun RealtimeEvent.performanceMarkerPhase(): String =
     when (this) {
-        is MemberPresenceUpdated -> "realtime_presence_apply"
+        is MemberPresenceUpdated,
+        is AgentActivitySubscribed -> "realtime_presence_apply"
         is MessageNew,
         is MessageUpdated,
         is ThreadFollowersUpdated,
@@ -15701,7 +15951,7 @@ private fun RealtimeEvent.performanceMarkerPhase(): String =
     }
 
 private fun RealtimeEvent.shouldEmitAppShellRouteMarker(): Boolean =
-    this !is Heartbeat && this !is MemberPresenceUpdated
+    this !is Heartbeat && this !is MemberPresenceUpdated && this !is AgentActivitySubscribed
 
 internal fun decodeSharedShellRealtimeEvent(
     eventData: JsonObject,
@@ -16428,7 +16678,9 @@ private fun SettingsVisualAppearanceContent() {
         onFontSizeDraftChange = {},
         onActivitySenderAvatarsChange = {},
         onSave = {},
-        onRetry = {}
+        onRetry = {},
+        // The fixture has a current server, so light and dark is on the Theme page.
+        showModeCard = false,
     )
 }
 

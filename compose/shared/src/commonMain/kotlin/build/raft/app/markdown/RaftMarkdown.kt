@@ -35,9 +35,14 @@ import build.raft.app.withRaftFontWeight
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import build.raft.app.base.Utils
+import build.raft.designsystem.tokens.RaftOpacity
 import androidx.compose.runtime.LaunchedEffect
 import kotlinx.coroutines.delay
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -70,8 +75,12 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import build.raft.app.compat.pager.Pager
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.lerp
+import build.raft.designsystem.components.raftPointerHoverPosition
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.isSpecified
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.AnnotatedString
@@ -871,7 +880,6 @@ internal fun raftMarkdownAnnotator(
         },
         inlineContent = {
             rendererInput.activeActionSpinnerInlineContent() +
-                rendererInput.taskChipInlineContent() +
                 rendererInput.mentionReadInlineContent()
         },
         config = markdownAnnotatorConfig(eolAsNewLine = softLineBreaksAsNewLines)
@@ -914,11 +922,6 @@ private data class RaftRichTextRendererInput(
     /** Status-coloured task chip styles are in use (web parity) only when the surface has a task source. */
     fun taskStatusesOrNull(): Map<Int, TaskStatus>? =
         if (hasTaskRefs) taskStatuses() else null
-
-    fun taskChipInlineContent(): Map<String, InlineTextContent> {
-        if (taskStatusesOrNull() == null) return emptyMap()
-        return raftMarkdownTaskChipInlineContent(dark = RaftAppThemeState.isDark)
-    }
 
     private val hasMentionRefs: Boolean =
         document.actions.any { action -> action.refKind == RaftRichTextRefKind.UserMention }
@@ -1160,7 +1163,10 @@ private fun AnnotatedString.Builder.appendRaftRichTextToken(
             return
         }
     }
-    val boxStyle = raftMarkdownRichTextTagInlineBoxStyle(token.chrome)
+    // artin 10-29: a chip whose open is in flight is busy — the spinner follows its label inside the
+    // box (as the web's trailing spinner) and the chip is dimmed (raft-ui `--opacity-dimmed`, busy controls), until it settles.
+    val busy = token.active && token.trailingIndicator.isEmpty()
+    val boxStyle = raftMarkdownRichTextTagInlineBoxStyle(token.chrome)?.let { if (busy) it.raftBusyDimmed() else it }
     withRaftInlineChipGaps(boxStyle) {
         pushStringAnnotation(
             tag = RaftMarkdownTagAnnotationTag,
@@ -1169,18 +1175,23 @@ private fun AnnotatedString.Builder.appendRaftRichTextToken(
         withLink(
             LinkAnnotation.Clickable(
                 tag = action.id,
-                styles = raftMarkdownRichTextTagLinkStyles(token.chrome),
+                styles = raftMarkdownRichTextTagLinkStyles(token.chrome, busy = busy),
                 linkInteractionListener = LinkInteractionListener { onOpenAction(action) }
             )
         ) {
             // The chip box is an annotation painted by raftInlineDecorations.
             withRaftInlineBox(boxStyle) {
                 val fontSizeStyle = raftMarkdownRichTextTagFontSizeStyle(token.chrome)
-                if (fontSizeStyle == null) append(label) else withStyle(fontSizeStyle) { append(label) }
-            }
-            if (token.active && token.trailingIndicator.isEmpty()) {
-                append(" ")
-                appendInlineContent(raftMarkdownActionSpinnerInlineId(action.id), "\uFFFC")
+                val appendChipText: AnnotatedString.Builder.() -> Unit = {
+                    append(label)
+                    if (busy) {
+                        // A word joiner keeps the label and the spinner on one line.
+                        append(RaftMarkdownTaskChipWordJoiner)
+                        append(" ")
+                        appendInlineContent(raftMarkdownActionSpinnerInlineId(action.id), "\uFFFC")
+                    }
+                }
+                if (fontSizeStyle == null) appendChipText() else withStyle(fontSizeStyle) { appendChipText() }
             }
         }
         pop()
@@ -1451,9 +1462,28 @@ private object RaftMarkdownTextProvider : TextProvider {
                 )
             }
         var decorationLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
+        // raft-ui markdown link hover (a mouse or trackpad, never a finger): the text deepens toward
+        // the ink and its underline takes the text's full colour. Chips are never underlined
+        // links, so they never change here.
+        var hoveredLink by remember(resolvedText) { mutableStateOf<IntRange?>(null) }
+        val hoverInk = raftMarkdownLinkHoverInk()
+        val displayText =
+            remember(resolvedText, hoveredLink, hoverInk) { resolvedText.withRaftMarkdownLinkHover(hoveredLink, hoverInk) }
+        val hoverModifier =
+            if (inlineDecorations.underlines.isEmpty()) {
+                Modifier
+            } else {
+                Modifier.raftPointerHoverPosition { position ->
+                    val next = position?.let { at -> decorationLayout?.let { raftMarkdownUnderlinedLinkAt(it, inlineDecorations, at) } }
+                    if (next != hoveredLink) hoveredLink = next
+                }
+            }
         KuiklyText(
-            text = resolvedText,
-            modifier = modifier.raftInlineDecorations(inlineDecorations) { decorationLayout },
+            text = displayText,
+            modifier =
+                modifier
+                    .then(hoverModifier)
+                    .raftInlineDecorations(inlineDecorations, hovered = { hoveredLink?.let { it to hoverInk } }) { decorationLayout },
             color = color,
             fontSize = fontSize,
             fontStyle = fontStyle,
@@ -1486,6 +1516,8 @@ internal fun AnnotatedString.withRaftMarkdownBodyClick(onClick: (() -> Unit)?): 
     val openBody =
         LinkAnnotation.Clickable(
             tag = RaftMarkdownBodyClickTag,
+            // The body looks as it is: a null style would get Material3 Text's default link look.
+            styles = RaftUnstyledLinkStyles,
             linkInteractionListener = LinkInteractionListener { onClick() }
         )
     return AnnotatedString.Builder(length)
@@ -1844,10 +1876,7 @@ private fun raftMessagePermalinkChipLinkStyles(): TextLinkStyles {
         )
     // raft-ui `active:overlay-medium`; link styles cannot reach the box annotation, so a span wash
     // over the chip's text stands in for the overlay.
-    return TextLinkStyles(
-        style = base,
-        pressedStyle = base.copy(background = RaftAppThemeState.colors.fillPressed)
-    )
+    return raftChipLinkStyles(base, pressed = base.copy(background = RaftAppThemeState.colors.fillPressed))
 }
 
 private object RaftMarkdownPreparedBodyCache {
@@ -2892,6 +2921,26 @@ private val RaftMarkdownCodeActionSize = 28.dp
 private val RaftMarkdownCodeActionRadius = 6.dp
 
 /**
+ * Told when a tap lands on a code block, so a message row's own tap can leave it alone: the web's
+ * `handleMobileTap` skips taps on `pre, code` (stdrc, 2026-10-29, #proj-raft-ui:911ccc08). Called on
+ * the tap's release, before the row dispatches its tap; the pointer is never consumed, so a long
+ * press, text selection and the copy button work as before. Null outside a message row.
+ */
+internal val LocalRaftMarkdownCodeTapObserver = compositionLocalOf<(() -> Unit)?> { null }
+
+@Composable
+private fun Modifier.raftMarkdownObserveCodeTap(): Modifier {
+    val observer = LocalRaftMarkdownCodeTapObserver.current ?: return this
+    val currentObserver by rememberUpdatedState(observer)
+    return pointerInput(Unit) {
+        awaitEachGesture {
+            awaitFirstDown(requireUnconsumed = false)
+            if (waitForUpOrCancellation() != null) currentObserver()
+        }
+    }
+}
+
+/**
  * Code block surface. Replaces the vendor `MarkdownCode`, whose background is
  * drawn before the clip (square corners) and which has no border.
  */
@@ -2906,6 +2955,7 @@ private fun RaftMarkdownCodeSurface(code: String, language: String?, style: Text
                 .fillMaxWidth()
                 .padding(vertical = RaftMarkdownCodeSurfaceVerticalInset)
                 .clip(shape)
+                .raftMarkdownObserveCodeTap()
                 .background(RaftMarkdownCodeBlockBackground)
                 .border(1.dp, RaftColor.BorderHairline, shape)
     ) {
@@ -3012,11 +3062,48 @@ internal fun raftMarkdownLinkUnderlineStyle(): RaftInlineUnderlineStyle =
  * underline; a link around inline code keeps its underline. Tags are [LinkAnnotation.Clickable]
  * and are left alone.
  */
+/**
+ * raft-ui markdown link hover ink: `color-mix(in oklab, foreground-link 80%, foreground)`. Its
+ * underline takes the same colour (`hover:decoration-current`).
+ */
+internal fun raftMarkdownLinkHoverInk(): Color = lerp(RaftMarkdownLinkBlue, RaftColor.TextBlack, 0.2f)
+
+/** [hovered] (an underlined link's range) in [ink]; the text as is when null. */
+internal fun AnnotatedString.withRaftMarkdownLinkHover(hovered: IntRange?, ink: Color): AnnotatedString {
+    if (hovered == null || hovered.isEmpty() || hovered.last >= length) return this
+    return AnnotatedString.Builder(this)
+        .apply { addStyle(SpanStyle(color = ink), hovered.first, hovered.last + 1) }
+        .toAnnotatedString()
+}
+
+/**
+ * The underlined web link (a [withRaftMarkdownLinkUnderlines] range) whose words are under
+ * [position] (local px of the text), or null. Only the glyphs count, not the rest of their line.
+ */
+internal fun raftMarkdownUnderlinedLinkAt(
+    layout: TextLayoutResult,
+    decorations: RaftInlineDecorations,
+    position: Offset,
+): IntRange? {
+    val textLength = layout.layoutInput.text.length
+    if (textLength == 0) return null
+    val caret = layout.getOffsetForPosition(position)
+    // The caret is the nearest gap: the character under the pointer is the one after or before it.
+    for (offset in intArrayOf(caret, caret - 1)) {
+        if (offset !in 0 until textLength) continue
+        val link = decorations.underlines.firstOrNull { offset >= it.start && offset < it.end } ?: continue
+        if (layout.getBoundingBox(offset).contains(position)) return link.start until link.end
+    }
+    return null
+}
+
 internal fun AnnotatedString.withRaftMarkdownLinkUnderlines(): AnnotatedString {
     val links = getLinkAnnotations(0, length).filter { it.item is LinkAnnotation.Url && it.end > it.start }
     if (links.isEmpty()) return this
-    val boxes = raftInlineBoxRanges()
-    val underlined = links.filter { link -> boxes.none { box -> box.start <= link.start && link.end <= box.end } }
+    // A chip's extent includes its padding (gap placeholders / spacers glued by word joiners), so a
+    // link spanning the chip's padding as well as its label is still the chip, never underlined.
+    val chips = raftInlineChipExtents()
+    val underlined = links.filter { link -> chips.none { chip -> chip.first <= link.start && link.end <= chip.last + 1 } }
     if (underlined.isEmpty()) return this
     val encoded = raftMarkdownLinkUnderlineStyle().encode()
     return AnnotatedString.Builder(this)
@@ -3274,14 +3361,38 @@ internal fun raftMarkdownTagLinkStyles(
     raftMarkdownRichTextTagLinkStyles(raftRichTextChromeKind(kind, highlighted = highlighted, active = active))
 
 internal fun raftMarkdownRichTextTagLinkStyles(
-    chromeKind: RaftRichTextChromeKind?
+    chromeKind: RaftRichTextChromeKind?,
+    busy: Boolean = false
 ): TextLinkStyles {
     val token = (chromeKind ?: RaftRichTextChromeKind.OrdinaryMention).styleToken
+    if (busy) {
+        // A busy chip ignores taps, so it has no pressed look either.
+        val dimmed = token.toTagSpanStyle().let { it.copy(color = it.color.copy(alpha = it.color.alpha * RaftOpacity.Dimmed)) }
+        return if (token.chipFill != null) {
+            raftChipLinkStyles(dimmed)
+        } else {
+            TextLinkStyles(style = dimmed, focusedStyle = dimmed, hoveredStyle = dimmed, pressedStyle = dimmed)
+        }
+    }
+    // A boxed chip (self mention, channel, thread, task) is never underlined, at rest, hovered,
+    // focused or pressed. A plain @mention underlines on hover and press (MessageReferenceText
+    // `hover:underline`).
+    if (token.chipFill != null) return raftChipLinkStyles(token.toTagSpanStyle(), pressed = token.toPressedTagSpanStyle())
     return TextLinkStyles(
         style = token.toTagSpanStyle(),
+        focusedStyle = token.toTagSpanStyle(),
+        hoveredStyle = token.toPressedTagSpanStyle(),
         pressedStyle = token.toPressedTagSpanStyle()
     )
 }
+
+/** A busy chip's box at raft-ui `--opacity-dimmed`, as its text. */
+internal fun RaftInlineBoxStyle.raftBusyDimmed(): RaftInlineBoxStyle =
+    copy(
+        backgroundColor = backgroundColor.takeIf { it.isSpecified }?.let { it.copy(alpha = it.alpha * RaftOpacity.Dimmed) }
+            ?: backgroundColor,
+        borderColor = borderColor.copy(alpha = borderColor.alpha * RaftOpacity.Dimmed),
+    )
 
 /** The chip's 0.875em text size, or null when the tag keeps the sentence's size. */
 internal fun raftMarkdownRichTextTagFontSizeStyle(chromeKind: RaftRichTextChromeKind?): SpanStyle? =

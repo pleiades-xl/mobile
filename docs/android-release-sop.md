@@ -203,6 +203,8 @@ Expected workflow output:
 
 - signed, aligned APK with a verified SHA-256;
 - workflow APK and R8 mapping artifacts;
+- the signed AAB with its verification receipt and `build-identity.json`
+  (`<artifact_name>-aab`, kept 90 days for every non-debug build);
 - a Hands **draft** release and optional temporary share page;
 - a raw commit-derived changelog only as authoring input.
 
@@ -210,14 +212,43 @@ The release workflow no longer triggers from tags, activates a release, or
 creates a release tag. A tag is a post-publication audit record, never a build
 trigger or a way to bypass the draft gate.
 
+Pushing the `vX.Y.Z` tag runs `github-release.yml`, which creates the GitHub
+Release from what Hands shipped: the published `main` APK (no AAB: GitHub
+Releases never carry one, artin 2026-10-29), iOS's TestFlight build number, and,
+built from the tag's commit, an unsigned, not notarized Apple silicon macOS dmg
+(`raft-macos-arm64-unsigned-<version>.dmg`) and a zipped iOS
+Simulator `.app` (Xcode 27.1 on GitHub's `xcode-27` Mac, Debug, arm64; Simulator
+only, attached only when its `metadata.json` names the tag commit). A failed dmg
+or Simulator build releases the rest with a warning; rerun with
+`workflow_dispatch` to add it.
+
 ### 3.1 Upload the Play carrier through Hands' Google Play binding
 
-The Android Release workflow does not upload to Google Play automatically. For
-a Play candidate, dispatch it from the clean remote `release-X.Y.Z` checkout
-with `android_variant=play` and `upload_android_artifacts=true`. CI builds,
-signs, verifies, and retains the AAB (and the matching Play APK) as workflow
-artifacts; `create_hands_draft` remains `false` for this carrier. A workflow
-success or a GitHub artifact is not a Google Play receipt.
+Every Android release also goes to the Google Play **internal testing** track
+by default, the way iOS goes to the TestFlight internal group (release rule,
+2026-10-29). The internal upload needs no separate approval; closed, open and
+production tracks still need artin's explicit approval.
+
+For each release, dispatch the Android Release workflow from the clean remote
+`release-X.Y.Z` checkout with `android_variant=play`,
+`upload_android_artifacts=true` and its own versionCode. CI builds, signs and
+verifies the AAB (and the matching Play APK), keeps them as workflow artifacts
+and uploads both to Hands as a sealed build; `create_hands_draft` stays `false`
+for this carrier. The job summary prints the next command. As a signed-in Hands
+publisher, run:
+
+```bash
+scripts/play_internal_promote.sh <hands_build_id>
+```
+
+It checks the build is ready with one sealed AAB, creates the Hands draft that
+carries the promotion, writes the acceptance receipt for that AAB and promotes
+it to `internal`. By policy, Google Play writes run under an accountable human
+or agent identity (`hands login`), never CI's deploy token, so CI does not run
+this step. Hands does not enforce this for promote yet (it treats a deploy token
+as an agent); do not rely on that. **Never publish that Hands draft**: it would ship the Play carrier
+on the Hands channel. Record the printed receipt in the release issue. A
+workflow success or a GitHub artifact is not a Google Play receipt.
 
 Hands can perform the store upload when the app has an enabled, verified Google
 Play binding and the caller has the app `publisher` role. The binding owns the

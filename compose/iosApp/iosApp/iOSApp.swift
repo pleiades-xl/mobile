@@ -508,6 +508,10 @@ final class RaftIosAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         networkRequestLifetimeAdapter.install()
+        // `xcrun simctl launch booted <bundle> -RaftHideEnvironmentIndicator YES` for store screenshots.
+        RaftEnvironmentIndicatorKt.setRaftEnvironmentIndicatorHiddenForCapture(
+            hidden: UserDefaults.standard.bool(forKey: "RaftHideEnvironmentIndicator")
+        )
         RaftIosNetworkPathMonitor.shared.start()
         UNUserNotificationCenter.current().delegate = self
         RaftIosDesktopShortcutHost.install()
@@ -644,9 +648,6 @@ private enum RaftIosSharedLogBridge {
             RaftIosDiagnosticsRecordWithContext(level, tag, message, timestampMillis, true, forceCritical)
             if tag == "RaftShareLogs" {
                 DispatchQueue.main.async { RaftLogShare.present() }
-            }
-            if tag == "RaftPopToShell" {
-                DispatchQueue.main.async { RaftPopToShell.run() }
             }
         }
     }

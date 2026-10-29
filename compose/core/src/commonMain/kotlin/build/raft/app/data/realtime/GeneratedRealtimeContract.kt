@@ -11,6 +11,8 @@ object GeneratedRealtimeContract {
         const val JoinChannel = "joinChannel"
         const val LeaveChannel = "leaveChannel"
         const val RejoinChannel = "rejoinChannel"
+        const val AgentActivitySubscribe = "agentActivitySubscribe"
+        const val AgentActivityUnsubscribe = "agentActivityUnsubscribe"
     }
 
     object PayloadKey {
@@ -78,10 +80,15 @@ object GeneratedRealtimeContract {
         const val TaskUpdated = "task:updated"
         const val TaskDeleted = "task:deleted"
         const val AgentActivity = "agent:activity"
+        const val AgentActivityState = "agent:activity_state"
+        const val AgentActivitySubscribe = "agent:activity:subscribe"
+        const val AgentActivityUnsubscribe = "agent:activity:unsubscribe"
+        const val AgentActivitySubscribed = "agent:activity:subscribed"
         const val AgentSeen = "agent:seen"
         const val AgentTyping = "agent:typing"
         const val AgentSession = "agent:session"
         const val AgentCreated = "agent:created"
+        const val AgentUpdated = "agent:updated"
         const val AgentDeleted = "agent:deleted"
         const val MachineStatus = "machine:status"
         const val MachineCapabilities = "machine:capabilities"
@@ -118,10 +125,13 @@ object GeneratedRealtimeContract {
             TaskUpdated,
             TaskDeleted,
             AgentActivity,
+            AgentActivityState,
+            AgentActivitySubscribed,
             AgentSeen,
             AgentTyping,
             AgentSession,
             AgentCreated,
+            AgentUpdated,
             AgentDeleted,
             MachineStatus,
             MachineCapabilities,

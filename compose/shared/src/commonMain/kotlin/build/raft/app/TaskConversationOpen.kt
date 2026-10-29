@@ -1,6 +1,7 @@
 package build.raft.app
 
 import build.raft.app.data.DataResult
+import build.raft.app.data.SharedConversationDirectoryState
 import build.raft.app.data.SharedTasksDataSource
 import build.raft.app.model.ChannelId
 import build.raft.app.model.ConversationKind
@@ -8,16 +9,22 @@ import build.raft.app.model.MessageId
 import build.raft.app.model.ServerId
 import build.raft.app.model.TaskId
 import build.raft.app.model.TaskSummary
+import build.raft.app.model.ThreadId
 import build.raft.app.model.topLevelThreadId
 
 /**
- * Task v2: where opening a task lands. Mirrors web `useOpenTask` / `directTaskConversationChannelId`
- * (slock `packages/web/src/components/task/useOpenTask.ts`, `utils/taskConversation.ts`), decided per
- * task (never by the `task_v2_conversations_v0` flag):
- * - a legacy orphan and a pre-v2 task (host message thread) keep the existing thread open;
- * - a v2 task whose canonical conversation is known and is local (not a joint surface) opens it;
- * - otherwise (anchored without a conversation yet, or a joint surface whose LOCAL conversation
- *   differs from the canonical one) `POST /tasks/:id/conversation` answers the local id first.
+ * Task v2: where opening a task lands. Mirrors web `useOpenTask` / `opensAsTaskConversation` /
+ * `directTaskConversationChannelId` (slock `packages/web/src/components/task/useOpenTask.ts`,
+ * `utils/taskConversation.ts`):
+ * - a legacy orphan (server `isLegacy`: no host message, no conversation, not created to have one)
+ *   opens the read-only legacy panel ([LegacyPanel], web `LegacyTaskPanel`);
+ * - with `task_v2_conversations_v0` off, a pre-v2 task (not `conversationAnchored`) keeps its host
+ *   message's thread; with the flag on every non-legacy task opens as its own conversation;
+ * - a task with no conversation yet opens it empty ([PendingConversation]): opening never creates
+ *   it; the first send does (web `TaskConversationDialog`, `ensureTaskModalThreadChannel`);
+ * - a task whose canonical conversation is known and is local (not a joint surface) opens it;
+ * - a joint surface's LOCAL conversation differs from the canonical one: `POST /tasks/:id/conversation`
+ *   (idempotent; the conversation already exists, so nothing is created) answers it first.
  */
 internal sealed interface TaskOpenTarget {
     data class Conversation(val conversationChannelId: ChannelId) : TaskOpenTarget
@@ -25,16 +32,28 @@ internal sealed interface TaskOpenTarget {
     data object ResolveConversation : TaskOpenTarget
 
     data object HostThread : TaskOpenTarget
+
+    /** No conversation yet: open it empty; the first send creates it ([TaskOpenSurface.Pending]). */
+    data object PendingConversation : TaskOpenTarget
+
+    /** A legacy orphan: the read-only panel ([TaskOpenSurface.Legacy]). */
+    data object LegacyPanel : TaskOpenTarget
 }
 
-internal fun TaskSummary.taskOpenTarget(): TaskOpenTarget {
-    if (isLegacy || !conversationAnchored) return TaskOpenTarget.HostThread
-    val direct =
-        conversationChannelId?.takeUnless {
-            parseConversationKindOrNull(channelType) == ConversationKind.Joint
-        }
-    return direct?.let(TaskOpenTarget::Conversation) ?: TaskOpenTarget.ResolveConversation
+internal fun TaskSummary.taskOpenTarget(taskV2Enabled: Boolean): TaskOpenTarget {
+    if (isLegacy) return TaskOpenTarget.LegacyPanel
+    if (!opensAsTaskConversation(taskV2Enabled)) return TaskOpenTarget.HostThread
+    val conversation = conversationChannelId ?: return TaskOpenTarget.PendingConversation
+    return if (parseConversationKindOrNull(channelType) == ConversationKind.Joint) {
+        TaskOpenTarget.ResolveConversation
+    } else {
+        TaskOpenTarget.Conversation(conversation)
+    }
 }
+
+/** Web `opensAsTaskConversation(task, taskV2Enabled)`: never for a legacy orphan; else with the flag on, or per task. */
+internal fun TaskSummary.opensAsTaskConversation(taskV2Enabled: Boolean): Boolean =
+    !isLegacy && (taskV2Enabled || conversationAnchored)
 
 /** The launch identity of a task conversation: a flat, root-less stream keyed by its channel id. */
 internal fun taskConversationLaunchIdentity(conversationChannelId: ChannelId): ThreadLaunchConversationIdentity =
@@ -54,11 +73,13 @@ internal suspend fun resolveTaskOpenConversationChannelId(
     task: TaskSummary,
     serverId: String,
     tasksDataSource: SharedTasksDataSource,
+    taskV2Enabled: Boolean,
     log: (String) -> Unit = {},
 ): ChannelId? =
-    when (val target = task.taskOpenTarget()) {
+    when (val target = task.taskOpenTarget(taskV2Enabled)) {
         is TaskOpenTarget.Conversation -> target.conversationChannelId
-        TaskOpenTarget.HostThread -> null
+        // Never POSTed: that would create the conversation (web: opening does not create).
+        TaskOpenTarget.HostThread, TaskOpenTarget.PendingConversation, TaskOpenTarget.LegacyPanel -> null
         TaskOpenTarget.ResolveConversation -> {
             val resolvedServerId = serverId.trim().takeIf { it.isNotBlank() }?.let(::ServerId)
             val result = resolvedServerId?.let { tasksDataSource.openTaskConversation(it, task.id) }
@@ -86,7 +107,7 @@ internal fun buildTaskOpenLaunchPayload(
 ): WireThreadLaunchPayload? {
     val conversationId =
         resolvedConversationChannelId
-            ?: (task.taskOpenTarget() as? TaskOpenTarget.Conversation)?.conversationChannelId
+            ?: (task.taskOpenTarget(taskV2Enabled = false) as? TaskOpenTarget.Conversation)?.conversationChannelId
     if (conversationId != null) {
         return buildStandaloneConversationThreadLaunchPayload(
             conversation = taskConversationLaunchIdentity(conversationId),
@@ -96,7 +117,9 @@ internal fun buildTaskOpenLaunchPayload(
         )
     }
     // A task resolved to no conversation still opens its pre-v2 host thread when it has one.
-    return if (task.taskOpenTarget() == TaskOpenTarget.HostThread || task.hostMessageId != null) {
+    // A legacy orphan has no thread to open (its panel is [TaskOpenSurface.Legacy]).
+    if (task.isLegacy) return null
+    return if (task.taskOpenTarget(taskV2Enabled = false) == TaskOpenTarget.HostThread || task.hostMessageId != null) {
         hostThreadPayload()
     } else {
         null
@@ -140,5 +163,60 @@ internal fun parseRaftTaskConversationPushTarget(
         conversationChannelId = ChannelId(conversation),
         taskId = taskId?.trim()?.takeIf { it.isNotBlank() }?.let(::TaskId),
         taskMessageId = taskMessageId?.trim()?.takeIf { it.isNotBlank() }?.let(::MessageId),
+    )
+}
+
+/**
+ * Task v2 (web `TaskConversationBar.viewInChannel`): the message the task hangs under in its
+ * channel — its source, or a pre-v2 task's host — and null for a task created without one (the
+ * channel itself opens).
+ */
+internal fun TaskSummary.taskViewInChannelAnchor(): MessageId? = sourceMessageId ?: hostMessageId
+
+/**
+ * Where View in Channel and the Source row lead (web `nav.toMessage` / `nav.toDmMessage` /
+ * `nav.toChannel`): the task's channel (a DM, a joint or an ordinary channel, as its `channelType`
+ * says), anchored on [anchorMessageId] when there is one. Null without a channel.
+ */
+internal fun TaskSummary.taskChannelOpenRequest(
+    serverId: String,
+    anchorMessageId: MessageId?,
+    conversationDirectory: SharedConversationDirectoryState = SharedConversationDirectoryState(),
+): HomeMessageOpenRequest? {
+    val channel = channelId?.value?.trim()?.takeIf { it.isNotBlank() } ?: return null
+    val kind =
+        parseConversationKindOrNull(channelType)
+            ?.takeIf { it == ConversationKind.Channel || it == ConversationKind.DirectMessage || it == ConversationKind.Joint }
+            ?: ConversationKind.Channel
+    val identity =
+        ConversationOpenSourceMessageIdentity(
+            source = ConversationOpenSource.Task,
+            messageId = anchorMessageId?.value?.takeIf { it.isNotBlank() },
+            channelId = channel,
+            conversationKind = kind,
+        )
+    return (resolveOpenRequest(serverId, identity, conversationDirectory) as? ConversationOpenResolution.Resolved)?.request
+}
+
+/**
+ * Task v2 (web `TaskEarlierDiscussionProperty`): a pre-v2 task's earlier discussion is the thread
+ * of its host message; [threadChannelId] is that thread when the lookup named it. Null for a task
+ * without a host message.
+ */
+internal fun TaskSummary.taskEarlierDiscussionOpenRequest(
+    serverId: String,
+    threadChannelId: ChannelId?,
+    conversationDirectory: SharedConversationDirectoryState = SharedConversationDirectoryState(),
+): HomeMessageOpenRequest? {
+    val host = hostMessageId ?: return null
+    if (channelId == null) return null
+    return copy(
+        messageId = host,
+        parentMessageId = host,
+        threadId = threadChannelId?.value?.let(::ThreadId) ?: threadId,
+    ).resolveTaskThreadOpenRequest(
+        serverId = serverId,
+        conversationDirectory = conversationDirectory,
+        parentConversationKind = parseConversationKindOrNull(channelType),
     )
 }

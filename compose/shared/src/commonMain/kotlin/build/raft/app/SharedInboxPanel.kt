@@ -1,6 +1,7 @@
 package build.raft.app
 
 import androidx.compose.ui.platform.LocalUriHandler
+import build.raft.app.data.ArtifactKind
 import build.raft.app.data.ArtifactLinkTarget
 import build.raft.app.data.artifactWebUrl
 import build.raft.designsystem.haptics.rememberRaftHaptics
@@ -17,9 +18,12 @@ import build.raft.app.data.ActivityUnreadSummaryProjection
 import build.raft.app.data.ActivityUpdateTrackingState
 import build.raft.app.data.InboxFilter
 import build.raft.app.data.InboxItem
+import build.raft.app.data.RaftReadToggleNotice
+import build.raft.app.data.showsUnread
 import build.raft.app.data.isTaskConversation
 import build.raft.app.data.RaftActivityMarkAction
 import build.raft.app.data.RaftProductEvents
+import build.raft.app.data.HomeThreadUnfollowPhase
 import build.raft.app.data.SharedHomeIntent
 import build.raft.app.data.SharedHomeContentState
 import androidx.compose.runtime.Immutable
@@ -485,6 +489,15 @@ internal fun SharedHomeActivityScreen(
     // selected, and it still receives every shell pageDidAppear tick. Refreshing then cost a
     // Foreground-lane inbox load plus a full Activity/Home identity republish on every return
     // from background for a list nobody sees; the `active` edge below refreshes it on entry.
+    // botiverse/slock #11792: the row's Mark as Unread found nothing to mark; say why.
+    val markUnreadNothingMessage by rememberUpdatedState(stringResource(Res.string.home_action_mark_unread_nothing))
+    LaunchedEffect(activityStore) {
+        activityStore.readToggleNotices.collect { notice ->
+            when (notice) {
+                RaftReadToggleNotice.MarkUnreadNothing -> bridge.toast(markUnreadNothingMessage)
+            }
+        }
+    }
     val latestActive by rememberUpdatedState(active)
     LaunchedEffect(routeVisibleTick) {
         if (activityPageDidAppearShouldRefresh(routeVisibleTick, active = latestActive)) {
@@ -689,6 +702,16 @@ internal data class ActivityRefreshPresentation(
  * The tag/prefix are the ones `SettingsHomePage` already shipped, so wiring the
  * previously-unlogged call site does not change what existing consumers grep.
  */
+private val activityPullDiagnosticsLogger: (String) -> Unit by lazy { sharedActivityStoreDiagnosticsLogger() }
+
+/**
+ * Hands f6c3f3a6: a pull released past the threshold that started no refresh is logged with its
+ * reason (see RaftPullToRefreshController.onPullIgnored); before, such a pull left no line at all.
+ */
+internal fun logActivityPullIgnored(reason: String) {
+    activityPullDiagnosticsLogger("store_load domain=activity phase=pull_ignored reason=$reason source=pull_indicator")
+}
+
 internal fun sharedActivityStoreDiagnosticsLogger(): (String) -> Unit {
     val delegate = raftLogger("SlockHomeActivity", "shared_home_activity")
     return { message -> delegate(stampSharedActivityDiagnosticsSequence(message)) }
@@ -741,19 +764,19 @@ internal fun stampSharedActivityDiagnosticsSequence(message: String): String =
 private val sharedActivityDiagnosticsSequence = atomic(0L)
 
 /**
- * Which refresh chrome the Activity page asks for. A refresh the user did not pull
- * ([SharedActivityState.silentRefreshing]: re-entry, resume, realtime / sync reconcile, server
- * switch over cached rows) shows the header's top-right indicator (artin 10-27); the user's pull
- * shows the pull indicator alone, never the header one too (artin task #22). The header indicator
- * is further delayed and held by [rememberRaftDelayedIndicatorVisible] so a quick reload never
- * flashes it.
+ * Which refresh chrome the Activity page asks for (ticket 67609860, artin 10-28). The header's
+ * top-right indicator shows only for [SharedActivityState.headerRefreshing]: the open, a server /
+ * filter switch, or a resume / re-entry refresh after a while. Realtime, sync and periodic
+ * background loads show nothing; the user's pull shows the pull indicator alone, never the header
+ * one too (artin task #22). The header indicator is further delayed and held by
+ * [rememberRaftDelayedIndicatorVisible] so a quick reload never flashes it.
  */
 internal fun activityRefreshPresentation(
-    silentRefreshing: Boolean,
+    headerRefreshing: Boolean,
     pullRefreshing: Boolean
 ): ActivityRefreshPresentation =
     ActivityRefreshPresentation(
-        headerRefreshing = raftHeaderRefreshIndicatorVisible(refreshing = silentRefreshing, pullRefreshing = pullRefreshing),
+        headerRefreshing = raftHeaderRefreshIndicatorVisible(refreshing = headerRefreshing, pullRefreshing = pullRefreshing),
         pullRefreshing = pullRefreshing
     )
 
@@ -948,8 +971,8 @@ private fun SharedActivityPanelContent(
     conversationListPending: Boolean = false,
     scrollToTopRequest: Int = 0
 ) {
-    val refreshPresentation = activityRefreshPresentation(state.silentRefreshing, state.pullRefreshing)
-    // Delayed and held so a quick silent reload never flashes; a pull hides it at once.
+    val refreshPresentation = activityRefreshPresentation(state.headerRefreshing, state.pullRefreshing)
+    // Delayed and held so a quick reload never flashes; a pull hides it at once.
     val headerRefreshIndicatorVisible =
         rememberRaftDelayedIndicatorVisible(refreshPresentation.headerRefreshing) && !refreshPresentation.pullRefreshing
     // task #232 (#2224 review blocker 1): the panel owns per-filter scroll
@@ -1448,8 +1471,9 @@ private fun SharedActivityList(
     // list (see ActivityEntryTopAnchorOwner for owner + fence). Declared before
     // the canonical-snapshot effect so activation arms it before that effect runs.
     val entryTopAnchorOwner = remember(listState) { ActivityEntryTopAnchorOwner() }
-    // The rows that landed above a scrolled reader; the pill shows only while one of
-    // them is laid out above the viewport (activityNewRowsAboveViewport).
+    // The rows that arrived (new, or with new activity) above a scrolled reader
+    // (activityPillKeysAfterChange); the pill shows only while one of them is laid out
+    // above the viewport (activityNewRowsAboveViewport).
     var newActivityAboveKeys by
         remember(presentationStore, presentationAccountId, presentationServerId, selectedFilter) {
             mutableStateOf(emptySet<String>())
@@ -1503,13 +1527,11 @@ private fun SharedActivityList(
                 "activity_keep_top_pin fromIndex=${nextItems.indexOfFirst { it.key == previousHead }} anchorTop=$anchorTop"
             )
         }
-        if (anchorTop || keptTop) {
-            if (newActivityAboveKeys.isNotEmpty()) newActivityAboveKeys = emptySet()
-            listState.requestScrollToItem(0)
-        } else {
-            val landed = activityNewTopRowKeys(previousItems.map(InboxItem::key), nextItems.map(InboxItem::key))
-            if (landed.isNotEmpty()) newActivityAboveKeys = newActivityAboveKeys + landed
-        }
+        if (anchorTop || keptTop) listState.requestScrollToItem(0)
+        // The pill counts only rows that arrived (new, or with new activity), never rows the
+        // reader scrolled past that a reorder moved above the old head.
+        val pillKeys = activityPillKeysAfterChange(newActivityAboveKeys, previousItems, nextItems, listAtTop = anchorTop || keptTop)
+        if (pillKeys != newActivityAboveKeys) newActivityAboveKeys = pillKeys
     }
     LaunchedEffect(presentedItems, active, viewportRecoveryArmed) {
         if (!active || !viewportRecoveryArmed || listState.isScrollInProgress) return@LaunchedEffect
@@ -1760,13 +1782,22 @@ private fun SharedActivityList(
             )
         }
     }
-    // Rule L swipe-to-Done: the swiped row is hidden while its undo toast is up; the Done itself is
-    // committed when the window ends (ActivityConversationSwipe.kt).
+    // Rule L swipe-to-Done, and a thread's Unfollow (raft-design #790): the row is hidden while its undo
+    // toast is up; the Done or Unfollow itself is committed when the window ends (ActivityConversationSwipe.kt).
     var swipeDoneUndo by remember { mutableStateOf(ActivitySwipeDoneUndoState()) }
+    // Threads unfollowed here while this list is shown stay out of it (web `unfollowedKeys`), though a
+    // filter that lists unfollowed threads (All, Pinned) keeps them; one followed again shows again.
+    var committedUnfollowKeys by remember(presentationOwnerIdentity) { mutableStateOf(emptySet<String>()) }
     var objectUndo by remember { mutableStateOf(ActivityObjectUndoState()) }
     val activityObjectUriHandler = LocalUriHandler.current
     val activityObjectWebBaseUrl =
         remember { RaftSharedStoreRegistry.currentOrNull()?.apiEnvironmentStore?.current()?.webUrl.orEmpty() }
+    // Workspace Artifacts: an object row opens the in-app viewer; the web page in the browser only
+    // when no page can open from here.
+    val activityArtifactOpener =
+        rememberRaftArtifactOpener { activityObjectUriHandler.openUri(artifactWebUrl(activityObjectWebBaseUrl, it)) }
+    // An Artifact row on screen: boot the in-app viewer's web page ahead of a tap.
+    RaftArtifactViewerPrewarm(enabled = presentedItemsState.value.any { it.kind == InboxItemKind.Object })
     var swipeEndUndo by remember { mutableStateOf(ActivitySwipeEndUndoState()) }
     // raft-design #785: one row's swipe buttons open at a time; a tap elsewhere, a scroll, Back, the
     // long-press menu or opening another row closes it (ActivityConversationSwipe.kt).
@@ -1774,8 +1805,8 @@ private fun SharedActivityList(
     val swipeOpenRowGeometry = remember { ActivitySwipeOpenRowGeometry() }
     val swipeDoneHiddenKey = swipeDoneUndo.hiddenKey
     val conversationListEntries =
-        remember(renderedItems, swipeDoneHiddenKey) {
-            val listed = if (swipeDoneHiddenKey == null) renderedItems else renderedItems.filterNot { item -> item.key == swipeDoneHiddenKey }
+        remember(renderedItems, swipeDoneHiddenKey, committedUnfollowKeys) {
+            val listed = activitySwipeListedItems(renderedItems, swipeDoneHiddenKey, committedUnfollowKeys)
             activityConversationListEntries(listed)
         }
     // LazyColumn key order as laid out, for the pill.
@@ -1823,9 +1854,17 @@ private fun SharedActivityList(
         if (currentItem.kind == InboxItemKind.Object && objectRow != null) {
             selectedItemKey = currentItem.key
             currentItem.activityOpenReadIntent()?.let(onIntent)
-            activityObjectUriHandler.openUri(
-                artifactWebUrl(activityObjectWebBaseUrl, ArtifactLinkTarget(objectRow.objectId, objectRow.openVersion)),
-            )
+            val target = ArtifactLinkTarget(objectRow.objectId, objectRow.openVersion)
+            val header =
+                objectRow.title?.takeIf { it.isNotBlank() }?.let { title ->
+                    RaftArtifactViewerHeader(
+                        id = objectRow.objectId,
+                        title = title,
+                        kind = ArtifactKind.fromWire(objectRow.artifactKind),
+                        version = objectRow.openVersion ?: objectRow.latestVersion,
+                    )
+                }
+            activityArtifactOpener.open(target, header, "activity_row")
             return
         }
         RaftProductEvents.activityItemOpen(currentItem.kind.productActivityItemKind())
@@ -1849,11 +1888,19 @@ private fun SharedActivityList(
         activeMenuItem = currentItem
         menuAnchor = anchor
     }
-    fun commitSwipeDone(swiped: InboxItem) {
-        val current = presentedItemsState.value.firstOrNull { it.key == swiped.key }
-        activitySwipeDoneCommitItem(swiped, current)?.let { item ->
-            RaftProductEvents.activityMark(RaftActivityMarkAction.Done)
-            latestOnIntent(SharedActivityIntent.MarkDone(item))
+    fun commitSwipeDone(pending: ActivityPendingSwipeDone) {
+        val current = presentedItemsState.value.firstOrNull { it.key == pending.item.key }
+        when (val intent = activitySwipeDeferredCommitIntent(pending, current)) {
+            null -> Unit
+            is SharedActivityIntent.MarkDone -> {
+                RaftProductEvents.activityMark(RaftActivityMarkAction.Done)
+                latestOnIntent(intent)
+            }
+            else -> {
+                // Kept out of this list from now on; the store's own projection takes over.
+                committedUnfollowKeys = committedUnfollowKeys + pending.item.key
+                latestOnIntent(intent)
+            }
         }
     }
     fun applySwipeDone(transition: ActivitySwipeDoneTransition) {
@@ -1886,6 +1933,22 @@ private fun SharedActivityList(
         swipeEndUndo = swipeEndUndo.dismiss()
         applySwipeDone(swipeDoneUndo.swipe(currentItem))
     }
+    // raft-design #790: a thread's Unfollow (swipe button or menu) takes the row out at once and is only
+    // sent when its toast ends; Undo sends nothing and shows the row again as it was.
+    fun deferThreadUnfollow(item: InboxItem) {
+        // Web #11687: the thread's unread leaves Home now, while the request waits for the toast.
+        latestOnIntent(SharedActivityIntent.ProjectThreadUnfollow(item, HomeThreadUnfollowPhase.Unfollowed))
+        swipeEndUndo = swipeEndUndo.dismiss()
+        objectUndo = objectUndo.flushUnfollow { latestOnIntent(SharedActivityIntent.UnfollowObject(it)) }
+        applySwipeDone(
+            swipeDoneUndo.swipe(
+                item,
+                ActivitySwipeDeferredAction.Unfollow,
+                listOwnerUserId = presentationAccountId.takeIf { it.isNotEmpty() },
+                listOwnerServerId = presentationServerId,
+            )
+        )
+    }
     fun runSwipeEndCommand(command: ActivitySwipeEndCommand) {
         when (command) {
             is ActivitySwipeEndCommand.Activity -> latestOnIntent(command.intent)
@@ -1897,7 +1960,8 @@ private fun SharedActivityList(
     fun swipeRowEnd(renderedItemKey: String) {
         val currentItem = committedRowItem(renderedItemKey) ?: return
         val action = currentItem.activitySwipeEndAction(channelMute?.mutedByChannelId.orEmpty()) ?: return
-        // One toast at a time: a waiting Done is committed now rather than lost.
+        if (action == ActivitySwipeEndAction.UnfollowThread) return deferThreadUnfollow(currentItem)
+        // One toast at a time: a waiting Done or Unfollow is committed now rather than lost.
         applySwipeDone(swipeDoneUndo.flush())
         runSwipeEndCommand(activitySwipeEndApplyCommand(currentItem, action))
         swipeEndUndo = swipeEndUndo.swipe(currentItem, action)
@@ -1917,6 +1981,7 @@ private fun SharedActivityList(
     fun runRowAction(item: InboxItem, actionId: String) {
         if (item.kind == InboxItemKind.Object && actionId == "done") return objectRowDone(item)
         if (item.kind == InboxItemKind.Object && actionId == "unfollow-object") return objectRowUnfollow(item)
+        if (actionId == "unfollow-thread") return deferThreadUnfollow(item)
         val write = activityRowActionWrite(item, actionId)
         write.markAction?.let(RaftProductEvents::activityMark)
         runSwipeEndCommand(write.command)
@@ -1998,6 +2063,7 @@ private fun SharedActivityList(
             isRefreshing = pullRefreshing,
             onRefresh = { onIntent(SharedActivityIntent.PullRefresh) },
             modifier = Modifier.fillMaxSize(),
+            onPullIgnored = ::logActivityPullIgnored,
         ) {
             // A touch while the list still flings only stops it: neither a row's swipe nor the filter
             // pager takes that gesture (artin, #proj-mobile:34aed863; iOS / RecyclerView behaviour).
@@ -2139,9 +2205,20 @@ private fun SharedActivityList(
         }
         swipeDoneUndo.pending?.let { pending ->
             RaftToast(
-                title = stringResource(Res.string.activity_list_marked_done),
+                title =
+                    when (pending.action) {
+                        ActivitySwipeDeferredAction.Done -> stringResource(Res.string.activity_list_marked_done)
+                        // raft-design responsive.md › Touch screens: the toast names the conversation.
+                        ActivitySwipeDeferredAction.Unfollow ->
+                            stringResource(Res.string.activity_swipe_unfollowed_thread, pending.item.activitySwipeConversationLabel())
+                    },
                 actionLabel = stringResource(Res.string.common_undo),
-                onAction = { swipeDoneUndo = swipeDoneUndo.undo(pending.token) },
+                onAction = {
+                    if (pending.action == ActivitySwipeDeferredAction.Unfollow) {
+                        latestOnIntent(SharedActivityIntent.ProjectThreadUnfollow(pending.item, HomeThreadUnfollowPhase.Restored))
+                    }
+                    swipeDoneUndo = swipeDoneUndo.undo(pending.token)
+                },
                 modifier =
                     Modifier
                         .align(Alignment.BottomCenter)
@@ -2252,7 +2329,8 @@ internal fun activityPresentationOwnerIdentity(
  * store's own acknowledgement still follows and is idempotent.
  */
 internal fun InboxItem.activityOpenReadIntent(): SharedActivityIntent? =
-    if (unreadCount > 0 && !isUnfollowedActivityThread && kind != InboxItemKind.MentionAction) {
+    // A row marked unread with no count (botiverse/slock #11795) is read on open too: that clears the mark.
+    if (showsUnread && !isUnfollowedActivityThread && kind != InboxItemKind.MentionAction) {
         SharedActivityIntent.MarkRead(this)
     } else {
         null
@@ -2280,7 +2358,7 @@ internal fun SharedHomeContentState?.activityMuteByChannelId(activityServerId: S
     val content = this as? SharedHomeContentState.Content ?: return emptyMap()
     if (activityServerId.isBlank() || content.snapshot.server.id.value != activityServerId) return emptyMap()
     return content.snapshot.channels
-        .filter { channel -> channel.joined && channel.activityMuteSupported }
+        .filter { channel -> channel.joined && (channel.activityMuteSupported || channel.activityMuted) }
         .associate { channel -> channel.channelId.value to channel.activityMuted }
 }
 
@@ -2342,7 +2420,7 @@ internal fun activityRowActionWrite(item: InboxItem, actionId: String): Activity
 internal fun activityRowActionLabel(item: InboxItem, actionId: String): String =
     when (actionId) {
         "toggle-read" ->
-            if (item.unreadCount > 0) {
+            if (item.showsUnread) {
                 stringResource(Res.string.home_action_mark_as_read)
             } else {
                 stringResource(Res.string.home_action_mark_as_unread)
@@ -2359,7 +2437,7 @@ internal fun activityRowActionLabel(item: InboxItem, actionId: String): String =
 /** The row menu item's icon (web InboxContextMenu; Read / Unread as on the swipe's button, #793). */
 internal fun activityRowActionIcon(item: InboxItem, actionId: String): RaftLucideIconName =
     when (actionId) {
-        "toggle-read" -> if (item.unreadCount > 0) RaftLucideIconName.MessageSquareCheck else RaftLucideIconName.MessageSquareDot
+        "toggle-read" -> if (item.showsUnread) RaftLucideIconName.MessageSquareCheck else RaftLucideIconName.MessageSquareDot
         "done" -> RaftLucideIconName.Check
         "follow-thread", "unmute-activity" -> RaftLucideIconName.Bell
         "unfollow-thread", "mute-activity", "unfollow-object" -> RaftLucideIconName.BellOff
@@ -2632,6 +2710,7 @@ private fun SharedActivityRefreshableStateBody(
         isRefreshing = pullRefreshing,
         onRefresh = onRefresh,
         modifier = Modifier.fillMaxSize(),
+        onPullIgnored = ::logActivityPullIgnored,
     ) {
         LazyColumn(
             state = listState,

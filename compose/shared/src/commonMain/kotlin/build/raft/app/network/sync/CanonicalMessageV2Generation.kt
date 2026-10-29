@@ -2,10 +2,14 @@ package build.raft.app.network.sync
 
 import build.raft.app.canonical.message.MessageAggregateField
 import build.raft.app.data.RaftSqlDatabase
+import build.raft.app.shared.data.local.SelectCanonicalFactInScope
+import build.raft.app.shared.data.local.SyncCursorEntity
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 sealed interface CanonicalMessageV2IncrementalDecision {
     data object Apply : CanonicalMessageV2IncrementalDecision
@@ -122,7 +126,66 @@ interface CanonicalMessageV2Store {
     /** Task #168: whether fact [factId] is stored in [scope], without decoding the scope's facts. */
     suspend fun containsFact(scope: SyncScopeKey, factId: String): Boolean =
         restore(scope).envelopes.any { it.fact.id == factId }
+
+    /**
+     * Message storage design 2026-10-27 §4.1 (Phase 1, no production caller yet): store [envelopes] and union
+     * [coverage] into the scope's segments, in ONE transaction:
+     * 1. upsert every fact with the existing merge rules (known beats unknown, one-way retraction and
+     *    action-card keys, [insertOnly] for a realtime `New`), except a fact rewritten after the request
+     *    started (stored `localRev` > [revAtRequest]: it is newer and stays). Written facts get the scope's
+     *    next revision. A stored fact the page does not carry is NEVER deleted (the server has no message
+     *    delete; a plan history cutoff is a display concern);
+     * 2. union [coverage] (`null` = loose facts only) into the normalized segments;
+     * 3. segment-aware retention (scope, then partition);
+     * 4. the header: created when missing ([threadParent] names a reply thread's parent), its window
+     *    columns mirror the head segment, and [userDriven] moves `lastUserAccessAtMs`.
+     * [revAtRequest] is [maxLocalRev] read before the request was sent.
+     */
+    suspend fun applyCoverage(
+        scope: SyncScopeKey,
+        envelopes: List<CanonicalMessageEnvelopeV2>,
+        coverage: CanonicalMessageV2Coverage?,
+        revAtRequest: Long,
+        userDriven: Boolean,
+        threadParent: CanonicalMessageV2ThreadParent? = null,
+        insertOnly: Boolean = false,
+        unknownFieldsByFactId: Map<String, Set<MessageAggregateField>> = emptyMap(),
+        /**
+         * Phase 3a: `false` skips step 3's PARTITION retention (scope retention still runs). A realtime loose
+         * writer runs it only every few writes, so one frame never scans the whole partition.
+         */
+        runPartitionRetention: Boolean = true,
+        /**
+         * Phase 2b: seqs inside [coverage] this write proves are NOT stored (page rows that could not be
+         * converted): the claim is split around them ([CanonicalMessageV2Coverage.excluding]).
+         */
+        excludedSeqs: Set<Long> = emptySet(),
+    ): CanonicalMessageV2StoreWriteResult = throw UnsupportedOperationException("applyCoverage")
+
+    /** The scope's stored segments, normalized, by lowSeq. */
+    suspend fun readSegments(scope: SyncScopeKey): List<CanonicalMessageV2Segment> = emptyList()
+
+    /**
+     * Design I7 (a `sync:resume` horizonReset: late messages were dropped): every segment of [partition] stops
+     * claiming it reached the server head (`headAtVerify`), and every header's `hasLoadedNewest` mirror with it.
+     * Ranges and facts stay. One transaction.
+     */
+    suspend fun clearHeadVerification(partition: DurablePartitionKey) {}
+
+    /**
+     * The current fact write revision of [partition] (0 = none yet). It only grows: no prune and
+     * no clear — scope or whole partition (server-access loss, revoke) — lowers or resets it. Read it before a
+     * request and pass it as revAtRequest.
+     */
+    suspend fun maxLocalRev(partition: DurablePartitionKey): Long = 0L
 }
+
+/** The parent a reply-thread scope's header names (its cursor's parent columns). */
+data class CanonicalMessageV2ThreadParent(
+    val parentScopeKind: String,
+    val parentScopeId: String,
+    val rootMessageId: String,
+)
 
 data class CanonicalMessageV2StoreWriteResult(
     val evictedScopes: Set<SyncScopeKey> = emptySet(),
@@ -144,6 +207,16 @@ sealed interface CanonicalMessageV2CommitResult {
     data object ScopeEvicted : CanonicalMessageV2CommitResult
     data class BaselineRequired(val requestRebaseline: Boolean) : CanonicalMessageV2CommitResult
 }
+
+/**
+ * Phase 2b: [CanonicalMessageV2GenerationEngine.applyCoverageReportingBaseline]'s answer. [baselineAdmitted] = the write
+ * committed AND was admitted as the scope's realtime baseline: it asked to be one and its head claim was not voided by
+ * a horizonReset since its head epoch was read. A page writer hands the canary its baseline only then.
+ */
+data class CanonicalMessageV2CoverageCommit(
+    val result: CanonicalMessageV2CommitResult,
+    val baselineAdmitted: Boolean,
+)
 
 /** Integrates the baseline gate with the disjoint V2 store while remaining unbound to production routing. */
 class CanonicalMessageV2GenerationEngine(
@@ -170,6 +243,13 @@ class CanonicalMessageV2GenerationEngine(
      * compares it to refuse a stale page (see [scopeCommitGeneration]).
      */
     private val commitGenerationByScope = mutableMapOf<SyncScopeKey, Long>()
+
+    /**
+     * Phase 3b (design I7), guarded by [stateLock]: bumped by every [clearHeadVerification] of the partition. A page
+     * writer reads [partitionHeadEpoch] before it requests its page and passes it with the write: a page fetched
+     * before a horizonReset still stores its facts and range, but never claims the server head again.
+     */
+    private val headEpochByPartition = mutableMapOf<DurablePartitionKey, Long>()
     private val partitionRevocationObservers = mutableListOf<suspend (DurablePartitionKey) -> Unit>()
     private val scopeInvalidationObservers = mutableListOf<suspend (Set<SyncScopeKey>) -> Unit>()
 
@@ -181,10 +261,13 @@ class CanonicalMessageV2GenerationEngine(
         return try {
             entry.mutex.withLock { block() }
         } finally {
-            writerRegistryMutex.withLock {
-                entry.users -= 1
-                if (entry.users == 0 && writerMutexByScope[scope] === entry) {
-                    writerMutexByScope.remove(scope)
+            // A cancelled writer must still release its entry, or the scope's registry leaks a user.
+            withContext(NonCancellable) {
+                writerRegistryMutex.withLock {
+                    entry.users -= 1
+                    if (entry.users == 0 && writerMutexByScope[scope] === entry) {
+                        writerMutexByScope.remove(scope)
+                    }
                 }
             }
         }
@@ -219,43 +302,207 @@ class CanonicalMessageV2GenerationEngine(
     suspend fun applySnapshot(
         frame: CanonicalMessageV2SnapshotFrame,
         expectedPartitionGeneration: Long? = null,
+        /** [partitionHeadEpoch] read before the page was requested (`null` = not a page writer). */
+        expectedHeadEpoch: Long? = null,
     ): CanonicalMessageV2CommitResult = withPartitionMutation(frame.scope.partition) {
         if (!isCurrentGeneration(frame.scope.partition, expectedPartitionGeneration)) {
             return@withPartitionMutation CanonicalMessageV2CommitResult.PartitionRevoked
         }
-        val write = store.applySnapshot(frame)
-        bumpScopeCommitGeneration(frame.scope)
+        val admitted = if (headClaimIsStale(frame.scope.partition, expectedHeadEpoch)) {
+            frame.copy(cursor = frame.cursor.copy(hasLoadedNewest = false))
+        } else {
+            frame
+        }
+        val write = store.applySnapshot(admitted)
+        bumpScopeCommitGeneration(admitted.scope)
         invalidateEvictedScopes(write.evictedScopes)
-        if (frame.scope in write.evictedScopes) {
+        if (admitted.scope in write.evictedScopes) {
             return@withPartitionMutation CanonicalMessageV2CommitResult.ScopeEvicted
         }
-        coordinator.onSnapshotCommitted(frame.scope)
-        synchronized(stateLock) { cursorByScope[frame.scope] = write.committedCursor ?: frame.cursor }
-        snapshotCommitObserver.onSnapshotCommitted(frame.scope)
+        coordinator.onSnapshotCommitted(admitted.scope)
+        synchronized(stateLock) { cursorByScope[admitted.scope] = write.committedCursor ?: admitted.cursor }
+        snapshotCommitObserver.onSnapshotCommitted(admitted.scope)
         CanonicalMessageV2CommitResult.Committed
     }
 
     suspend fun applyIncremental(
         frame: CanonicalMessageV2IncrementalFrame,
         expectedPartitionGeneration: Long? = null,
+        /** [partitionHeadEpoch] read before the page was requested (`null` = not a page writer). */
+        expectedHeadEpoch: Long? = null,
     ): CanonicalMessageV2CommitResult = withPartitionMutation(frame.scope.partition) {
         if (!isCurrentGeneration(frame.scope.partition, expectedPartitionGeneration)) {
             return@withPartitionMutation CanonicalMessageV2CommitResult.PartitionRevoked
         }
-        when (val decision = coordinator.onIncremental(frame.scope)) {
+        val admitted = if (headClaimIsStale(frame.scope.partition, expectedHeadEpoch)) {
+            frame.copy(cursor = frame.cursor.copy(hasLoadedNewest = false))
+        } else {
+            frame
+        }
+        when (val decision = coordinator.onIncremental(admitted.scope)) {
             CanonicalMessageV2IncrementalDecision.Apply -> {
-                val write = store.applyIncremental(frame)
-                bumpScopeCommitGeneration(frame.scope)
+                val write = store.applyIncremental(admitted)
+                bumpScopeCommitGeneration(admitted.scope)
                 invalidateEvictedScopes(write.evictedScopes)
-                if (frame.scope in write.evictedScopes) {
+                if (admitted.scope in write.evictedScopes) {
                     return@withPartitionMutation CanonicalMessageV2CommitResult.ScopeEvicted
                 }
-                synchronized(stateLock) { cursorByScope[frame.scope] = write.committedCursor ?: frame.cursor }
+                synchronized(stateLock) { cursorByScope[admitted.scope] = write.committedCursor ?: admitted.cursor }
                 CanonicalMessageV2CommitResult.Committed
             }
             is CanonicalMessageV2IncrementalDecision.Hold ->
                 CanonicalMessageV2CommitResult.BaselineRequired(decision.requestRebaseline)
         }
+    }
+
+    /**
+     * [CanonicalMessageV2Store.applyCoverage] as a partition mutation, like every other write: refused
+     * ([CanonicalMessageV2CommitResult.PartitionRevoked]) when the partition was cleared since the writer read
+     * [expectedPartitionGeneration] (required: a coverage writer always fences against a partition clear);
+     * bumps the scope's commit generation and invalidates evicted scopes. With [establishesBaseline] a
+     * committed write is the scope's realtime baseline exactly like [applySnapshot] (the latest page of an
+     * enter / catch-up): the coordinator marks the scope baselined and the snapshot observer is told. Without
+     * it the scope's baseline state is untouched (a loose or older write never makes realtime writable).
+     */
+    suspend fun applyCoverage(
+        scope: SyncScopeKey,
+        envelopes: List<CanonicalMessageEnvelopeV2>,
+        coverage: CanonicalMessageV2Coverage?,
+        revAtRequest: Long,
+        userDriven: Boolean,
+        expectedPartitionGeneration: Long,
+        threadParent: CanonicalMessageV2ThreadParent? = null,
+        insertOnly: Boolean = false,
+        unknownFieldsByFactId: Map<String, Set<MessageAggregateField>> = emptyMap(),
+        /** Phase 3a: see [CanonicalMessageV2Store.applyCoverage]. */
+        runPartitionRetention: Boolean = true,
+        /**
+         * Phase 3a: `false` for a realtime loose fact. It only adds or refreshes facts and claims nothing, so it
+         * never makes a page fetched before it stale ([scopeCommitGeneration] stays).
+         */
+        countsAsScopeCommit: Boolean = true,
+        establishesBaseline: Boolean = false,
+        /**
+         * Phase 3b: [partitionHeadEpoch] read before the page was requested (`null` = not a page writer). A
+         * horizonReset since then voids the page's head claim and with it its baseline: facts and range still land.
+         */
+        expectedHeadEpoch: Long? = null,
+        /** Phase 2b: see [CanonicalMessageV2Store.applyCoverage]. */
+        excludedSeqs: Set<Long> = emptySet(),
+    ): CanonicalMessageV2CommitResult =
+        applyCoverageReportingBaseline(
+            scope = scope,
+            envelopes = envelopes,
+            coverage = coverage,
+            revAtRequest = revAtRequest,
+            userDriven = userDriven,
+            expectedPartitionGeneration = expectedPartitionGeneration,
+            threadParent = threadParent,
+            insertOnly = insertOnly,
+            unknownFieldsByFactId = unknownFieldsByFactId,
+            runPartitionRetention = runPartitionRetention,
+            countsAsScopeCommit = countsAsScopeCommit,
+            establishesBaseline = establishesBaseline,
+            expectedHeadEpoch = expectedHeadEpoch,
+            excludedSeqs = excludedSeqs,
+        ).result
+
+    /**
+     * Phase 2b: [applyCoverage] (same parameters), also telling whether the write was admitted as the scope's realtime baseline
+     * ([CanonicalMessageV2CoverageCommit.baselineAdmitted]). A page writer holding a canary baseline commits it only
+     * then: a head claim voided by a horizonReset ([expectedHeadEpoch] stale) stores the page's facts and range, but
+     * is no baseline.
+     */
+    suspend fun applyCoverageReportingBaseline(
+        scope: SyncScopeKey,
+        envelopes: List<CanonicalMessageEnvelopeV2>,
+        coverage: CanonicalMessageV2Coverage?,
+        revAtRequest: Long,
+        userDriven: Boolean,
+        expectedPartitionGeneration: Long,
+        threadParent: CanonicalMessageV2ThreadParent? = null,
+        insertOnly: Boolean = false,
+        unknownFieldsByFactId: Map<String, Set<MessageAggregateField>> = emptyMap(),
+        runPartitionRetention: Boolean = true,
+        countsAsScopeCommit: Boolean = true,
+        establishesBaseline: Boolean = false,
+        expectedHeadEpoch: Long? = null,
+        excludedSeqs: Set<Long> = emptySet(),
+    ): CanonicalMessageV2CoverageCommit = withPartitionMutation(scope.partition) {
+        requireV2Scope(scope)
+        val headStale = headClaimIsStale(scope.partition, expectedHeadEpoch)
+        val admittedCoverage = if (headStale) coverage?.copy(headAtVerify = false) else coverage
+        val admittedBaseline = establishesBaseline && !headStale
+        // Only a page proven to reach the scope's newest message can be the realtime baseline: anything else would
+        // let realtime appends extend a claim over messages between the page and the head. A split claim
+        // (excluded rows) keeps the head only when its top piece still reaches it.
+        require(!admittedBaseline || admittedCoverage?.excluding(excludedSeqs)?.lastOrNull()?.headAtVerify == true) {
+            "a realtime baseline needs a head coverage"
+        }
+        if (!isCurrentGeneration(scope.partition, expectedPartitionGeneration)) {
+            return@withPartitionMutation CanonicalMessageV2CoverageCommit(
+                CanonicalMessageV2CommitResult.PartitionRevoked,
+                baselineAdmitted = false,
+            )
+        }
+        val write = store.applyCoverage(
+            scope, envelopes, admittedCoverage, revAtRequest, userDriven, threadParent, insertOnly, unknownFieldsByFactId,
+            runPartitionRetention, excludedSeqs,
+        )
+        if (countsAsScopeCommit) bumpScopeCommitGeneration(scope)
+        invalidateEvictedScopes(write.evictedScopes)
+        if (scope in write.evictedScopes) {
+            return@withPartitionMutation CanonicalMessageV2CoverageCommit(
+                CanonicalMessageV2CommitResult.ScopeEvicted,
+                baselineAdmitted = false,
+            )
+        }
+        if (admittedBaseline) coordinator.onSnapshotCommitted(scope)
+        write.committedCursor?.let { committed -> synchronized(stateLock) { cursorByScope[scope] = committed } }
+        if (admittedBaseline) snapshotCommitObserver.onSnapshotCommitted(scope)
+        CanonicalMessageV2CoverageCommit(CanonicalMessageV2CommitResult.Committed, baselineAdmitted = admittedBaseline)
+    }
+
+    /**
+     * [CanonicalMessageV2Store.clearHeadVerification] as a partition mutation, refused
+     * ([CanonicalMessageV2CommitResult.PartitionRevoked]) when the partition was cleared since the caller read
+     * [expectedPartitionGeneration]. The in-memory cursors of the partition lose `hasLoadedNewest` too.
+     */
+    suspend fun clearHeadVerification(
+        partition: DurablePartitionKey,
+        expectedPartitionGeneration: Long?,
+    ): CanonicalMessageV2CommitResult = withPartitionMutation(partition) {
+        if (!isCurrentGeneration(partition, expectedPartitionGeneration)) {
+            return@withPartitionMutation CanonicalMessageV2CommitResult.PartitionRevoked
+        }
+        // First: a page requested before this point may still commit after it; it must not claim the head again.
+        synchronized(stateLock) { headEpochByPartition[partition] = (headEpochByPartition[partition] ?: 0L) + 1L }
+        store.clearHeadVerification(partition)
+        synchronized(stateLock) {
+            cursorByScope.entries.filter { it.key.partition == partition }.forEach { entry ->
+                entry.setValue(entry.value.copy(hasLoadedNewest = false))
+            }
+        }
+        CanonicalMessageV2CommitResult.Committed
+    }
+
+    /** The partition's head epoch (0 until its first [clearHeadVerification] in this process). */
+    fun partitionHeadEpoch(partition: DurablePartitionKey): Long =
+        synchronized(stateLock) { headEpochByPartition[partition] ?: 0L }
+
+    private fun headClaimIsStale(partition: DurablePartitionKey, expectedHeadEpoch: Long?): Boolean =
+        expectedHeadEpoch != null && expectedHeadEpoch != partitionHeadEpoch(partition)
+
+    /** Pass-through of [CanonicalMessageV2Store.maxLocalRev]: read it before a request (revAtRequest). */
+    suspend fun storedLocalRev(partition: DurablePartitionKey): Long {
+        require(partition.consumerId == SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID)
+        return store.maxLocalRev(partition)
+    }
+
+    /** Pass-through of [CanonicalMessageV2Store.readSegments]; reads only, no coordinator effect. */
+    suspend fun storedSegments(scope: SyncScopeKey): List<CanonicalMessageV2Segment> {
+        requireV2Scope(scope)
+        return store.readSegments(scope)
     }
 
     suspend fun restore(scope: SyncScopeKey): RestoredCanonicalMessageV2Scope =
@@ -330,10 +577,12 @@ class CanonicalMessageV2GenerationEngine(
         return try {
             entry.mutex.withLock { block() }
         } finally {
-            partitionRegistryMutex.withLock {
-                entry.users -= 1
-                if (entry.users == 0 && partitionMutexByKey[partition] === entry) {
-                    partitionMutexByKey.remove(partition)
+            withContext(NonCancellable) {
+                partitionRegistryMutex.withLock {
+                    entry.users -= 1
+                    if (entry.users == 0 && partitionMutexByKey[partition] === entry) {
+                        partitionMutexByKey.remove(partition)
+                    }
                 }
             }
         }
@@ -394,6 +643,115 @@ internal class SqlDelightCanonicalMessageV2Store(
             unknownFieldsByFactId = frame.unknownFieldsByFactId,
         )
 
+    override suspend fun applyCoverage(
+        scope: SyncScopeKey,
+        envelopes: List<CanonicalMessageEnvelopeV2>,
+        coverage: CanonicalMessageV2Coverage?,
+        revAtRequest: Long,
+        userDriven: Boolean,
+        threadParent: CanonicalMessageV2ThreadParent?,
+        insertOnly: Boolean,
+        unknownFieldsByFactId: Map<String, Set<MessageAggregateField>>,
+        runPartitionRetention: Boolean,
+        excludedSeqs: Set<Long>,
+    ): CanonicalMessageV2StoreWriteResult {
+        requireV2Scope(scope)
+        require(revAtRequest >= 0L) { "revAtRequest must be a stored revision" }
+        require(envelopes.map { it.fact.id }.distinct().size == envelopes.size) { "duplicate V2 fact id in frame" }
+        envelopes.forEach { envelope -> requireEnvelopeMatchesScope(scope, envelope) }
+        requireUnknownFieldsInFrame(envelopes, unknownFieldsByFactId)
+        val evictedScopes = mutableSetOf<SyncScopeKey>()
+        var committedCursor: PersistedCursor? = null
+        database.transaction {
+            val header = selectHeader(scope)
+            val storedHeader = header?.toPersistedCursor()
+            val storedParent = storedHeader?.threadParent()
+            if (
+                storedParent != null && threadParent != null &&
+                (storedParent.parentScopeId != threadParent.parentScopeId || storedParent.rootMessageId != threadParent.rootMessageId)
+            ) {
+                // Never re-parented: a thread under another parent channel or root is another thread.
+                throw CanonicalMessageV2ScopePoisoned(scope)
+            }
+            // The same parent whose kind changed on the server (e.g. a channel made private): a user-driven page
+            // writer's server-confirmed kind wins, as a snapshot's cursor used to. A realtime (not user-driven)
+            // writer only names the kind its frame claimed — possibly stale — so it never changes the stored kind
+            // (the canary decides a reply thread's continuity from it); its fact is still stored.
+            val stored = if (userDriven && storedParent != null && threadParent != null && storedParent != threadParent) {
+                storedHeader.copy(parentScopeKind = threadParent.parentScopeKind)
+            } else {
+                storedHeader
+            }
+            val base = stored ?: PersistedCursor(
+                latestSeq = null,
+                oldestLoadedSeq = null,
+                newestLoadedSeq = null,
+                hasLoadedOldest = false,
+                hasLoadedNewest = false,
+                epoch = null,
+                parentScopeKind = threadParent?.parentScopeKind,
+                parentScopeId = threadParent?.parentScopeId,
+                rootMessageId = threadParent?.rootMessageId,
+            )
+            requireCursorMatchesScope(scope, base, envelopes, checkParentKind = userDriven)
+            // 1. Facts. A fact rewritten after the request started is newer than the page: it stays.
+            val localRev = if (envelopes.isEmpty()) 0L else nextLocalRevInsideTransaction(scope.partition)
+            envelopes.forEach { incoming ->
+                val storedRow = selectStoredFactInsideTransaction(scope, incoming.fact.id)
+                if (storedRow != null && storedRow.localRev > revAtRequest) return@forEach
+                writeFactInsideTransaction(
+                    scope = scope,
+                    incoming = incoming,
+                    storedRow = storedRow,
+                    insertOnly = insertOnly,
+                    incomingUnknown = unknownFieldsByFactId[incoming.fact.id].orEmpty(),
+                    localRev = localRev,
+                )
+            }
+            // 2. Claims, 3. scope retention.
+            val nowMs = now()
+            val before = selectSegmentsInsideTransaction(scope)
+            val unioned = coverage?.excluding(excludedSeqs).orEmpty()
+                .fold(before) { segments, piece -> CanonicalMessageV2SegmentAlgebra.union(segments, piece.toSegment(nowMs)) }
+            val segments = pruneScopeBySegmentsInsideTransaction(scope, unioned)
+            replaceSegmentsInsideTransaction(scope, before, segments)
+            // 4. Header: the window columns mirror the head segment.
+            val head = CanonicalMessageV2SegmentAlgebra.head(segments)
+            val written = base.mirroring(head, selectHeadFactBoundsInsideTransaction(scope, head)).copy(
+                latestSeq = (listOfNotNull(base.latestSeq) + envelopes.map { it.fact.seq }).maxOrNull(),
+            )
+            queries.upsertSyncCursor(
+                scopeId = scope.scopeId,
+                environmentId = scope.environmentId,
+                serverId = scope.serverId,
+                principalId = scope.principalId,
+                consumerId = scope.consumerId,
+                scopeKind = scope.scopeKind,
+                latestSeq = written.latestSeq,
+                oldestLoadedSeq = written.oldestLoadedSeq,
+                newestLoadedSeq = written.newestLoadedSeq,
+                hasLoadedOldest = if (written.hasLoadedOldest) 1L else 0L,
+                hasLoadedNewest = if (written.hasLoadedNewest) 1L else 0L,
+                updatedAtMs = nowMs,
+                epoch = written.epoch,
+                parentScopeKind = written.parentScopeKind,
+                parentScopeId = written.parentScopeId,
+                rootMessageId = written.rootMessageId,
+                lastUserAccessAtMs = if (userDriven) nowMs else header?.lastUserAccessAtMs,
+            )
+            if (userDriven) touchParentScopeInsideTransaction(scope, written)
+            if (runPartitionRetention) evictedScopes += prunePartitionInsideTransaction(scope.partition)
+            committedCursor = written
+            if (faultHook.shouldKillAt(PersistFaultPoint.BeforeCommit)) {
+                throw PersistKilled(PersistFaultPoint.BeforeCommit)
+            }
+        }
+        if (faultHook.shouldKillAt(PersistFaultPoint.AfterCommit)) {
+            throw PersistKilled(PersistFaultPoint.AfterCommit)
+        }
+        return CanonicalMessageV2StoreWriteResult(evictedScopes, committedCursor)
+    }
+
     private suspend fun applyFrame(
         scope: SyncScopeKey,
         envelopes: List<CanonicalMessageEnvelopeV2>,
@@ -407,19 +765,16 @@ internal class SqlDelightCanonicalMessageV2Store(
         require(envelopes.map { it.fact.id }.distinct().size == envelopes.size) { "duplicate V2 fact id in frame" }
         envelopes.forEach { envelope -> requireEnvelopeMatchesScope(scope, envelope) }
         requireCursorMatchesScope(scope, cursor, envelopes)
-        require(
-            unknownFieldsByFactId.all { (id, fields) ->
-                fields.isNotEmpty() && CANONICAL_MESSAGE_V2_ALLOWED_UNKNOWN_FRAME_AGGREGATES.containsAll(fields) &&
-                    envelopes.any { it.fact.id == id }
-            },
-        ) { "unknown V2 aggregates outside the allowed set or the frame" }
+        requireUnknownFieldsInFrame(envelopes, unknownFieldsByFactId)
         val evictedScopes = mutableSetOf<SyncScopeKey>()
         var committedCursor: PersistedCursor? = null
         database.transaction {
             // Read before anything is written in this transaction (task #168 retention rank).
-            val keptUpdatedAtMs = if (preserveUpdatedAt) selectCursorUpdatedAtMs(scope) else null
+            val storedHeader = if (preserveUpdatedAt) selectHeader(scope) else null
+            val keptUpdatedAtMs = storedHeader?.updatedAtMs
             // Task #14a: the stored facts of the frame's ids, read before a snapshot clears the scope.
             val storedBefore = envelopes.associate { it.fact.id to selectStoredFactInsideTransaction(scope, it.fact.id) }
+            val localRev = if (envelopes.isEmpty()) 0L else nextLocalRevInsideTransaction(scope.partition)
             if (rebaseline) {
                 queries.clearUnpinnedCanonicalFactsForScope(
                     environmentId = scope.environmentId,
@@ -431,100 +786,21 @@ internal class SqlDelightCanonicalMessageV2Store(
                 )
             }
             envelopes.forEach { incoming ->
-                val incomingUnknown = unknownFieldsByFactId[incoming.fact.id].orEmpty()
-                val storedRow = storedBefore[incoming.fact.id]
-                val storedUnknown = storedRow?.let { decodeUnknownFields(scope, incoming.fact.id, it.unknownFields) }.orEmpty()
-                // Only a fact one side does not fully know needs the stored bytes.
-                val stored = storedRow?.takeIf { storedUnknown.isNotEmpty() || incomingUnknown.isNotEmpty() }?.let {
-                    StoredFact(decodeStoredFact(scope, incoming.fact.id, it.canonicalFactJson), storedUnknown)
-                }
-                val (merged, unknown) = when {
-                    stored == null -> incoming to incomingUnknown
-                    // The stored fact stays as it is; only what it did not know is filled in.
-                    insertOnly -> stored.envelope.withAggregatesFrom(incoming, stored.unknown - incomingUnknown) to
-                        (stored.unknown intersect incomingUnknown)
-                    // The frame replaces the fact, except for what it does not know and the stored fact does.
-                    else -> incoming.withAggregatesFrom(stored.envelope, incomingUnknown - stored.unknown) to
-                        (incomingUnknown intersect stored.unknown)
-                }
-                // RFC 077: retraction is one-way. A frame without `deletedAt` for a fact stored as
-                // retracted is an older copy: it keeps the retraction and never brings back the words,
-                // attachments or reactions (web `keepDelegationFacts`). The key is only in a retracted
-                // fact's bytes, so a live fact is never decoded for this.
-                val storedRetraction = storedRow
-                    ?.takeIf { merged.fact.deletedAt == null && it.canonicalFactJson.contains(RETRACTION_BYTES_MARKER) }
-                    ?.let { stored?.envelope ?: decodeStoredFact(scope, incoming.fact.id, it.canonicalFactJson) }
-                    ?.fact?.takeIf { it.deletedAt != null }
-                // Manifest v8: the card's optional keys are one-way. A frame whose card lacks one is an
-                // older/narrower copy: the stored value stays, and confirmationVersion never goes down.
-                // The keys are only in the bytes of a card that has them, so other facts are never decoded.
-                val storedCard = storedRow
-                    ?.takeIf {
-                        merged.fact.actionMetadata is CanonicalActionMetadataV2.ActionCard &&
-                            ACTION_CARD_ONE_WAY_BYTES_MARKERS.any(it.canonicalFactJson::contains)
-                    }
-                    ?.let { stored?.envelope ?: decodeStoredFact(scope, incoming.fact.id, it.canonicalFactJson) }
-                    ?.fact?.actionMetadata as? CanonicalActionMetadataV2.ActionCard
-                val envelope = merged.withStoredRetraction(storedRetraction).withStoredActionCardKeys(storedCard)
-                val bytes = encodeCanonicalMessageV2(envelope, scope.serverId)
-                queries.insertCanonicalFactIfAbsent(
-                    environmentId = scope.environmentId,
-                    serverId = scope.serverId,
-                    principalId = scope.principalId,
-                    consumerId = scope.consumerId,
-                    id = envelope.fact.id,
-                    channelId = scope.scopeId,
-                    scopeKind = scope.scopeKind,
-                    seq = envelope.fact.seq,
-                    createdAt = envelope.fact.createdAt,
-                    canonicalFactJson = bytes,
+                writeFactInsideTransaction(
+                    scope = scope,
+                    incoming = incoming,
+                    storedRow = storedBefore[incoming.fact.id],
+                    insertOnly = insertOnly,
+                    incomingUnknown = unknownFieldsByFactId[incoming.fact.id].orEmpty(),
+                    localRev = localRev,
                 )
-                // A snapshot replaces (its scope was cleared above), a page refreshes; an insert-only
-                // frame leaves an already stored fact exactly as it is, unless it completes a partial one.
-                if (!insertOnly || stored != null) queries.updateCanonicalFact(
-                    seq = envelope.fact.seq,
-                    createdAt = envelope.fact.createdAt,
-                    canonicalFactJson = bytes,
-                    id = envelope.fact.id,
-                    environmentId = scope.environmentId,
-                    serverId = scope.serverId,
-                    principalId = scope.principalId,
-                    consumerId = scope.consumerId,
-                    scopeKind = scope.scopeKind,
-                    channelId = scope.scopeId,
-                )
-                queries.setCanonicalFactUnknownFields(
-                    unknownFields = encodeUnknownFields(unknown),
-                    id = envelope.fact.id,
-                    environmentId = scope.environmentId,
-                    serverId = scope.serverId,
-                    principalId = scope.principalId,
-                    consumerId = scope.consumerId,
-                    scopeKind = scope.scopeKind,
-                    channelId = scope.scopeId,
-                )
-                if (queries.countCanonicalFactInScope(
-                        id = envelope.fact.id,
-                        environmentId = scope.environmentId,
-                        serverId = scope.serverId,
-                        principalId = scope.principalId,
-                        consumerId = scope.consumerId,
-                        scopeKind = scope.scopeKind,
-                        channelId = scope.scopeId,
-                    ).executeAsOne() != 1L
-                ) throw CanonicalMessageV2ScopePoisoned(scope, envelope.fact.id)
-                val completed = CANONICAL_MESSAGE_V2_ALLOWED_UNKNOWN_FRAME_AGGREGATES.filter { it in storedUnknown && it !in unknown }
-                if (completed.isNotEmpty()) {
-                    factLogger(
-                        "canonical_v2_partial_completed server=${scope.serverId} scope=${scope.scopeId} " +
-                            "scopeKind=${scope.scopeKind} msg=${envelope.fact.id} fields=${completed.joinToString(",")}",
-                    )
-                }
             }
             // The per-scope cap runs before the cursor is written, so the cursor that lands on disk
             // never claims a window edge the cap just pruned away.
-            committedCursor = pruneScopeInsideTransaction(scope, cursor)
+            val prune = pruneScopeInsideTransaction(scope, cursor)
+            committedCursor = prune?.cursor
             val written = committedCursor ?: cursor
+            val updatedAtMs = keptUpdatedAtMs ?: now()
             queries.upsertSyncCursor(
                 scopeId = scope.scopeId,
                 environmentId = scope.environmentId,
@@ -537,12 +813,17 @@ internal class SqlDelightCanonicalMessageV2Store(
                 newestLoadedSeq = written.newestLoadedSeq,
                 hasLoadedOldest = if (written.hasLoadedOldest) 1L else 0L,
                 hasLoadedNewest = if (written.hasLoadedNewest) 1L else 0L,
-                updatedAtMs = keptUpdatedAtMs ?: now(),
+                updatedAtMs = updatedAtMs,
                 epoch = written.epoch,
                 parentScopeKind = written.parentScopeKind,
                 parentScopeId = written.parentScopeId,
                 rootMessageId = written.rootMessageId,
+                // A legacy write is user-driven unless it keeps the stored rank (realtime): then the stored
+                // access stays too. Until v10 both columns are the same value, so retention ranks as before.
+                lastUserAccessAtMs = if (storedHeader != null) storedHeader.lastUserAccessAtMs else updatedAtMs,
             )
+            // Segments stay consistent with the legacy window (Phase 1): the window is the head segment.
+            syncLegacyWindowSegmentsInsideTransaction(scope, written, rebaseline, prune?.prunedThroughSeq)
             touchParentScopeInsideTransaction(scope, cursor)
             evictedScopes += prunePartitionInsideTransaction(scope.partition)
             if (faultHook.shouldKillAt(PersistFaultPoint.BeforeCommit)) {
@@ -553,6 +834,110 @@ internal class SqlDelightCanonicalMessageV2Store(
             throw PersistKilled(PersistFaultPoint.AfterCommit)
         }
         return CanonicalMessageV2StoreWriteResult(evictedScopes, committedCursor)
+    }
+
+    /**
+     * One fact of a write, merged with its stored copy ([storedRow], read before the write) under the
+     * task #14a / RFC 077 / manifest v8 rules. A fact this write inserts or rewrites gets [localRev]; an
+     * insert-only `New` that leaves the stored fact as it is keeps the stored revision.
+     */
+    private fun writeFactInsideTransaction(
+        scope: SyncScopeKey,
+        incoming: CanonicalMessageEnvelopeV2,
+        storedRow: SelectCanonicalFactInScope?,
+        insertOnly: Boolean,
+        incomingUnknown: Set<MessageAggregateField>,
+        localRev: Long,
+    ) {
+        val storedUnknown = storedRow?.let { decodeUnknownFields(scope, incoming.fact.id, it.unknownFields) }.orEmpty()
+        // Only a fact one side does not fully know needs the stored bytes.
+        val stored = storedRow?.takeIf { storedUnknown.isNotEmpty() || incomingUnknown.isNotEmpty() }?.let {
+            StoredFact(decodeStoredFact(scope, incoming.fact.id, it.canonicalFactJson), storedUnknown)
+        }
+        val (merged, unknown) = when {
+            stored == null -> incoming to incomingUnknown
+            // The stored fact stays as it is; only what it did not know is filled in.
+            insertOnly -> stored.envelope.withAggregatesFrom(incoming, stored.unknown - incomingUnknown) to
+                (stored.unknown intersect incomingUnknown)
+            // The frame replaces the fact, except for what it does not know and the stored fact does.
+            else -> incoming.withAggregatesFrom(stored.envelope, incomingUnknown - stored.unknown) to
+                (incomingUnknown intersect stored.unknown)
+        }
+        // RFC 077: retraction is one-way. A frame without `deletedAt` for a fact stored as
+        // retracted is an older copy: it keeps the retraction and never brings back the words,
+        // attachments or reactions (web `keepDelegationFacts`). The key is only in a retracted
+        // fact's bytes, so a live fact is never decoded for this.
+        val storedRetraction = storedRow
+            ?.takeIf { merged.fact.deletedAt == null && it.canonicalFactJson.contains(RETRACTION_BYTES_MARKER) }
+            ?.let { stored?.envelope ?: decodeStoredFact(scope, incoming.fact.id, it.canonicalFactJson) }
+            ?.fact?.takeIf { it.deletedAt != null }
+        // Manifest v8: the card's optional keys are one-way. A frame whose card lacks one is an
+        // older/narrower copy: the stored value stays, and confirmationVersion never goes down.
+        // The keys are only in the bytes of a card that has them, so other facts are never decoded.
+        val storedCard = storedRow
+            ?.takeIf {
+                merged.fact.actionMetadata is CanonicalActionMetadataV2.ActionCard &&
+                    ACTION_CARD_ONE_WAY_BYTES_MARKERS.any(it.canonicalFactJson::contains)
+            }
+            ?.let { stored?.envelope ?: decodeStoredFact(scope, incoming.fact.id, it.canonicalFactJson) }
+            ?.fact?.actionMetadata as? CanonicalActionMetadataV2.ActionCard
+        val envelope = merged.withStoredRetraction(storedRetraction).withStoredActionCardKeys(storedCard)
+        val bytes = encodeCanonicalMessageV2(envelope, scope.serverId)
+        database.queries.insertCanonicalFactIfAbsent(
+            environmentId = scope.environmentId,
+            serverId = scope.serverId,
+            principalId = scope.principalId,
+            consumerId = scope.consumerId,
+            id = envelope.fact.id,
+            channelId = scope.scopeId,
+            scopeKind = scope.scopeKind,
+            seq = envelope.fact.seq,
+            createdAt = envelope.fact.createdAt,
+            canonicalFactJson = bytes,
+        )
+        // A snapshot replaces (its scope was cleared above), a page refreshes; an insert-only
+        // frame leaves an already stored fact exactly as it is, unless it completes a partial one.
+        val rewritten = !insertOnly || stored != null
+        if (rewritten) database.queries.updateCanonicalFact(
+            seq = envelope.fact.seq,
+            createdAt = envelope.fact.createdAt,
+            canonicalFactJson = bytes,
+            id = envelope.fact.id,
+            environmentId = scope.environmentId,
+            serverId = scope.serverId,
+            principalId = scope.principalId,
+            consumerId = scope.consumerId,
+            scopeKind = scope.scopeKind,
+            channelId = scope.scopeId,
+        )
+        database.queries.setCanonicalFactUnknownFields(
+            unknownFields = encodeUnknownFields(unknown),
+            localRev = if (storedRow == null || rewritten) localRev else storedRow.localRev,
+            id = envelope.fact.id,
+            environmentId = scope.environmentId,
+            serverId = scope.serverId,
+            principalId = scope.principalId,
+            consumerId = scope.consumerId,
+            scopeKind = scope.scopeKind,
+            channelId = scope.scopeId,
+        )
+        if (database.queries.countCanonicalFactInScope(
+                id = envelope.fact.id,
+                environmentId = scope.environmentId,
+                serverId = scope.serverId,
+                principalId = scope.principalId,
+                consumerId = scope.consumerId,
+                scopeKind = scope.scopeKind,
+                channelId = scope.scopeId,
+            ).executeAsOne() != 1L
+        ) throw CanonicalMessageV2ScopePoisoned(scope, envelope.fact.id)
+        val completed = CANONICAL_MESSAGE_V2_ALLOWED_UNKNOWN_FRAME_AGGREGATES.filter { it in storedUnknown && it !in unknown }
+        if (completed.isNotEmpty()) {
+            factLogger(
+                "canonical_v2_partial_completed server=${scope.serverId} scope=${scope.scopeId} " +
+                    "scopeKind=${scope.scopeKind} msg=${envelope.fact.id} fields=${completed.joinToString(",")}",
+            )
+        }
     }
 
     override suspend fun restore(scope: SyncScopeKey): RestoredCanonicalMessageV2Scope {
@@ -636,7 +1021,7 @@ internal class SqlDelightCanonicalMessageV2Store(
         ).executeAsOne() == 1L
     }
 
-    private fun selectCursorUpdatedAtMs(scope: SyncScopeKey): Long? =
+    private fun selectHeader(scope: SyncScopeKey): SyncCursorEntity? =
         database.queries.selectSyncCursor(
             environmentId = scope.environmentId,
             serverId = scope.serverId,
@@ -644,29 +1029,155 @@ internal class SqlDelightCanonicalMessageV2Store(
             consumerId = scope.consumerId,
             scopeKind = scope.scopeKind,
             scopeId = scope.scopeId,
-        ).executeAsOneOrNull()?.updatedAtMs
+        ).executeAsOneOrNull()
 
-    private fun selectCursor(scope: SyncScopeKey): PersistedCursor? =
-        database.queries.selectSyncCursor(
+    private fun selectCursor(scope: SyncScopeKey): PersistedCursor? = selectHeader(scope)?.toPersistedCursor()
+
+    private fun SyncCursorEntity.toPersistedCursor(): PersistedCursor =
+        PersistedCursor(
+            latestSeq = latestSeq,
+            oldestLoadedSeq = oldestLoadedSeq,
+            newestLoadedSeq = newestLoadedSeq,
+            hasLoadedOldest = hasLoadedOldest != 0L,
+            hasLoadedNewest = hasLoadedNewest != 0L,
+            epoch = epoch,
+            parentScopeKind = parentScopeKind,
+            parentScopeId = parentScopeId,
+            rootMessageId = rootMessageId,
+        )
+
+    private fun selectLocalRevInsideTransaction(partition: DurablePartitionKey): Long =
+        database.queries.selectLocalRev(
+            environmentId = partition.environmentId,
+            serverId = partition.serverId,
+            principalId = partition.principalId,
+            consumerId = partition.consumerId,
+        ).executeAsOne()
+
+    /** The partition's next write revision, stored at once (inside the writing transaction). */
+    private fun nextLocalRevInsideTransaction(partition: DurablePartitionKey): Long {
+        val next = selectLocalRevInsideTransaction(partition) + 1L
+        database.queries.setLocalRev(
+            environmentId = partition.environmentId,
+            serverId = partition.serverId,
+            principalId = partition.principalId,
+            consumerId = partition.consumerId,
+            localRev = next,
+        )
+        return next
+    }
+
+    /** The head mirror's edges: the oldest / newest stored fact seq inside [head]'s range. */
+    private fun selectHeadFactBoundsInsideTransaction(scope: SyncScopeKey, head: CanonicalMessageV2Segment?): Pair<Long, Long>? {
+        head ?: return null
+        val bounds = database.queries.selectFactSeqBoundsInRange(
+            environmentId = scope.environmentId,
+            serverId = scope.serverId,
+            principalId = scope.principalId,
+            consumerId = scope.consumerId,
+            scopeKind = scope.scopeKind,
+            channelId = scope.scopeId,
+            seq = head.effectiveLowSeq,
+            seq_ = head.highSeq,
+        ).executeAsOne()
+        val oldest = bounds.oldestSeq ?: return null
+        val newest = bounds.newestSeq ?: return null
+        return oldest to newest
+    }
+
+    override suspend fun maxLocalRev(partition: DurablePartitionKey): Long {
+        require(partition.consumerId == SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID)
+        return selectLocalRevInsideTransaction(partition)
+    }
+
+    override suspend fun readSegments(scope: SyncScopeKey): List<CanonicalMessageV2Segment> {
+        requireV2Scope(scope)
+        return selectSegmentsInsideTransaction(scope)
+    }
+
+    private fun selectSegmentsInsideTransaction(scope: SyncScopeKey): List<CanonicalMessageV2Segment> =
+        database.queries.selectSegmentsForScope(
             environmentId = scope.environmentId,
             serverId = scope.serverId,
             principalId = scope.principalId,
             consumerId = scope.consumerId,
             scopeKind = scope.scopeKind,
             scopeId = scope.scopeId,
-        ).executeAsOneOrNull()?.let {
-            PersistedCursor(
-                latestSeq = it.latestSeq,
-                oldestLoadedSeq = it.oldestLoadedSeq,
-                newestLoadedSeq = it.newestLoadedSeq,
-                hasLoadedOldest = it.hasLoadedOldest != 0L,
-                hasLoadedNewest = it.hasLoadedNewest != 0L,
-                epoch = it.epoch,
-                parentScopeKind = it.parentScopeKind,
-                parentScopeId = it.parentScopeId,
-                rootMessageId = it.rootMessageId,
+        ).executeAsList().map { row ->
+            val source = CanonicalMessageV2SegmentSource.fromWire(row.source)
+            if (source == null || row.lowSeq < 0L || row.lowSeq > row.highSeq) throw CanonicalMessageV2ScopePoisoned(scope)
+            CanonicalMessageV2Segment(
+                lowSeq = row.lowSeq,
+                highSeq = row.highSeq,
+                reachesOldest = row.reachesOldest != 0L,
+                headAtVerify = row.headAtVerify != 0L,
+                verifiedAtMs = row.verifiedAtMs,
+                source = source,
+            )
+        }.also { if (!CanonicalMessageV2SegmentAlgebra.isNormalized(it)) throw CanonicalMessageV2ScopePoisoned(scope) }
+
+    /** Writes [after] over [before] (both the scope's normalized segments): only the rows that differ. */
+    private fun replaceSegmentsInsideTransaction(
+        scope: SyncScopeKey,
+        before: List<CanonicalMessageV2Segment>,
+        after: List<CanonicalMessageV2Segment>,
+    ) {
+        require(CanonicalMessageV2SegmentAlgebra.isNormalized(after)) { "segments are not normalized" }
+        val afterLows = after.map { it.lowSeq }.toSet()
+        before.filter { it.lowSeq !in afterLows }.forEach { gone ->
+            database.queries.deleteSegment(
+                environmentId = scope.environmentId,
+                serverId = scope.serverId,
+                principalId = scope.principalId,
+                consumerId = scope.consumerId,
+                scopeKind = scope.scopeKind,
+                scopeId = scope.scopeId,
+                lowSeq = gone.lowSeq,
             )
         }
+        (after - before.toSet()).forEach { segment ->
+            database.queries.upsertSegment(
+                environmentId = scope.environmentId,
+                serverId = scope.serverId,
+                principalId = scope.principalId,
+                consumerId = scope.consumerId,
+                scopeKind = scope.scopeKind,
+                scopeId = scope.scopeId,
+                lowSeq = segment.lowSeq,
+                highSeq = segment.highSeq,
+                reachesOldest = if (segment.reachesOldest) 1L else 0L,
+                headAtVerify = if (segment.headAtVerify) 1L else 0L,
+                verifiedAtMs = segment.verifiedAtMs,
+                source = segment.source.wire,
+            )
+        }
+    }
+
+    /**
+     * Phase 1: the legacy writers own one window, and it is the head segment. After a legacy write the
+     * scope's segments are: those strictly below the window that do not touch it (none before Phase 2), then
+     * the window itself. A snapshot cleared the scope's facts, so it drops every other segment; the legacy
+     * cap's pruning trims every segment below the pruned edge. An unchanged window keeps its stored row.
+     */
+    private fun syncLegacyWindowSegmentsInsideTransaction(
+        scope: SyncScopeKey,
+        written: PersistedCursor,
+        rebaseline: Boolean,
+        prunedThroughSeq: Long?,
+    ) {
+        val before = selectSegmentsInsideTransaction(scope)
+        var segments = if (rebaseline) emptyList() else before
+        if (prunedThroughSeq != null) segments = CanonicalMessageV2SegmentAlgebra.trimBelow(segments, prunedThroughSeq)
+        val window = written.legacyWindowSegment(verifiedAtMs = now())
+        segments = if (window == null) {
+            emptyList()
+        } else {
+            val unchanged = segments.firstOrNull { it.sameRangeAs(window) }
+            val below = segments.filter { it.highSeq + 1L < window.effectiveLowSeq }
+            (below + (unchanged ?: window)).sortedBy { it.lowSeq }
+        }
+        replaceSegmentsInsideTransaction(scope, before, segments)
+    }
 
     override suspend fun clearScope(scope: SyncScopeKey): Set<SyncScopeKey> {
         requireV2Scope(scope)
@@ -698,6 +1209,32 @@ internal class SqlDelightCanonicalMessageV2Store(
                 principalId = partition.principalId,
                 consumerId = partition.consumerId,
             )
+            queries.clearSegmentsForPartition(
+                environmentId = partition.environmentId,
+                serverId = partition.serverId,
+                principalId = partition.principalId,
+                consumerId = partition.consumerId,
+            )
+            // The write revision is kept on purpose: a request that read it before this clear must never
+            // overwrite a fact written after it, so the counter never restarts.
+        }
+    }
+
+    override suspend fun clearHeadVerification(partition: DurablePartitionKey) {
+        require(partition.consumerId == SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID)
+        database.transaction {
+            queries.clearHeadAtVerifyForPartition(
+                environmentId = partition.environmentId,
+                serverId = partition.serverId,
+                principalId = partition.principalId,
+                consumerId = partition.consumerId,
+            )
+            queries.clearHasLoadedNewestForPartition(
+                environmentId = partition.environmentId,
+                serverId = partition.serverId,
+                principalId = partition.principalId,
+                consumerId = partition.consumerId,
+            )
         }
     }
 
@@ -718,6 +1255,7 @@ internal class SqlDelightCanonicalMessageV2Store(
             consumerId = SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID,
             consumerId_ = SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID,
             consumerId__ = SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID,
+            consumerId___ = SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID,
         ).executeAsList().map { row ->
             DurablePartitionKey(
                 environmentId = row.environmentId,
@@ -734,7 +1272,87 @@ internal class SqlDelightCanonicalMessageV2Store(
      * rule): its oldest edge is the oldest fact newer than everything pruned, and `hasLoadedOldest` is
      * cleared. `null` = nothing was pruned; commit [cursor] as it is.
      */
-    private fun pruneScopeInsideTransaction(scope: SyncScopeKey, cursor: PersistedCursor): PersistedCursor? {
+    /**
+     * Segment-aware per-scope retention (design §6; applyCoverage). Pinned thread roots never count and are
+     * never deleted. In order:
+     * 1. more than [CanonicalMessageV2RetentionPolicy.maxSegmentsPerScope] segments: the least recently
+     *    verified non-head segments go, with their facts;
+     * 2. over [CanonicalMessageV2RetentionPolicy.maxFactsPerScope] facts: the oldest loose facts beyond
+     *    [CanonicalMessageV2RetentionPolicy.looseFactAllowancePerScope];
+     * 3. then whole non-head segments, least recently verified first;
+     * 4. then the head's oldest facts: the head then starts above them and no longer reaches the oldest.
+     * Returns the segments to store.
+     */
+    private fun pruneScopeBySegmentsInsideTransaction(
+        scope: SyncScopeKey,
+        segments: List<CanonicalMessageV2Segment>,
+    ): List<CanonicalMessageV2Segment> {
+        val count = database.queries.countUnpinnedFactsInScope(
+            environmentId = scope.environmentId,
+            serverId = scope.serverId,
+            principalId = scope.principalId,
+            consumerId = scope.consumerId,
+            scopeKind = scope.scopeKind,
+            channelId = scope.scopeId,
+        ).executeAsOne()
+        if (count <= retention.maxFactsPerScope && segments.size <= retention.maxSegmentsPerScope) return segments
+        val facts = database.queries.selectUnpinnedFactSeqsInScope(
+            environmentId = scope.environmentId,
+            serverId = scope.serverId,
+            principalId = scope.principalId,
+            consumerId = scope.consumerId,
+            scopeKind = scope.scopeKind,
+            channelId = scope.scopeId,
+        ).executeAsList().map { it.id to it.seq }.toMutableList()
+        fun delete(victims: List<Pair<String, Long>>) {
+            victims.forEach { (id, _) ->
+                database.queries.deleteCanonicalFactInScope(
+                    id = id,
+                    environmentId = scope.environmentId,
+                    serverId = scope.serverId,
+                    principalId = scope.principalId,
+                    consumerId = scope.consumerId,
+                    scopeKind = scope.scopeKind,
+                    channelId = scope.scopeId,
+                )
+            }
+            facts.removeAll(victims.toSet())
+        }
+        val head = CanonicalMessageV2SegmentAlgebra.head(segments)
+        val live = segments.toMutableList()
+        fun leastRecentlyVerified(): CanonicalMessageV2Segment? = live
+            .filter { it != head }
+            .minWithOrNull(compareBy<CanonicalMessageV2Segment> { it.verifiedAtMs }.thenBy { it.lowSeq })
+        fun dropSegment(victim: CanonicalMessageV2Segment) {
+            delete(facts.filter { (_, seq) -> seq in victim })
+            live.remove(victim)
+        }
+        // 1. segment cap
+        while (live.size > retention.maxSegmentsPerScope) dropSegment(leastRecentlyVerified() ?: break)
+        // 2. loose facts beyond the allowance, oldest first
+        val looseExcess = facts.filter { (_, seq) -> CanonicalMessageV2SegmentAlgebra.memberOf(live, seq) == null }
+            .let { loose -> loose.take((loose.size - retention.looseFactAllowancePerScope).coerceAtLeast(0)) }
+        delete(looseExcess.take((facts.size - retention.maxFactsPerScope).coerceAtLeast(0)))
+        // 3. whole non-head segments
+        while (facts.size > retention.maxFactsPerScope) dropSegment(leastRecentlyVerified() ?: break)
+        // 4. the head's low end
+        val over = facts.size - retention.maxFactsPerScope
+        if (over > 0 && head != null) {
+            val trimmed = facts.filter { (_, seq) -> seq in head }.take(over)
+            if (trimmed.isNotEmpty()) {
+                delete(trimmed)
+                val cut = trimmed.maxOf { it.second }
+                val trimmedHead = CanonicalMessageV2SegmentAlgebra.trimBelow(listOf(head), cut)
+                live.remove(head)
+                live += trimmedHead
+            }
+        }
+        return live.sortedBy { it.lowSeq }
+    }
+
+    private class LegacyPrune(val cursor: PersistedCursor, val prunedThroughSeq: Long)
+
+    private fun pruneScopeInsideTransaction(scope: SyncScopeKey, cursor: PersistedCursor): LegacyPrune? {
         val pruned = database.queries.selectCanonicalFactIdsBeyondLimit(
             environmentId = scope.environmentId,
             serverId = scope.serverId,
@@ -767,7 +1385,7 @@ internal class SqlDelightCanonicalMessageV2Store(
             seq = newestPruned,
         ).executeAsOne().oldestSeq
         val oldest = listOfNotNull(cursor.oldestLoadedSeq, survivingOldest).maxOrNull()
-        return cursor.copy(oldestLoadedSeq = oldest, hasLoadedOldest = false)
+        return LegacyPrune(cursor.copy(oldestLoadedSeq = oldest, hasLoadedOldest = false), newestPruned)
     }
 
     /**
@@ -779,8 +1397,8 @@ internal class SqlDelightCanonicalMessageV2Store(
         if (scope.scopeKind != THREAD_SCOPE_KIND) return
         val parentKind = cursor.parentScopeKind ?: return
         val parentId = cursor.parentScopeId ?: return
-        database.queries.touchSyncCursorUpdatedAt(
-            updatedAtMs = now(),
+        database.queries.touchSyncCursorUserAccess(
+            atMs = now(),
             environmentId = scope.environmentId,
             serverId = scope.serverId,
             principalId = scope.principalId,
@@ -792,8 +1410,11 @@ internal class SqlDelightCanonicalMessageV2Store(
 
     /**
      * Partition retention (task #168 step 3: thread scopes have their own budget). Scopes are ranked
-     * by `updatedAtMs`, newest first, and evicted in this order:
-     * 1. `ttl`: any scope not written within [CanonicalMessageV2RetentionPolicy.scopeTtlMs];
+     * most recently used first: by `lastUserAccessAtMs` (schema v10; a never-opened scope ranks last), then
+     * `updatedAtMs`. Every legacy write sets both to the same value, so legacy scopes rank exactly as they
+     * did by `updatedAtMs`. Evicted in this order:
+     * 1. `ttl`: any scope not used (opened, or for a never-opened scope written) within
+     *    [CanonicalMessageV2RetentionPolicy.scopeTtlMs];
      * 2. `thread_cap`: thread scopes beyond [CanonicalMessageV2RetentionPolicy.maxThreadScopesPerPartition],
      *    least recently written first — never a channel to make room for a thread;
      * 3. `fact_cap` / `byte_cap`: while the partition is over a cap, the least recently written
@@ -815,10 +1436,11 @@ internal class SqlDelightCanonicalMessageV2Store(
             ScopeRetentionStats(
                 scope = SyncScopeKey(partition = partition, scopeId = row.scopeId, scopeKind = row.scopeKind),
                 updatedAtMs = row.updatedAtMs,
+                lastUserAccessAtMs = row.lastUserAccessAtMs,
                 factCount = row.factCount,
                 byteCount = row.byteCount,
             )
-        }
+        }.withDependentAccessRank()
         fun evict(stat: ScopeRetentionStats, reason: String) {
             if (stat.scope in evictedScopes) return
             logEviction(stat.scope, reason)
@@ -828,7 +1450,7 @@ internal class SqlDelightCanonicalMessageV2Store(
         }
 
         // 1. ttl
-        stats.filter { it.updatedAtMs < cutoff }.forEach { evict(it, "ttl") }
+        stats.filter { (it.lastUserAccessAtMs ?: it.updatedAtMs) < cutoff }.forEach { evict(it, "ttl") }
         // 2. thread cap (stats are newest first)
         val threads = stats.filter { it.scope.scopeKind == THREAD_SCOPE_KIND && it.scope !in evictedScopes }
         threads.drop(retention.maxThreadScopesPerPartition).forEach { evict(it, "thread_cap") }
@@ -872,9 +1494,42 @@ internal class SqlDelightCanonicalMessageV2Store(
     private data class ScopeRetentionStats(
         val scope: SyncScopeKey,
         val updatedAtMs: Long,
+        val lastUserAccessAtMs: Long?,
         val factCount: Long,
         val byteCount: Double,
     )
+
+    /**
+     * Message storage Phase 3a: a channel / DM header written only by realtime (never opened: access NULL, ranked
+     * least recently used) may be the parent of a reply thread the user did open. Evicting the parent evicts its
+     * replies too (`parent_evicted`), so a top-level scope ranks by the most recent access of itself OR any of its
+     * reply threads. Thread scopes keep their own rank. Same order otherwise: accessed first (newest first), then
+     * by last write; a legacy scope (no dependent thread) ranks exactly as before.
+     */
+    private fun List<ScopeRetentionStats>.withDependentAccessRank(): List<ScopeRetentionStats> {
+        val threads = filter { it.scope.scopeKind == THREAD_SCOPE_KIND && it.lastUserAccessAtMs != null }
+        if (threads.isEmpty()) return this
+        val childAccessByParent = mutableMapOf<SyncScopeKey, Long>()
+        threads.forEach { thread ->
+            val header = selectHeader(thread.scope) ?: return@forEach
+            val parentKind = header.parentScopeKind ?: return@forEach
+            val parentId = header.parentScopeId ?: return@forEach
+            val parent = SyncScopeKey(partition = thread.scope.partition, scopeId = parentId, scopeKind = parentKind)
+            val access = checkNotNull(thread.lastUserAccessAtMs)
+            childAccessByParent[parent] = maxOf(childAccessByParent[parent] ?: access, access)
+        }
+        if (childAccessByParent.isEmpty()) return this
+        return map { stat ->
+            val childAccess = childAccessByParent[stat.scope] ?: return@map stat
+            stat.copy(lastUserAccessAtMs = maxOf(stat.lastUserAccessAtMs ?: childAccess, childAccess))
+        }.sortedWith(
+            compareBy<ScopeRetentionStats> { it.lastUserAccessAtMs == null }
+                .thenByDescending { it.lastUserAccessAtMs ?: Long.MIN_VALUE }
+                .thenByDescending { it.updatedAtMs }
+                .thenBy { it.scope.scopeKind }
+                .thenBy { it.scope.scopeId },
+        )
+    }
 
     private fun logEviction(scope: SyncScopeKey, reason: String) {
         logger(
@@ -933,11 +1588,26 @@ internal class SqlDelightCanonicalMessageV2Store(
             scopeKind = scope.scopeKind,
             scopeId = scope.scopeId,
         )
+        database.queries.clearSegmentsForScope(
+            environmentId = scope.environmentId,
+            serverId = scope.serverId,
+            principalId = scope.principalId,
+            consumerId = scope.consumerId,
+            scopeKind = scope.scopeKind,
+            scopeId = scope.scopeId,
+        )
     }
 }
 
 internal data class CanonicalMessageV2RetentionPolicy(
     val maxFactsPerScope: Int = 500,
+    /** Segment-aware scope retention (applyCoverage): at most this many segments per scope. */
+    val maxSegmentsPerScope: Int = 32,
+    /**
+     * Segment-aware scope retention: loose facts (in no segment) up to this many are kept before a
+     * segment is evicted; beyond it the oldest loose facts go first.
+     */
+    val looseFactAllowancePerScope: Int = minOf(100, maxFactsPerScope - 1),
     /** Channel / DM scopes only; thread scopes have [maxThreadScopesPerPartition]. */
     val maxScopesPerPartition: Int = 64,
     /** Reply-thread scopes (task #168 step 3); evicted before any channel / DM scope. */
@@ -948,6 +1618,8 @@ internal data class CanonicalMessageV2RetentionPolicy(
 ) {
     init {
         require(maxFactsPerScope > 0)
+        require(maxSegmentsPerScope > 0)
+        require(looseFactAllowancePerScope in 0 until maxFactsPerScope)
         require(maxScopesPerPartition > 0)
         require(maxThreadScopesPerPartition > 0)
         require(maxFactsPerPartition >= maxFactsPerScope)
@@ -989,6 +1661,45 @@ internal fun requireV2Scope(scope: SyncScopeKey) {
 }
 
 private const val THREAD_SCOPE_KIND: String = "thread"
+
+/**
+ * The legacy window of a cursor as a segment: `[oldest, newest]`, or `[0, 0]` for an empty baseline
+ * (both edges NULL, oldest reached). `null` = the cursor claims no window.
+ */
+internal fun PersistedCursor.legacyWindowSegment(
+    verifiedAtMs: Long,
+    source: CanonicalMessageV2SegmentSource = CanonicalMessageV2SegmentSource.Legacy,
+): CanonicalMessageV2Segment? {
+    val oldest = oldestLoadedSeq
+    val newest = newestLoadedSeq
+    return when {
+        oldest != null && newest != null && oldest in 0L..newest ->
+            CanonicalMessageV2Segment(oldest, newest, hasLoadedOldest, hasLoadedNewest, verifiedAtMs, source)
+        oldest == null && newest == null && hasLoadedOldest ->
+            CanonicalMessageV2Segment(0L, 0L, reachesOldest = true, headAtVerify = hasLoadedNewest, verifiedAtMs, source)
+        else -> null
+    }
+}
+
+/**
+ * This cursor with its window columns mirroring [head] (the scope's head segment; `null` = no window). The
+ * edges keep the legacy convention — they are seqs of stored facts ([headFactBounds]: the oldest / newest
+ * stored fact inside the head's range), never a claim bound no message has; a head without a stored fact
+ * (an empty baseline) has no edges. The flags are the head's.
+ */
+internal fun PersistedCursor.mirroring(head: CanonicalMessageV2Segment?, headFactBounds: Pair<Long, Long>?): PersistedCursor = when {
+    head == null -> copy(oldestLoadedSeq = null, newestLoadedSeq = null, hasLoadedOldest = false, hasLoadedNewest = false)
+    else -> copy(
+        oldestLoadedSeq = headFactBounds?.first,
+        newestLoadedSeq = headFactBounds?.second,
+        hasLoadedOldest = head.reachesOldest,
+        hasLoadedNewest = head.headAtVerify,
+    )
+}
+
+private fun CanonicalMessageV2Segment.sameRangeAs(other: CanonicalMessageV2Segment): Boolean =
+    lowSeq == other.lowSeq && highSeq == other.highSeq &&
+        reachesOldest == other.reachesOldest && headAtVerify == other.headAtVerify
 
 /** Task #14a: the `unknownFields` column value; `null` = every aggregate known. */
 private fun encodeUnknownFields(fields: Set<MessageAggregateField>): String? =
@@ -1046,6 +1757,25 @@ private fun CanonicalMessageEnvelopeV2.withAggregatesFrom(
         }
     }
 
+private fun requireUnknownFieldsInFrame(
+    envelopes: List<CanonicalMessageEnvelopeV2>,
+    unknownFieldsByFactId: Map<String, Set<MessageAggregateField>>,
+) {
+    require(
+        unknownFieldsByFactId.all { (id, fields) ->
+            fields.isNotEmpty() && CANONICAL_MESSAGE_V2_ALLOWED_UNKNOWN_FRAME_AGGREGATES.containsAll(fields) &&
+                envelopes.any { it.fact.id == id }
+        },
+    ) { "unknown V2 aggregates outside the allowed set or the frame" }
+}
+
+internal fun PersistedCursor.threadParent(): CanonicalMessageV2ThreadParent? {
+    val kind = parentScopeKind ?: return null
+    val id = parentScopeId ?: return null
+    val root = rootMessageId ?: return null
+    return CanonicalMessageV2ThreadParent(kind, id, root)
+}
+
 private fun requireEnvelopeMatchesScope(scope: SyncScopeKey, envelope: CanonicalMessageEnvelopeV2) {
     val diagnostic = validateCanonicalMessageV2(envelope, scope.serverId)
     if (diagnostic != null) throw CanonicalMessageV2ScopePoisoned(scope, envelope.fact.id)
@@ -1062,6 +1792,8 @@ private fun requireCursorMatchesScope(
     scope: SyncScopeKey,
     cursor: PersistedCursor,
     envelopes: List<CanonicalMessageEnvelopeV2>,
+    /** `false` for a realtime loose write: a frame may name a stale parent KIND; id and root must still match. */
+    checkParentKind: Boolean = true,
 ) {
     if (scope.scopeKind != "thread") {
         if (cursor.parentScopeKind != null || cursor.parentScopeId != null || cursor.rootMessageId != null) {
@@ -1079,7 +1811,7 @@ private fun requireCursorMatchesScope(
         val context = envelope.context as? CanonicalConversationContextV2.Thread
             ?: throw CanonicalMessageV2ScopePoisoned(scope, envelope.fact.id)
         if (
-            context.parentTopLevelScope.scopeKind != parentKind ||
+            (checkParentKind && context.parentTopLevelScope.scopeKind != parentKind) ||
             context.parentTopLevelScope.scopeId != parentScopeId ||
             context.rootMessageRef.messageId != rootMessageId
         ) throw CanonicalMessageV2ScopePoisoned(scope, envelope.fact.id)

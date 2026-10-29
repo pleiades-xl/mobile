@@ -1,6 +1,8 @@
 package build.raft.app
 
 import build.raft.app.resources.*
+import build.raft.app.data.AgentActivitySubscriptions
+import build.raft.app.data.LikelyOnlineAgentStatusLabel
 import build.raft.app.data.NeutralAgentStatusLabel
 import build.raft.app.data.SharedServerMemberStatus
 import build.raft.app.data.truncateAgentToolLabel
@@ -11,6 +13,7 @@ import build.raft.app.model.AgentWakeCrashLoop
 import build.raft.app.model.Presence
 import build.raft.app.model.ServerId
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -39,7 +42,13 @@ internal data class RaftAgentStatusIndicatorState(
     /** Why automatic wakes are paused, with [detailKind] `wake_crash_loop_blocked`. */
     val wakeCrashLoop: AgentWakeCrashLoop? = null,
     /** The agent is stuck on one tool call (latest agent:activity frame); null when not. */
-    val toolStuck: AgentToolStuck? = null
+    val toolStuck: AgentToolStuck? = null,
+    /**
+     * A guess, not a fact: no presence fact, lifecycle `active` (see
+     * [build.raft.app.data.likelyOnlineMemberStatusOrNull]). Green, labelled "Likely online";
+     * [status] stays null so nothing reads it as a server-sent Online.
+     */
+    val likelyOnline: Boolean = false
 )
 
 /** React parity: external agents caption as "External" (agentStore.ts resolveAgentDisplayState). */
@@ -106,6 +115,22 @@ internal class RaftAgentStatusFlow(
     private val upstream: Flow<RaftAgentStatusIndicatorState?>
 ) : Flow<RaftAgentStatusIndicatorState?> by upstream
 
+/**
+ * While composed, asks [serverId]'s socket for the detailed `agent:activity` of [agentIds] (a screen that
+ * shows their detail); released when the screen leaves or the ids change. See [AgentActivitySubscriptions].
+ */
+@Composable
+internal fun RaftAgentActivitySubscriptionEffect(
+    subscriptions: AgentActivitySubscriptions,
+    serverId: String?,
+    agentIds: List<String>,
+) {
+    DisposableEffect(subscriptions, serverId, agentIds) {
+        val lease = serverId?.let { subscriptions.acquire(it, agentIds) }
+        onDispose { lease?.release() }
+    }
+}
+
 @Composable
 internal fun rememberRaftAgentStatusIndicatorState(
     agentStatusResolver: RaftAgentStatusResolver,
@@ -127,6 +152,19 @@ internal fun rememberRaftAgentStatusIndicatorState(
     }
 }
 
+/**
+ * The coarse part only (dot color, status name): for surfaces that do not subscribe to an agent's
+ * detailed `agent:activity` (Tenny, slock 968d102d), whose last detailed label could be stale.
+ */
+internal fun RaftAgentStatusIndicatorState.withoutActivityDetail(): RaftAgentStatusIndicatorState =
+    copy(
+        label = if (external || likelyOnline) label else status?.label ?: label,
+        detailKind = null,
+        activityToolName = null,
+        wakeCrashLoop = null,
+        toolStuck = null,
+    )
+
 internal fun SharedServerMemberStatus.toRaftAgentStatusIndicatorState(): RaftAgentStatusIndicatorState =
     raftAgentStatusIndicatorState(
         status = status,
@@ -139,7 +177,8 @@ internal fun SharedServerMemberStatus.toRaftAgentStatusIndicatorState(): RaftAge
         activityToolName = activityToolName,
         runtime = runtime,
         wakeCrashLoop = wakeCrashLoop,
-        toolStuck = toolStuck
+        toolStuck = toolStuck,
+        likelyOnline = likelyOnline
     )
 
 /**
@@ -414,6 +453,9 @@ internal fun RaftAgentStatusIndicatorState.localizedMemberStatusLabel(): String 
     workingActivityDetailText()
         ?.takeIf { it !is RaftAgentActivityDetailText.Raw }
         ?.let { return it.localizedText() }
+    if (likelyOnline && label == LikelyOnlineAgentStatusLabel) {
+        return stringResource(Res.string.member_row_status_likely_online)
+    }
     return when (label.trim().lowercase()) {
         "online", "active" -> stringResource(Res.string.member_row_status_online)
         "offline" -> stringResource(Res.string.member_row_status_offline)

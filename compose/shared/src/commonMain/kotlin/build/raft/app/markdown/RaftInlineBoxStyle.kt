@@ -16,10 +16,11 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
-import androidx.compose.ui.text.TextLayoutResult
-import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
@@ -125,8 +126,53 @@ internal data class RaftInlineUnderlineStyle(
     }
 }
 
+/**
+ * A mark the painter draws inside a chip's leading spacer ([appendRaftInlineSpacer]): the task
+ * chip's status pixel (raft-ui `TaskStatusPixel`), a [size] square [inset] from the spacer's start,
+ * filled and edged, vertically centred on the chip box. Painted rather than placed as inline
+ * content so the chip's lead stays text and never wraps away from its label.
+ */
+@Immutable
+internal data class RaftInlineMarkStyle(
+    val fill: Color,
+    val stroke: Color,
+    val inset: Dp,
+    val size: Dp,
+    val strokeWidth: Dp,
+    val cornerRadius: Dp,
+) {
+    fun encode(): String =
+        listOf(
+            RaftInlineDecorationEncodingVersion,
+            fill.value.toString(),
+            stroke.value.toString(),
+            inset.value.toString(),
+            size.value.toString(),
+            strokeWidth.value.toString(),
+            cornerRadius.value.toString(),
+        ).joinToString(RaftInlineDecorationSeparator)
+
+    companion object {
+        fun decode(value: String): RaftInlineMarkStyle? {
+            val parts = value.split(RaftInlineDecorationSeparator)
+            if (parts.size != 7 || parts[0] != RaftInlineDecorationEncodingVersion) return null
+            return runCatching {
+                RaftInlineMarkStyle(
+                    fill = Color(parts[1].toULong()),
+                    stroke = Color(parts[2].toULong()),
+                    inset = parts[3].toFloat().dp,
+                    size = parts[4].toFloat().dp,
+                    strokeWidth = parts[5].toFloat().dp,
+                    cornerRadius = parts[6].toFloat().dp,
+                )
+            }.getOrNull()
+        }
+    }
+}
+
 internal const val RAFT_INLINE_BOX_ANNOTATION_TAG = "raft.build.markdown.inlineBox"
 internal const val RAFT_INLINE_UNDERLINE_ANNOTATION_TAG = "raft.build.markdown.inlineUnderline"
+internal const val RAFT_INLINE_MARK_ANNOTATION_TAG = "raft.build.markdown.inlineMark"
 private const val RaftInlineDecorationEncodingVersion = "v1"
 private const val RaftInlineDecorationSeparator = "|"
 
@@ -184,6 +230,21 @@ internal fun AnnotatedString.Builder.appendRaftInlineGap(width: Dp) {
     appendInlineContent(raftInlineGapInlineId(width), "\uFFFC")
 }
 
+/**
+ * Appends a spacer [width] wide that never wraps away from its neighbours: a word joiner whose
+ * advance is its letter spacing. Inside a chip box use this, not a placeholder: the iOS (Skia)
+ * line breaker makes every placeholder a word of its own and breaks on either side of it, word
+ * joiner or not, so a placeholder lead could end a line while the label wrapped, leaving the
+ * chip box as a sliver at the line end (artin 10-29). Text keeps the joiner on both renderers.
+ * [mark] is painted inside the spacer by [raftInlineDecorations].
+ */
+internal fun AnnotatedString.Builder.appendRaftInlineSpacer(width: Dp, mark: RaftInlineMarkStyle? = null) {
+    if (width <= 0.dp) return
+    if (mark != null) pushStringAnnotation(RAFT_INLINE_MARK_ANNOTATION_TAG, mark.encode())
+    withStyle(SpanStyle(letterSpacing = width.value.sp)) { append(RaftInlineWordJoiner) }
+    if (mark != null) pop()
+}
+
 /** Width a gap placeholder id reserves, or null when [id] is not a gap. */
 internal fun raftInlineGapWidth(id: String): Dp? =
     id.takeIf { it.startsWith(RaftInlineGapInlineIdPrefix) }
@@ -199,7 +260,7 @@ internal fun raftInlineGapWidth(id: String): Dp? =
  * chip's link, and [raftInlineDecorations] paints the chip box over them. Without this a tap on the
  * painted padding of a chip (a self @mention's yellow sticker, a #channel or task chip, a permalink
  * or App link chip) hit no link and fell through to the message body, which opens the thread. Each
- * gap glued (by a word joiner) to the start or end of a link gets a copy of that link without its styles, so
+ * gap glued (by a word joiner) to the start or end of a link gets an unstyled copy of that link, so
  * the whole visible chip dispatches the chip's action and only that. The link ranges over the
  * chip's own characters, and their styles, are unchanged.
  */
@@ -243,25 +304,40 @@ internal fun AnnotatedString.withRaftInlineChipGapLinks(): AnnotatedString {
         .toAnnotatedString()
 }
 
-// Explicit, decoration-free styles: a link with no styles gets the runtime's default link look,
-// an underline, which Skia (iOS) draws under the gap placeholders on either side of a chip.
-private val RaftInlineGapLinkStyle = SpanStyle(textDecoration = TextDecoration.None)
-private val RaftInlineGapLinkStyles =
-    TextLinkStyles(
-        style = RaftInlineGapLinkStyle,
-        focusedStyle = RaftInlineGapLinkStyle,
-        hoveredStyle = RaftInlineGapLinkStyle,
-        pressedStyle = RaftInlineGapLinkStyle,
-    )
-
 private fun LinkAnnotation.withoutRaftLinkStyles(): LinkAnnotation =
     when (this) {
         is LinkAnnotation.Url ->
-            LinkAnnotation.Url(url = url, styles = RaftInlineGapLinkStyles, linkInteractionListener = linkInteractionListener)
+            LinkAnnotation.Url(url = url, styles = RaftUnstyledLinkStyles, linkInteractionListener = linkInteractionListener)
         is LinkAnnotation.Clickable ->
-            LinkAnnotation.Clickable(tag = tag, styles = RaftInlineGapLinkStyles, linkInteractionListener = linkInteractionListener)
+            LinkAnnotation.Clickable(tag = tag, styles = RaftUnstyledLinkStyles, linkInteractionListener = linkInteractionListener)
         else -> this
     }
+
+/**
+ * Link styles that style nothing, for a link that must look like the text under it (a chip's
+ * padding gaps, the message body's tap target). Never pass `styles = null` to a link the markdown
+ * renders: Material3 `Text` gives every link whose styles are null its default
+ * `colorScheme.primary` + underline look, and with no MaterialTheme in the tree that is the M3
+ * baseline purple — a chip's padding showed an underline beside its label (artin 10-29, Compose
+ * desktop). An empty, non-null [TextLinkStyles] is left alone by Material3 and by the foundation.
+ */
+internal val RaftUnstyledLinkStyles: TextLinkStyles = TextLinkStyles()
+
+/**
+ * A chip's link styles (mention / channel / thread / task / permalink / App link chips): never
+ * underlined in any state — the chip box is the affordance. Hover and focus look as at rest (the
+ * foundation applies a null hovered / focused style as "no change", and an inherited underline
+ * would survive that); [pressed] keeps the chip's press wash.
+ */
+internal fun raftChipLinkStyles(style: SpanStyle, pressed: SpanStyle = style): TextLinkStyles {
+    val rest = style.copy(textDecoration = TextDecoration.None)
+    return TextLinkStyles(
+        style = rest,
+        focusedStyle = rest,
+        hoveredStyle = rest,
+        pressedStyle = pressed.copy(textDecoration = TextDecoration.None),
+    )
+}
 
 /**
  * The text without reserved chip gaps (each gap placeholder and the word joiner gluing it to its
@@ -320,6 +396,36 @@ internal fun AnnotatedString.raftInlineBoxRanges(): List<AnnotatedString.Range<R
         RaftInlineBoxStyle.decode(range.item)?.let { AnnotatedString.Range(it, range.start, range.end) }
     }
 
+/**
+ * Each chip box's full extent: the boxed label plus the padding reserved around it by
+ * [withRaftInlineChipGaps] (a gap placeholder glued by a word joiner) or [appendRaftInlineSpacer]
+ * (a letter-spaced word joiner), on either side. A link over the chip's padding as well as its
+ * label is still the chip.
+ */
+internal fun AnnotatedString.raftInlineChipExtents(): List<IntRange> {
+    val boxes = raftInlineBoxRanges()
+    if (boxes.isEmpty()) return emptyList()
+    val gaps =
+        getStringAnnotations(RaftInlineContentAnnotationTag, 0, length)
+            .filter { it.item.startsWith(RaftInlineGapInlineIdPrefix) && it.end > it.start }
+    val gapEndingAt = gaps.associateBy { it.end }
+    val gapStartingAt = gaps.associateBy { it.start }
+    return boxes.map { box ->
+        var start = box.start
+        while (start > 0 && text[start - 1] == '\u2060') start--
+        gapEndingAt[start]?.let { start = it.start }
+        var end = box.end
+        while (end < length && text[end] == '\u2060') end++
+        gapStartingAt[end]?.let { end = it.end }
+        start until end
+    }
+}
+
+internal fun AnnotatedString.raftInlineMarkRanges(): List<AnnotatedString.Range<RaftInlineMarkStyle>> =
+    getStringAnnotations(RAFT_INLINE_MARK_ANNOTATION_TAG, 0, length).mapNotNull { range ->
+        RaftInlineMarkStyle.decode(range.item)?.let { AnnotatedString.Range(it, range.start, range.end) }
+    }
+
 internal fun AnnotatedString.raftInlineUnderlineRanges(): List<AnnotatedString.Range<RaftInlineUnderlineStyle>> =
     getStringAnnotations(RAFT_INLINE_UNDERLINE_ANNOTATION_TAG, 0, length).mapNotNull { range ->
         RaftInlineUnderlineStyle.decode(range.item)?.let { AnnotatedString.Range(it, range.start, range.end) }
@@ -330,10 +436,11 @@ internal fun AnnotatedString.raftInlineUnderlineRanges(): List<AnnotatedString.R
 internal class RaftInlineDecorations(
     val boxes: List<AnnotatedString.Range<RaftInlineBoxStyle>>,
     val underlines: List<AnnotatedString.Range<RaftInlineUnderlineStyle>>,
+    val marks: List<AnnotatedString.Range<RaftInlineMarkStyle>>,
     private val fontSizes: List<AnnotatedString.Range<TextUnit>>,
     private val baseFontSize: TextUnit,
 ) {
-    val isEmpty: Boolean get() = boxes.isEmpty() && underlines.isEmpty()
+    val isEmpty: Boolean get() = boxes.isEmpty() && underlines.isEmpty() && marks.isEmpty()
 
     /**
      * Font size at [offset] in sp, resolving the covering spans in order as Android does: an sp
@@ -350,14 +457,15 @@ internal class RaftInlineDecorations(
     }
 
     companion object {
-        val Empty = RaftInlineDecorations(emptyList(), emptyList(), emptyList(), 14.sp)
+        val Empty = RaftInlineDecorations(emptyList(), emptyList(), emptyList(), emptyList(), 14.sp)
     }
 }
 
 internal fun AnnotatedString.raftInlineDecorations(baseFontSize: TextUnit): RaftInlineDecorations {
     val boxes = raftInlineBoxRanges()
     val underlines = raftInlineUnderlineRanges()
-    if (boxes.isEmpty() && underlines.isEmpty()) return RaftInlineDecorations.Empty
+    val marks = raftInlineMarkRanges()
+    if (boxes.isEmpty() && underlines.isEmpty() && marks.isEmpty()) return RaftInlineDecorations.Empty
     val fontSizes =
         spanStyles
             .filter { it.item.fontSize.isSpecified }
@@ -365,6 +473,7 @@ internal fun AnnotatedString.raftInlineDecorations(baseFontSize: TextUnit): Raft
     return RaftInlineDecorations(
         boxes = boxes,
         underlines = underlines,
+        marks = marks,
         fontSizes = fontSizes,
         baseFontSize = if (baseFontSize.isSp) baseFontSize else 14.sp,
     )
@@ -376,30 +485,93 @@ internal fun AnnotatedString.raftInlineDecorations(baseFontSize: TextUnit): Raft
  */
 internal fun Modifier.raftInlineDecorations(
     decorations: RaftInlineDecorations,
+    /** An underline range under a mouse or trackpad and the colour it takes then (read at draw time). */
+    hovered: () -> Pair<IntRange, Color>? = { null },
     layout: () -> TextLayoutResult?
 ): Modifier {
     if (decorations.isEmpty) return this
     return drawBehind {
         val result = layout() ?: return@drawBehind
         val textLength = result.layoutInput.text.length
+        val text = result.layoutInput.text.text
         decorations.boxes.forEach { range ->
-            drawRaftInlineRange(result, range.start, range.end, textLength) { segment ->
+            // A box is painted only on the lines that hold something of the chip: a line fragment
+            // of only padding spacers (a lead that ended a line while the label wrapped) would be
+            // a sliver of chip at the line end.
+            drawRaftInlineRange(result, range.start, range.end, textLength, labelOnly = text) { segment ->
                 drawRaftInlineBoxSegment(result, decorations, range.item, segment)
             }
         }
+        decorations.marks.forEach { range ->
+            drawRaftInlineMark(result, decorations, range.item, range.start, textLength)
+        }
+        val hover = hovered()
         decorations.underlines.forEach { range ->
+            val hoverColor = hover?.takeIf { (link, _) -> link.first == range.start && link.last + 1 == range.end }?.second
             drawRaftInlineRange(result, range.start, range.end, textLength) { segment ->
                 val style = range.item
                 val thickness = style.thickness.toPx().coerceAtLeast(1f)
                 val y = result.getLineBaseline(segment.line) + style.offset.toPx()
                 drawRect(
-                    color = style.color,
+                    color = hoverColor ?: style.color,
                     topLeft = Offset(segment.left, y),
                     size = Size(segment.right - segment.left, thickness),
                 )
             }
         }
     }
+}
+
+/** One line's share of a decorated range; [isFirst] / [isLast] are relative to the fragments drawn. */
+internal data class RaftInlineLineFragment(
+    val line: Int,
+    val start: Int,
+    val end: Int,
+    val isFirst: Boolean,
+    val isLast: Boolean,
+)
+
+/**
+ * Splits [start, end) over lines ([lineRanges]: each line's start and visible end). With
+ * [labelOnly] (the laid-out text) a fragment holding nothing visible — only word joiners (the
+ * chip's padding spacers), zero-width spaces or whitespace — is dropped, and first / last move to
+ * the fragments that remain, so a chip box is never painted as a padding-only sliver. A placeholder
+ * inside a box (an icon, a busy spinner) is drawn content and keeps its fragment.
+ */
+internal fun raftInlineLineFragments(
+    lineRanges: List<IntRange>,
+    start: Int,
+    end: Int,
+    labelOnly: CharSequence? = null,
+): List<RaftInlineLineFragment> {
+    if (end <= start) return emptyList()
+    val pieces = mutableListOf<Triple<Int, Int, Int>>()
+    lineRanges.forEachIndexed { line, lineRange ->
+        val segmentStart = maxOf(start, lineRange.first)
+        val segmentEnd = minOf(end, lineRange.last + 1)
+        if (segmentEnd <= segmentStart) return@forEachIndexed
+        if (labelOnly != null && !raftInlineHasLabelChar(labelOnly, segmentStart, segmentEnd)) return@forEachIndexed
+        pieces += Triple(line, segmentStart, segmentEnd)
+    }
+    return pieces.mapIndexed { index, (line, segmentStart, segmentEnd) ->
+        RaftInlineLineFragment(
+            line = line,
+            start = segmentStart,
+            end = segmentEnd,
+            isFirst = index == 0 && (labelOnly != null || segmentStart == start),
+            isLast = index == pieces.lastIndex && (labelOnly != null || segmentEnd == end),
+        )
+    }
+}
+
+/** True when [text] holds, in [start, end), something drawn: a label glyph or an inline-content placeholder. */
+internal fun raftInlineHasLabelChar(text: CharSequence, start: Int, end: Int): Boolean {
+    for (i in start until minOf(end, text.length)) {
+        val c = text[i]
+        if (c == '\u2060' || c == '\u200B' || c.isWhitespace()) continue
+        return true
+    }
+    return false
 }
 
 private class RaftInlineSegment(
@@ -417,34 +589,68 @@ private inline fun drawRaftInlineRange(
     start: Int,
     end: Int,
     textLength: Int,
+    labelOnly: CharSequence? = null,
     draw: (RaftInlineSegment) -> Unit
 ) {
     val rangeStart = start.coerceIn(0, textLength)
     val rangeEnd = end.coerceIn(rangeStart, textLength)
     if (rangeEnd <= rangeStart) return
     val firstLine = result.getLineForOffset(rangeStart)
-    val lastLine = result.getLineForOffset(rangeEnd - 1)
-    for (line in firstLine..lastLine) {
-        if (line >= result.lineCount) break
-        val segmentStart = maxOf(rangeStart, result.getLineStart(line))
-        val segmentEnd = minOf(rangeEnd, result.getLineEnd(line, visibleEnd = true))
-        if (segmentEnd <= segmentStart) continue
-        val first = result.getBoundingBox(segmentStart)
-        val last = result.getBoundingBox(segmentEnd - 1)
+    val lastLine = minOf(result.getLineForOffset(rangeEnd - 1), result.lineCount - 1)
+    if (lastLine < firstLine) return
+    // Lines outside [firstLine, lastLine] are passed empty so the fragment line indices stay real.
+    val lineRanges =
+        List(lastLine + 1) { line ->
+            if (line < firstLine) IntRange.EMPTY
+            else result.getLineStart(line) until result.getLineEnd(line, visibleEnd = true)
+        }
+    raftInlineLineFragments(lineRanges, rangeStart, rangeEnd, labelOnly).forEach { fragment ->
+        val first = result.getBoundingBox(fragment.start)
+        val last = result.getBoundingBox(fragment.end - 1)
         val left = minOf(first.left, last.left)
         val right = maxOf(first.right, last.right)
-        if (right <= left) continue
+        if (right <= left) return@forEach
         draw(
             RaftInlineSegment(
-                line = line,
-                start = segmentStart,
-                end = segmentEnd,
+                line = fragment.line,
+                start = fragment.start,
+                end = fragment.end,
                 left = left,
                 right = right,
-                isFirst = segmentStart == rangeStart,
-                isLast = segmentEnd == rangeEnd,
+                isFirst = fragment.isFirst,
+                isLast = fragment.isLast,
             )
         )
+    }
+}
+
+/** Approximate ascent / descent of the UI fonts; see the TODO(cmp-switch) on RaftInlineBoxStyle. */
+private const val RaftInlineGlyphAscentEm = 0.92f
+private const val RaftInlineGlyphDescentEm = 0.26f
+
+private fun DrawScope.drawRaftInlineMark(
+    result: TextLayoutResult,
+    decorations: RaftInlineDecorations,
+    style: RaftInlineMarkStyle,
+    offset: Int,
+    textLength: Int,
+) {
+    if (offset !in 0 until textLength) return
+    val line = result.getLineForOffset(offset)
+    val spacer = result.getBoundingBox(offset)
+    val fontSizePx = decorations.fontSizeAt(offset).toPx()
+    val baseline = result.getLineBaseline(line)
+    // Centred on the chip box the painter draws around the same text.
+    val centerY = baseline - fontSizePx * (RaftInlineGlyphAscentEm - RaftInlineGlyphDescentEm) / 2f
+    val sizePx = style.size.toPx()
+    val strokePx = style.strokeWidth.toPx()
+    val inset = strokePx / 2f
+    val topLeft = Offset(spacer.left + style.inset.toPx() + inset, centerY - sizePx / 2f + inset)
+    val rectSize = Size(sizePx - strokePx, sizePx - strokePx)
+    val radius = CornerRadius(style.cornerRadius.toPx())
+    drawRoundRect(color = style.fill, topLeft = topLeft, size = rectSize, cornerRadius = radius)
+    if (strokePx > 0f) {
+        drawRoundRect(color = style.stroke, topLeft = topLeft, size = rectSize, cornerRadius = radius, style = Stroke(width = strokePx))
     }
 }
 
@@ -456,9 +662,8 @@ private fun DrawScope.drawRaftInlineBoxSegment(
 ) {
     val fontSizePx = decorations.fontSizeAt(segment.start).toPx()
     val baseline = result.getLineBaseline(segment.line)
-    // Approximate ascent/descent of the UI fonts; see the TODO(cmp-switch) on RaftInlineBoxStyle.
-    val glyphTop = baseline - fontSizePx * 0.92f
-    val glyphBottom = baseline + fontSizePx * 0.26f
+    val glyphTop = baseline - fontSizePx * RaftInlineGlyphAscentEm
+    val glyphBottom = baseline + fontSizePx * RaftInlineGlyphDescentEm
     val left = segment.left - if (segment.isFirst) style.paddingStart.toPx() else 0f
     val right = segment.right + if (segment.isLast) style.paddingEnd.toPx() else 0f
     val top = glyphTop - style.paddingTop.toPx()

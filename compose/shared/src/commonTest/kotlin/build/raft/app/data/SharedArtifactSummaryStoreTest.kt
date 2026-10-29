@@ -65,6 +65,21 @@ class SharedArtifactSummaryStoreTest {
     }
 
     @Test
+    fun aShortIdIsAskedForByItsPtId() {
+        // slock staging 380482116: the summaries route reads `id` as written (webCards.ts
+        // parseArtifactObjectRef, visibility.ts homesWhere), so a short id is sent as `pt_<uuid>`.
+        val body = Json.parseToJsonElement(encodeArtifactSummariesRequest(listOf(ArtifactLinkTarget("2QthvfPeGfDnqwr7LG6itx", 2)))).jsonObject
+        val ref = body["refs"]!!.jsonArray.single() as JsonObject
+        assertEquals("pt_0b6f1c2e-5d4a-4c3b-9a8e-7f6d5c4b3a21", ref["id"]?.jsonPrimitive?.content)
+        // The answer echoes the pt ref; it answers the short link's key.
+        val answers =
+            parseArtifactSummariesAnswer(
+                """{"kind":"artifact","summaries":[{"ref":{"id":"pt_0b6f1c2e-5d4a-4c3b-9a8e-7f6d5c4b3a21","version":2},"ok":false,"reason":"unavailable"}]}""",
+            )!!
+        assertEquals(ArtifactSummaryAnswer.Unavailable, answers[ArtifactLinkTarget("2QthvfPeGfDnqwr7LG6itx", 2).key])
+    }
+
+    @Test
     fun parsesOkAndUnavailableAndAnUnreadableSummaryAsUnavailable() {
         val answers =
             parseArtifactSummariesAnswer(
@@ -86,6 +101,28 @@ class SharedArtifactSummaryStoreTest {
         assertEquals(ArtifactSummaryAnswer.Unavailable, answers["pt_gone"])
         assertEquals(ArtifactSummaryAnswer.Unavailable, answers["pt_bad"])
         assertEquals(null, parseArtifactSummariesAnswer("""{"previews":[]}"""))
+    }
+
+    @Test
+    fun refreshAsksAgainWithinTheTtlAndAnUnavailableAnswerReplacesTheKeptOne() = runTest {
+        // The in-app Artifact viewer revalidates on every open: a kept Ok must not hide a 403/404.
+        var gone = false
+        val api = FakeApi { okAnswer(it, unavailable = if (gone) setOf("pt_a") else emptySet()) }
+        val store = store(api)
+        val target = ArtifactLinkTarget("pt_a")
+        store.request(server, listOf(target))
+        advanceTimeBy(ARTIFACT_SUMMARY_BATCH_WINDOW_MILLIS + 1)
+        assertTrue(store.isFresh(server, target))
+        assertIs<ArtifactSummaryAnswer.Ok>(store.state.value.answersFor(server, listOf(target))["pt_a"])
+
+        gone = true
+        store.refresh(server, target)
+        assertTrue(!store.isFresh(server, target), "expired at once, still shown until the new answer")
+        assertIs<ArtifactSummaryAnswer.Ok>(store.state.value.answersFor(server, listOf(target))["pt_a"])
+        advanceTimeBy(ARTIFACT_SUMMARY_BATCH_WINDOW_MILLIS + 1)
+        assertEquals(2, api.calls.size)
+        assertTrue(store.isFresh(server, target))
+        assertEquals(ArtifactSummaryAnswer.Unavailable, store.state.value.answersFor(server, listOf(target))["pt_a"])
     }
 
     @Test

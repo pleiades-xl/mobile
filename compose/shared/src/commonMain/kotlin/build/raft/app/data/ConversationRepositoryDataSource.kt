@@ -31,6 +31,9 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.JsonElement
 import kotlin.time.TimeSource
 
 private val conversationRepositoryJson = Json {
@@ -594,6 +597,13 @@ class RealConversationRepository private constructor(
         threadId: ThreadId,
         includeFollowedSummaries: Boolean,
         limit: Int
+    ): DataResult<ThreadSnapshot> = getThread(threadId, includeFollowedSummaries, limit, captureRawMessagePage = false)
+
+    override suspend fun getThread(
+        threadId: ThreadId,
+        includeFollowedSummaries: Boolean,
+        limit: Int,
+        captureRawMessagePage: Boolean
     ): DataResult<ThreadSnapshot> {
         val context = currentContext() ?: return authRequired()
         val messageLimit = limit.coerceAtLeast(1)
@@ -613,6 +623,7 @@ class RealConversationRepository private constructor(
             includeChannelSummaries = includeFollowedSummaries,
             includeFollowedSummaries = includeFollowedSummaries,
             hydrateConversationDetail = true,
+            captureRawMessagePage = captureRawMessagePage,
         )
     }
 
@@ -1895,12 +1906,39 @@ private fun buildSharedThreadSnapshot(
  * the rendered snapshot is unaffected either way.
  */
 private fun rawMessagePageWitness(bodyText: String, requestedLimit: Int): RawMessagePageWitness {
-    val messages =
+    val root =
         runCatching { rawMessagePageJson.parseToJsonElement(bodyText) as? JsonObject }
             .getOrNull()
-            ?.get("messages") as? JsonArray
             ?: return RawMessagePageWitness.None
-    return RawMessagePageWitness(RawMessagePage(messages = messages, requestedLimit = requestedLimit))
+    val messages = root["messages"] as? JsonArray ?: return RawMessagePageWitness.None
+    return RawMessagePageWitness(
+        RawMessagePage(
+            messages = messages,
+            requestedLimit = requestedLimit,
+            // Message storage Phase 1: carried for the coverage writer; nothing reads it yet.
+            messageWindow = decodeChannelMessageWindow(root["messageWindow"]),
+            historyLimited = (root["historyLimited"] as? JsonPrimitive)?.booleanOrNull ?: false,
+            replyCountsByParentId = embeddedReplyCountsOrNull(root["threadSummariesByParentMessageId"]),
+        ),
+    )
+}
+
+/**
+ * Message storage Phase 2b: the reply counts a page embeds (`threadSummariesByParentMessageId`, the same record
+ * `channels/{id}/threads` answers), keyed by parent message id. `null` = the page carried no record (an older server);
+ * an entry without a usable count is left out (its row is then not stored).
+ */
+internal fun embeddedReplyCountsOrNull(element: JsonElement?): Map<String, Int>? {
+    val record = element as? JsonObject ?: return null
+    return record.entries.mapNotNull { (parentId, summary) ->
+        val count = ((summary as? JsonObject)?.get("replyCount") as? JsonPrimitive)
+            ?.takeIf { !it.isString }
+            ?.content
+            ?.toIntOrNull()
+            ?.takeIf { it >= 0 }
+            ?: return@mapNotNull null
+        parentId to count
+    }.toMap()
 }
 
 private val rawMessagePageJson = Json { ignoreUnknownKeys = true }

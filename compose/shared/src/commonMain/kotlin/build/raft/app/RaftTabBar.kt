@@ -443,11 +443,30 @@ internal fun RaftAppBottomTabBarHost(
         return
     }
     if (raftAppTabBarRenderer() == RaftAppTabBarRenderer.NativeHost) return
-    // stdrc 2026-10-21: one edge bar for every Compose renderer (the iOS Liquid Glass and
-    // Android floating docks are gone). The band is the bar plus the bottom safe area, all on
-    // the card layer, so the bar meets the screen edge.
+    RaftSharedBottomTabBarBand(
+        items = items,
+        onSelect = onSelect,
+        modifier = hostModifier,
+        bottomSafeArea = bottomSafeArea,
+        serverTab = serverTab,
+    )
+}
+
+/**
+ * The Compose edge bar's band (stdrc 2026-10-21: one edge bar for every Compose renderer, the
+ * iOS Liquid Glass and Android floating docks are gone): the bar plus the bottom safe area, all
+ * on the card layer, so the bar meets the screen edge.
+ */
+@Composable
+internal fun RaftSharedBottomTabBarBand(
+    items: List<RaftBottomTabItemPayload>,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    bottomSafeArea: Dp = 0.dp,
+    serverTab: (@Composable (Modifier) -> Unit)? = null,
+) {
     Box(
-        modifier = hostModifier
+        modifier = modifier
             .fillMaxWidth()
             .height(raftSharedBottomTabBarHostHeight(bottomSafeArea))
             .background(RaftColor.Card)
@@ -491,7 +510,9 @@ internal fun resolveRaftAppTabBarRenderer(
 /**
  * The wide layout's navigation rail (web LeftRail with the top bar): the destinations at the top,
  * the tools (Settings) pinned to the bottom. The server and Search live in the top bar above it
- * ([RaftAppShellTopBar], artin task #8), so the rail has no header.
+ * ([RaftAppShellTopBar], artin task #8), so the rail has no header. Without the top bar (iPhone
+ * Duo's inner screen, raft-design #859) the rail takes the server tile in its [header] and the
+ * bell in [footerTools], before [bottomItems] (raft-ui AppRail without the top bar).
  */
 @Composable
 internal fun RaftNavigationRailTabBar(
@@ -501,7 +522,9 @@ internal fun RaftNavigationRailTabBar(
     bottomItems: List<RaftBottomTabItemPayload> = emptyList(),
     onBottomItemSelect: ((String) -> Unit)? = null,
     topSafeArea: Dp = 0.dp,
-    bottomSafeArea: Dp = 0.dp
+    bottomSafeArea: Dp = 0.dp,
+    header: (@Composable () -> Unit)? = null,
+    footerTools: (@Composable () -> Unit)? = null,
 ) {
     // The design system's raft-ui AppRail: 56dp plus the seam, 40dp items 6dp apart and 8dp from
     // both ends, the selected sticker on the frame.
@@ -510,9 +533,11 @@ internal fun RaftNavigationRailTabBar(
             modifier = modifier,
             topInset = topSafeArea,
             bottomInset = bottomSafeArea,
+            header = header,
             footer =
-                if (bottomItems.isNotEmpty()) {
+                if (bottomItems.isNotEmpty() || footerTools != null) {
                     {
+                        footerTools?.invoke()
                         bottomItems.forEach { item ->
                             RaftNavigationRailTabItem(item = item, onSelect = onBottomItemSelect ?: onSelect)
                         }
@@ -529,7 +554,7 @@ internal fun RaftNavigationRailTabBar(
 }
 
 @Composable
-internal fun RaftNavigationRailTabItem(
+private fun RaftNavigationRailTabItem(
     item: RaftBottomTabItemPayload,
     onSelect: (String) -> Unit
 ) {

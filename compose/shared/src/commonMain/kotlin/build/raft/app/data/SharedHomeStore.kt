@@ -51,8 +51,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -185,6 +188,10 @@ internal class SharedHomeStore(
 ) : SharedConversationIdentityProvider {
     private val _state = raftStoreState(SharedHomeState(), "SharedHomeStore")
     val state: StateFlow<SharedHomeState> = _state.asStateFlow()
+    private val _readToggleNotices = MutableSharedFlow<RaftReadToggleNotice>(extraBufferCapacity = 4)
+
+    /** One-shot notices of the row read toggles (the page shows them as a toast). */
+    val readToggleNotices: SharedFlow<RaftReadToggleNotice> = _readToggleNotices.asSharedFlow()
     private val homeConversationIdentityStates = linkedMapOf<String, SharedConversationDirectoryState>()
     private val supplementalConversationIdentityStates =
         linkedMapOf<String, MutableMap<SharedConversationIdentitySupplementSource, SharedConversationDirectoryState>>()
@@ -798,6 +805,10 @@ internal class SharedHomeStore(
                 markConversationUnread(intent.conversationId)
             is SharedHomeIntent.MarkConversationReadAll ->
                 markConversationReadAll(intent.conversationId)
+            is SharedHomeIntent.ProjectThreadUnfollow ->
+                projectThreadUnfollow(intent.threadChannelId, intent.phase)
+            is SharedHomeIntent.MarkFollowedThreadRead ->
+                markFollowedThreadRead(intent.threadChannelId)
             is SharedHomeIntent.CloseDirectMessage ->
                 closeDirectMessage(intent.conversationId)
             is SharedHomeIntent.OwnMessagesSent ->
@@ -1154,7 +1165,8 @@ internal class SharedHomeStore(
                         channelId = scope.scopeId,
                         version = scope.readStateVersion,
                         maxReadSeq = scope.maxReadSeq,
-                        unreadCount = scope.unreadCount
+                        unreadCount = scope.unreadCount,
+                        markedUnread = scope.markedUnread
                     )
                 )
             diagnosticsLogger(
@@ -1503,7 +1515,10 @@ internal class SharedHomeStore(
                 if (now.baseSnapshot.server.id != serverId || now.baseSnapshot.currentMember.id != accountId) {
                     return@synchronized false
                 }
-                applyHomeSnapshotLocally { it.withFollowedThreadUnread(summary.followedThreadUnread) }
+                val pendingUnfollows = pendingThreadUnfollows.keys
+                val threads =
+                    if (pendingUnfollows.isEmpty()) summary.followedThreadUnread else summary.followedThreadUnread - pendingUnfollows
+                applyHomeSnapshotLocally { it.withFollowedThreadUnread(threads) }
             }
         diagnosticsLogger(
             "home_followed_thread_refresh result=content threads=${summary.followedThreadUnread.size} changed=$changed"
@@ -2861,6 +2876,7 @@ internal class SharedHomeStore(
             unreadSource = prior.unreadSource,
             serverUnreadCounts = prior.serverUnreadCounts,
             followedThreadUnread = prior.followedThreadUnread,
+            markedUnreadIds = prior.markedUnreadIds,
         )
     }
 
@@ -3649,7 +3665,9 @@ internal class SharedHomeStore(
             return
         }
         // A mention-only row (count 0, web `mentionFlags`) is still worth a read: it clears the @.
-        if (target.unreadCount <= 0 && target.mentionCount <= 0) return
+        // So is a row marked unread with no count (botiverse/slock #11795): the read clears the mark.
+        val marked = current.snapshot.isConversationMarkedUnread(conversationId)
+        if (target.unreadCount <= 0 && target.mentionCount <= 0 && !marked) return
         val coordinator = readReceiptCoordinator
         val owner =
             readReceiptOwnerFactory?.invoke(
@@ -3760,14 +3778,16 @@ internal class SharedHomeStore(
         val accountId = current.snapshot.currentMember.id.value
         val clearedThreads =
             current.snapshot.followedThreadUnread.filterValues { it.parentChannelId == channelId }
-        if (target.unreadCount <= 0 && target.mentionCount <= 0 && clearedThreads.isEmpty()) return
+        val marked = current.snapshot.isConversationMarkedUnread(conversationId)
+        if (target.unreadCount <= 0 && target.mentionCount <= 0 && clearedThreads.isEmpty() && !marked) return
         val cleared =
             HomeConversationReadAllClear(
                 conversationId = conversationId,
                 unreadCount = target.unreadCount,
                 mentionCount = target.mentionCount,
                 firstUnreadMessageId = target.firstUnreadMessageId,
-                threads = clearedThreads
+                threads = clearedThreads,
+                markedUnread = marked
             )
         applyHomeSnapshotLocally { it.withConversationReadAllCleared(cleared) }
         when (val result = markConversationReadAll(channelId)) {
@@ -3801,6 +3821,60 @@ internal class SharedHomeStore(
         }
     }
 
+    /**
+     * The unread each pending Unfollow cleared, by thread channel id, kept until it is confirmed or
+     * restored. While pending, a reloaded followed-thread summary (which may predate the request, or
+     * an Unfollow still waiting for its undo toast) does not bring the thread back.
+     */
+    private val pendingThreadUnfollows = mutableMapOf<String, HomeFollowedThreadUnread?>()
+
+    private fun projectThreadUnfollow(threadChannelId: String, phase: HomeThreadUnfollowPhase) {
+        val threadId = threadChannelId.trim().takeIf { it.isNotEmpty() } ?: return
+        synchronized(readProjectionOwnerLock) {
+            when (phase) {
+                HomeThreadUnfollowPhase.Unfollowed -> {
+                    val content = _state.value.content as? SharedHomeContentState.Content
+                    val cleared = content?.snapshot?.followedThreadUnread?.get(threadId)
+                    // A second Unfollow while one is pending keeps the first one's count to restore.
+                    if (threadId !in pendingThreadUnfollows || cleared != null) pendingThreadUnfollows[threadId] = cleared
+                    applyHomeSnapshotLocally { it.withThreadUnfollowed(threadId) }
+                }
+                HomeThreadUnfollowPhase.Confirmed -> pendingThreadUnfollows.remove(threadId)
+                HomeThreadUnfollowPhase.Restored -> {
+                    if (threadId !in pendingThreadUnfollows) return@synchronized
+                    val cleared = pendingThreadUnfollows.remove(threadId)
+                    applyHomeSnapshotLocally { it.withThreadUnfollowRestored(threadId, cleared) }
+                }
+            }
+        }
+        diagnosticsLogger("home_thread_unfollow phase=$phase thread=${threadId.take(8)}")
+    }
+
+    private suspend fun markFollowedThreadRead(threadChannelId: String) {
+        val threadId = threadChannelId.trim().takeIf { it.isNotEmpty() } ?: return
+        val current = _state.value.content as? SharedHomeContentState.Content ?: return
+        val cleared = current.snapshot.followedThreadUnread[threadId]
+        val coordinator = readReceiptCoordinator
+        val owner =
+            readReceiptOwnerFactory?.invoke(
+                current.snapshot.server.id.value,
+                current.snapshot.currentMember.id.value
+            )
+        diagnosticsLogger("home_followed_thread_read thread=${threadId.take(8)} known=${cleared != null}")
+        if (coordinator != null && owner != null) {
+            // The prediction clears the thread (withConversationUnread(threadId, 0)) and settles itself.
+            applyReadReceiptPrediction(coordinator.markReadAll(owner, ChannelId(threadId)))
+            return
+        }
+        applyHomeSnapshotLocally { it.withThreadUnfollowed(threadId) }
+        when (markChannelReadAll(ChannelId(threadId))) {
+            is DataResult.Content,
+            is DataResult.Empty -> Unit
+            is DataResult.Error,
+            is DataResult.NoPermission -> applyHomeSnapshotLocally { it.withThreadUnfollowRestored(threadId, cleared) }
+        }
+    }
+
     private suspend fun markConversationUnread(conversationId: String) {
         val current = _state.value.content as? SharedHomeContentState.Content
         val target = current?.snapshot?.findHomeConversation(conversationId)
@@ -3810,14 +3884,19 @@ internal class SharedHomeStore(
         }
         val previous = current
         val channelId = target.messageStreamChannelId()
+        val serverId = current.snapshot.server.id
+        val accountId = current.snapshot.currentMember.id
         val nextUnread = target.unreadCount.takeIf { it > 0 } ?: 1
         applyHomeSnapshotLocally { it.withConversationUnread(conversationId, nextUnread) }
         when (val result = markChannelUnread(channelId)) {
             is DataResult.Content -> {
-                val owner =
-                    readReceiptOwnerFactory
-                        ?.invoke(current.snapshot.server.id.value, current.snapshot.currentMember.id.value)
-                        ?.toReadStateV1ProductionOwner()
+                val readOwner =
+                    readReceiptOwnerFactory?.invoke(serverId.value, accountId.value)
+                // The read point may not have moved (a mark), or moved back: the next open must send its
+                // read again (it is what clears the row on the server), not reuse an earlier acknowledgement.
+                if (readOwner != null) readReceiptCoordinator?.forgetAcknowledged(readOwner, channelId)
+                applyMarkUnreadOutcome(conversationId, serverId, accountId, target.unreadCount, result.data)
+                val owner = readOwner?.toReadStateV1ProductionOwner()
                 if (owner != null) {
                     readStateV1Canary?.applyMutationAck(
                         owner = owner,
@@ -3948,7 +4027,9 @@ internal class SharedHomeStore(
             pinUpdateFailureCallback("Unable to update channel notifications: home not loaded")
             return
         }
-        if (!target.activityMuteSupported) {
+        // A muted conversation can always be unmuted, even once mute is no longer offered for it
+        // (an App bot DM after the bot was removed), so a mute can never get stuck.
+        if (!target.activityMuteSupported && !(target.activityMuted && !muted)) {
             pinUpdateFailureCallback("Unable to update channel notifications")
             return
         }
@@ -4054,6 +4135,14 @@ internal class SharedHomeStore(
                 incomingVersion = update.version,
                 incomingMaxReadSeq = incomingMaxReadSeq
             )
+        if (factResult == PerReceiverReadStateFactResult.Current) {
+            // The fact this store (or Activity, which shares the checkpoints) already holds: only its
+            // "marked unread" flag may still be news here (botiverse/slock #11795). No reconcile.
+            applyHomeSnapshotLocally { snapshot ->
+                snapshot.copy(markedUnreadIds = snapshot.markedUnreadIdsWith(update.channelId.value, update.markedUnread))
+            }
+            return HomeReadStateApplyOutcome.Skipped
+        }
         if (factResult != PerReceiverReadStateFactResult.Accepted) {
             return HomeReadStateApplyOutcome.Skipped
         }
@@ -4063,6 +4152,60 @@ internal class SharedHomeStore(
             )
         }
         return HomeReadStateApplyOutcome.AcceptedNeedsReconcile
+    }
+
+    /**
+     * botiverse/slock #11792 / #11795: Mark as Unread's answer. A rewind keeps the row's count (the
+     * summary brings the exact one). A mark takes back the optimistic count and shows the dot; the
+     * answer goes through the same version-ordered read state as its `read_state:updated`, so an
+     * answer later than a newer read never brings the mark back. Nothing to mark takes the row back
+     * as it was and says why. A 202 (pending) keeps the optimistic count, with no toast.
+     */
+    private fun applyMarkUnreadOutcome(
+        conversationId: String,
+        serverId: ServerId,
+        accountId: MemberId,
+        previousUnread: Int,
+        result: ReadReceiptResult
+    ) {
+        val outcome = result.markUnreadOutcome()
+        diagnosticsLogger("home_mark_unread_outcome conversationId=$conversationId outcome=${outcome.name}")
+        // Pending (202): the optimistic count stays and the `read_state:updated` that follows corrects it.
+        if (outcome == MarkUnreadOutcome.Counted || outcome == MarkUnreadOutcome.Pending) return
+        val now = _state.value.content as? SharedHomeContentState.Content ?: return
+        if (now.snapshot.server.id != serverId || now.snapshot.currentMember.id != accountId) return
+        val optimisticUnread = previousUnread.takeIf { it > 0 } ?: 1
+        applyHomeSnapshotLocally { snapshot ->
+            val row = snapshot.findHomeConversation(conversationId) ?: return@applyHomeSnapshotLocally snapshot
+            // Only the optimistic count goes back: a message that arrived meanwhile keeps its count.
+            if (row.unreadCount != optimisticUnread) return@applyHomeSnapshotLocally snapshot
+            snapshot
+                .withConversationUnread(conversationId, previousUnread)
+                .copy(markedUnreadIds = snapshot.markedUnreadIds)
+        }
+        when (outcome) {
+            MarkUnreadOutcome.Marked -> {
+                val version = result.readStateVersion
+                val maxReadSeq = result.maxReadSeq
+                if (version != null && maxReadSeq != null) {
+                    val target = now.snapshot.findHomeConversation(conversationId)
+                    applyPerReceiverReadState(
+                        PerReceiverReadStateUpdate(
+                            serverId = serverId,
+                            memberId = accountId,
+                            channelId = target?.messageStreamChannelId() ?: ChannelId(conversationId),
+                            version = version,
+                            maxReadSeq = maxReadSeq,
+                            unreadCount = 0,
+                            markedUnread = true
+                        )
+                    )
+                }
+            }
+            MarkUnreadOutcome.NothingToMark -> _readToggleNotices.tryEmit(RaftReadToggleNotice.MarkUnreadNothing)
+            MarkUnreadOutcome.Counted,
+            MarkUnreadOutcome.Pending -> Unit
+        }
     }
 
     private fun applyPerReceiverNotificationPrefs(update: PerReceiverNotificationPrefsUpdate): Boolean {
@@ -4640,6 +4783,8 @@ private fun SharedHomeIntent.toSharedHomeIntentDiagnosticsLabel(): String =
         is SharedHomeIntent.MarkRead -> "${SharedHomeChannelFoldEvent.Patch.wireName}:read:$conversationId"
         is SharedHomeIntent.MarkUnread -> "${SharedHomeChannelFoldEvent.Patch.wireName}:unread:$conversationId"
         is SharedHomeIntent.MarkConversationReadAll -> "${SharedHomeChannelFoldEvent.Patch.wireName}:read-all:$conversationId"
+        is SharedHomeIntent.ProjectThreadUnfollow -> "${SharedHomeChannelFoldEvent.Patch.wireName}:thread-unfollow:$threadChannelId:$phase"
+        is SharedHomeIntent.MarkFollowedThreadRead -> "${SharedHomeChannelFoldEvent.Patch.wireName}:thread-read:$threadChannelId"
         is SharedHomeIntent.CloseDirectMessage -> "${SharedHomeChannelFoldEvent.Remove.wireName}:dm:$conversationId"
         is SharedHomeIntent.OwnMessagesSent -> "${SharedHomeChannelFoldEvent.Patch.wireName}:own-sent:$serverId:${channelIds.size}"
         is SharedHomeIntent.ArchiveChannel -> "${SharedHomeChannelFoldEvent.Remove.wireName}:archive:$conversationId"
@@ -5026,8 +5171,15 @@ internal fun HomeSnapshot.withConversationUnread(
         } else {
             followedThreadUnread
         }
+    // A read (count 0) also clears the row's "marked unread" dot: the same write clears it on the server.
+    val nextMarked = if (unreadCount <= 0) markedUnreadIdsWith(conversationId, marked = false) else markedUnreadIds
     if (delta == 0) {
-        return copy(channels = nextChannels, directMessages = nextDirectMessages, followedThreadUnread = nextThreads)
+        return copy(
+            channels = nextChannels,
+            directMessages = nextDirectMessages,
+            followedThreadUnread = nextThreads,
+            markedUnreadIds = nextMarked
+        )
     }
     val nextUnreadTotal = (unreadTotal + delta).coerceAtLeast(0)
     val nextServerUnreadCount = (server.unreadCount + delta).coerceAtLeast(0)
@@ -5035,6 +5187,7 @@ internal fun HomeSnapshot.withConversationUnread(
         channels = nextChannels,
         directMessages = nextDirectMessages,
         followedThreadUnread = nextThreads,
+        markedUnreadIds = nextMarked,
         server = server.copy(unreadCount = nextServerUnreadCount),
         unreadTotal = nextUnreadTotal,
         serverUnreadCounts = serverUnreadCounts + (server.id.value to nextServerUnreadCount)
@@ -5048,7 +5201,9 @@ internal data class HomeConversationReadAllClear(
     val mentionCount: Int,
     val firstUnreadMessageId: MessageId?,
     /** The followed threads under the conversation that were unread, keyed by thread channel id. */
-    val threads: Map<String, HomeFollowedThreadUnread>
+    val threads: Map<String, HomeFollowedThreadUnread>,
+    /** The row was marked unread with no count (its dot), put back if the read fails. */
+    val markedUnread: Boolean = false
 )
 
 /** The optimistic half of "Mark All as Read": the row and every followed thread under it read. */
@@ -5096,9 +5251,42 @@ internal fun HomeSnapshot.withConversationReadAllRestored(clear: HomeConversatio
                     }
                 }
         )
-    val missingThreads = clear.threads.filterKeys { it !in withRow.followedThreadUnread }
-    if (missingThreads.isEmpty()) return withRow
-    return withRow.copy(followedThreadUnread = withRow.followedThreadUnread + missingThreads)
+    val withMark =
+        if (clear.markedUnread) {
+            withRow.copy(markedUnreadIds = withRow.markedUnreadIdsWith(clear.conversationId, marked = true))
+        } else {
+            withRow
+        }
+    val missingThreads = clear.threads.filterKeys { it !in withMark.followedThreadUnread }
+    if (missingThreads.isEmpty()) return withMark
+    return withMark.copy(followedThreadUnread = withMark.followedThreadUnread + missingThreads)
+}
+
+/**
+ * Whether the Home row of [conversationId] is marked unread with no count ([HomeSnapshot.markedUnreadIds],
+ * botiverse/slock #11795). Keyed by the row's read scope (its message stream channel id).
+ */
+internal fun HomeSnapshot.isConversationMarkedUnread(conversationId: String): Boolean {
+    if (markedUnreadIds.isEmpty()) return false
+    val row = findHomeConversation(conversationId) ?: return conversationId in markedUnreadIds
+    return row.isMarkedUnreadIn(markedUnreadIds)
+}
+
+internal fun HomeConversationRow.isMarkedUnreadIn(markedUnreadIds: Set<String>): Boolean =
+    markedUnreadIds.isNotEmpty() &&
+        (messageStreamChannelId().value in markedUnreadIds || channelId?.value in markedUnreadIds)
+
+/** [HomeSnapshot.markedUnreadIds] with [conversationId]'s read scope set or cleared. */
+internal fun HomeSnapshot.markedUnreadIdsWith(conversationId: String, marked: Boolean): Set<String> {
+    val row = findHomeConversation(conversationId)
+    val scopeId = row?.messageStreamChannelId()?.value ?: conversationId
+    return if (marked) {
+        // Home lists channels and DMs only (a marked thread is not folded into its parent's mark).
+        if (row == null || scopeId in markedUnreadIds) markedUnreadIds else markedUnreadIds + scopeId
+    } else {
+        val keys = setOfNotNull(conversationId, scopeId, row?.channelId?.value)
+        if (markedUnreadIds.none { it in keys }) markedUnreadIds else markedUnreadIds - keys
+    }
 }
 
 private enum class HomeReadStateApplyOutcome(val diagnosticsName: String) {
@@ -5127,10 +5315,13 @@ internal fun HomeSnapshot.withPerReceiverReadState(update: PerReceiverReadStateU
     }
     val nextChannels = channels.map { it.updated() }
     val nextDirectMessages = directMessages.map { it.updated() }
+    // botiverse/slock #11795: an accepted (newer) read state carries the mark when set; a read's omits
+    // it, which clears the row's dot. Version ordering is the caller's gate.
     val withRows =
         copy(
             channels = nextChannels,
-            directMessages = nextDirectMessages
+            directMessages = nextDirectMessages,
+            markedUnreadIds = markedUnreadIdsWith(update.channelId.value, marked = update.markedUnread)
         )
     // Web `applyReadStateUpdate` -> `applyServerThreadUnread`: a thread scope's server count lowers the mark.
     val serverUnread = update.unreadCount ?: return withRows
@@ -5514,6 +5705,20 @@ sealed interface SharedHomeIntent {
      * channel and its followed threads in one `conversation-read-all` request.
      */
     data class MarkConversationReadAll(val conversationId: String) : SharedHomeIntent
+
+    /**
+     * Web #11687: unfollowing a thread (from the thread, its parent message's menu, or Activity)
+     * clears its unread on Home at once; [HomeThreadUnfollowPhase.Restored] (Undo, or a failed
+     * request) puts it back. The Unfollow request itself belongs to the surface that sends it.
+     */
+    data class ProjectThreadUnfollow(val threadChannelId: String, val phase: HomeThreadUnfollowPhase) : SharedHomeIntent
+
+    /**
+     * Web threadStore `clearThreadUnread` (#11494): read a followed thread without opening it (the
+     * unread-thread pill landed on the history paywall, where the thread can't be opened). Its
+     * unread leaves Home at once; a failed write puts it back.
+     */
+    data class MarkFollowedThreadRead(val threadChannelId: String) : SharedHomeIntent
     data class CloseDirectMessage(val conversationId: String) : SharedHomeIntent
     /**
      * Task #59: the current user sent a message successfully in these conversations (the DM, or
@@ -5578,6 +5783,8 @@ private val SharedHomeIntent.loadsHome: Boolean
             is SharedHomeIntent.MarkRead,
             is SharedHomeIntent.MarkUnread,
             is SharedHomeIntent.MarkConversationReadAll,
+            is SharedHomeIntent.ProjectThreadUnfollow,
+            is SharedHomeIntent.MarkFollowedThreadRead,
             is SharedHomeIntent.CloseDirectMessage,
             is SharedHomeIntent.OwnMessagesSent,
             is SharedHomeIntent.ArchiveChannel,
@@ -5628,6 +5835,8 @@ private val SharedHomeIntent.cancelsBackgroundRefresh: Boolean
             is SharedHomeIntent.MarkRead,
             is SharedHomeIntent.MarkUnread,
             is SharedHomeIntent.MarkConversationReadAll,
+            is SharedHomeIntent.ProjectThreadUnfollow,
+            is SharedHomeIntent.MarkFollowedThreadRead,
             is SharedHomeIntent.CloseDirectMessage,
             is SharedHomeIntent.OwnMessagesSent,
             is SharedHomeIntent.ArchiveChannel,
@@ -5678,6 +5887,8 @@ private val SharedHomeIntent.debouncesInFlightHomeLoad: Boolean
             is SharedHomeIntent.MarkRead,
             is SharedHomeIntent.MarkUnread,
             is SharedHomeIntent.MarkConversationReadAll,
+            is SharedHomeIntent.ProjectThreadUnfollow,
+            is SharedHomeIntent.MarkFollowedThreadRead,
             is SharedHomeIntent.CloseDirectMessage,
             is SharedHomeIntent.OwnMessagesSent,
             is SharedHomeIntent.ArchiveChannel,
@@ -5786,6 +5997,8 @@ private fun RealtimeEvent.homeRealtimeDirtyReason(): String =
         is build.raft.app.model.ServerFeaturesChanged -> "server_features_changed"
         is build.raft.app.model.ActivityChanged -> "activity_changed"
         is build.raft.app.model.ServerAppearanceUpdated -> "appearance_updated"
+        // Never dirties Home (updatesHomeSnapshot is false); named for the diagnostics only.
+        is build.raft.app.model.AgentActivitySubscribed -> "agent_activity_subscribed"
         else -> "realtime"
     }
 

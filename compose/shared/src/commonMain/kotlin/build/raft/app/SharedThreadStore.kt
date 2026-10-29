@@ -47,7 +47,11 @@ import build.raft.app.data.AddChannelMembersBatchRequest
 import build.raft.app.data.ChannelRepository
 import build.raft.app.data.ChannelProfileUpdateRequest
 import build.raft.app.data.ChannelProfileUpdateResult
+import build.raft.app.data.MarkUnreadOutcome
+import build.raft.app.data.leftMarkedUnread
+import build.raft.app.data.RaftReadToggleNotice
 import build.raft.app.data.ReadReceiptResult
+import build.raft.app.data.markUnreadOutcome
 import build.raft.app.data.ReadReceiptCoordinator
 import build.raft.app.data.ReadReceiptOwner
 import build.raft.app.data.RemoveChannelMemberRequest
@@ -153,6 +157,9 @@ import build.raft.app.network.sync.ThreadEnteredScopeSnapshotLoader
 import build.raft.app.network.sync.ThreadDurablePageDirection
 import build.raft.app.network.sync.ThreadDurablePageExtender
 import build.raft.app.network.sync.ThreadDurableReplyParent
+import build.raft.app.network.sync.ThreadDurableEnterTicket
+import build.raft.app.network.sync.ThreadDurableEnteredPage
+import build.raft.app.network.sync.ThreadDurableRequestStamp
 import build.raft.app.network.sync.ThreadRepliesAcceptedProjection
 import build.raft.app.network.sync.ThreadRepliesAuthoritativeSnapshot
 import build.raft.app.network.sync.ThreadRepliesPageIdentity
@@ -189,13 +196,17 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
@@ -1786,7 +1797,9 @@ internal data class SharedThreadPageFetchResult(
 /** A fetched paging page as the durable window extender needs it (task #168). */
 internal data class SharedThreadDurablePage(
     val context: ReplyCacheProducerContext,
-    val rawPage: RawMessagePage
+    val rawPage: RawMessagePage,
+    /** Phase 3b: the durable partition's head epoch read before this page was requested (`null` = none). */
+    val headEpochAtRequest: Long? = null,
 )
 
 private val processAttachmentUploadCapabilitiesCache =
@@ -1806,6 +1819,8 @@ internal data class SharedThreadDurableContextPage(
     val rawPage: RawMessagePage,
     val hasOlder: Boolean,
     val hasNewer: Boolean,
+    /** Phase 3b: the durable partition's head epoch read before this page was requested (`null` = none). */
+    val headEpochAtRequest: Long? = null,
 )
 
 internal class SharedThreadDataSource(
@@ -1866,6 +1881,11 @@ internal class SharedThreadDataSource(
     private val replyOriginHydrationGraceMillis: Long = SharedThreadZeroReplyOriginHydrationGraceMillis,
     private val canonicalConversationIdentityPublisher:
         suspend (ReplyCacheProvenance, build.raft.app.model.ConversationSummary) -> Boolean = { _, _ -> false },
+    /**
+     * The header's stored channel detail (offline resource): the accepted canonical detail is stored, fenced
+     * from when its request started; a conversation that is gone (404 / lost permission) loses its copy.
+     */
+    private val storedConversationDetails: build.raft.app.data.StoredConversationDetails? = null,
     private val diagnosticsLogger: (String) -> Unit = projectionRejectingDiagnosticsLogger,
     /**
      * Task #43: shared create-agent coordinator used by the action-card
@@ -1972,6 +1992,7 @@ internal class SharedThreadDataSource(
         replyOriginHydrationGraceMillis: Long = SharedThreadZeroReplyOriginHydrationGraceMillis,
         canonicalConversationIdentityPublisher:
             suspend (ReplyCacheProvenance, build.raft.app.model.ConversationSummary) -> Boolean = { _, _ -> false },
+        storedConversationDetails: build.raft.app.data.StoredConversationDetails? = null,
         createAgentCoordinator: build.raft.app.data.SharedCreateAgentCoordinator? = null,
         diagnosticsLogger: (String) -> Unit = projectionRejectingDiagnosticsLogger,
         activityOpenSeedSource: (() -> ThreadActivityOpenSeedSource?)? = null,
@@ -2005,6 +2026,7 @@ internal class SharedThreadDataSource(
         threadPageSizeProvider = threadPageSizeProvider,
         replyOriginHydrationGraceMillis = replyOriginHydrationGraceMillis,
         canonicalConversationIdentityPublisher = canonicalConversationIdentityPublisher,
+        storedConversationDetails = storedConversationDetails,
         diagnosticsLogger = diagnosticsLogger,
         createAgentCoordinator = createAgentCoordinator,
         activityOpenSeedSource = activityOpenSeedSource,
@@ -2068,6 +2090,15 @@ internal class SharedThreadDataSource(
         readReplyResolutionScope()?.let { scope ->
             ReplyCacheProducerContext(scope.session, scope.provenance)
         }
+
+    /**
+     * Phase 3b: the durable partition's head epoch, read BEFORE a page's HTTP request and handed to the durable
+     * writer with that page: a horizonReset in between voids the page's head claim (never its facts).
+     */
+    private fun durableHeadEpochOrNull(provenance: ReplyCacheProvenance): Long? {
+        val partition = provenance.durableMessagePartitionOrNull(SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID) ?: return null
+        return durablePageExtender?.headEpoch(partition) ?: enteredScopeSnapshotLoader?.headEpoch(partition)
+    }
 
     internal fun pendingSendJournalOrNull(): ThreadPendingSendJournal? = pendingSendJournal
 
@@ -2551,35 +2582,6 @@ internal class SharedThreadDataSource(
         }
 
     /**
-     * Hands 4b6ccb0d: whether the durable frame of this route's scope already stores every one of
-     * [messageIds]. `null` = no answer (no reader, no admitted scope, no frame on disk, identity moved),
-     * which callers must treat as "do nothing".
-     */
-    internal suspend fun durableFrameStoresAllIfCurrent(
-        routeIdentity: ThreadRouteIdentity,
-        context: ReplyCacheProducerContext,
-        replyParent: ThreadDurableReplyParent?,
-        messageIds: Set<String>,
-    ): Boolean? {
-        val reader = durableLastKnownReader ?: return null
-        if (!routeIdentity.canRenderTimelineCandidates) return null
-        val admission = durableScopeAdmission(routeIdentity, replyParent) ?: return null
-        val channelId = routeIdentity.timelineChannelId ?: return null
-        val partition =
-            context.provenance.durableMessagePartitionOrNull(SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID)
-                ?: return null
-        if (!isCurrentReplyCacheProvenance(context.provenance)) return null
-        val frame =
-            when (admission) {
-                DurableScopeAdmission.TopLevel -> reader.read(partition, channelId)
-                is DurableScopeAdmission.ReplyThread -> reader.readReplyThread(partition, channelId, admission.parent)
-            } ?: return null
-        if (!isCurrentReplyCacheProvenance(context.provenance)) return null
-        val stored = frame.envelopes.mapTo(mutableSetOf()) { envelope -> envelope.fact.id }
-        return stored.containsAll(messageIds)
-    }
-
-    /**
      * Durable last-known first frame for a top-level route (channel / DM) or, task #168 step 3, a
      * reply-thread route with its typed parent, read from the `sync-core.messages.v2` partition of
      * [context]'s identity. Returns `null` for every non-positive case (no reader, reply route
@@ -2590,32 +2592,83 @@ internal class SharedThreadDataSource(
      * replaces it wholesale.
      */
     /**
-     * Offline cache write entry (task #1124): fetch the entered channel's current page into the
-     * current identity's V2 partition. Same admission as [durableLastKnownPayloadIfCurrent]
-     * (top-level surface, resolvable channel id, an owning partition, current provenance); the
-     * loader re-reads `stillCurrent` after its network round trip. Returns whether a load was
-     * requested at all — callers only use this for diagnostics, never for rendering.
+     * Offline cache write entry (task #1124; message storage Phase 2b): called BEFORE the thread store's own page
+     * request for [routeIdentity]. Same admission as [durableLastKnownPayloadIfCurrent] (renderable route, resolvable
+     * channel id, an owning partition, current provenance). Returns the writer's ticket for
+     * [persistEnteredPageIfCurrent], or `null` (nothing will be written for this request).
      */
-    internal suspend fun loadEnteredScopeSnapshotIfCurrent(
+    internal suspend fun beginEnteredPageIfCurrent(
         routeIdentity: ThreadRouteIdentity,
         context: ReplyCacheProducerContext,
         replyParent: ThreadDurableReplyParent? = null,
-    ): Boolean {
-        val loader = enteredScopeSnapshotLoader ?: return false
-        if (!routeIdentity.canRenderTimelineCandidates) return false
-        val admission = durableScopeAdmission(routeIdentity, replyParent) ?: return false
-        val channelId = routeIdentity.timelineChannelId ?: return false
+    ): ThreadDurableEnterTicket? {
+        val loader = enteredScopeSnapshotLoader ?: return null
+        if (!routeIdentity.canRenderTimelineCandidates) return null
+        val admission = durableScopeAdmission(routeIdentity, replyParent) ?: return null
+        val channelId = routeIdentity.timelineChannelId ?: return null
         val partition =
             context.provenance.durableMessagePartitionOrNull(SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID)
-                ?: return false
-        if (!isCurrentReplyCacheProvenance(context.provenance)) return false
+                ?: return null
+        if (!isCurrentReplyCacheProvenance(context.provenance)) return null
+        return loader.beginEnter(partition, channelId, (admission as? DurableScopeAdmission.ReplyThread)?.parent)
+    }
+
+    /** Phase 2b: whether a durable page writer is wired (the write-through is attempted at all). */
+    internal val hasEnteredPageWriter: Boolean get() = enteredScopeSnapshotLoader != null
+
+    /** Phase 2b: the partition generation and write revision, read before a request that cannot take a ticket yet. */
+    internal suspend fun durableRequestStampIfCurrent(context: ReplyCacheProducerContext): ThreadDurableRequestStamp? {
+        val loader = enteredScopeSnapshotLoader ?: return null
+        val partition =
+            context.provenance.durableMessagePartitionOrNull(SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID)
+                ?: return null
+        if (!isCurrentReplyCacheProvenance(context.provenance)) return null
+        return loader.requestStamp(partition)
+    }
+
+    /**
+     * Phase 2b: write the page the thread store fetched through to the durable partition. With [ticket] (taken
+     * before the request) the page is that request's; without one (a reply thread whose stream the request itself
+     * resolved) a ticket without a realtime baseline is taken now for [routeIdentity]'s resolved channel, from
+     * [stamp] ([durableRequestStampIfCurrent], read before the request). Without a ticket and without a stamp of
+     * the same partition nothing is written: a stamp read now, after the request, would miss a horizonReset during
+     * it and let the page claim the head (#3875).
+     */
+    internal suspend fun persistEnteredPageIfCurrent(
+        ticket: ThreadDurableEnterTicket?,
+        stamp: ThreadDurableRequestStamp?,
+        page: ThreadDurableEnteredPage,
+        routeIdentity: ThreadRouteIdentity,
+        context: ReplyCacheProducerContext,
+        replyParent: ThreadDurableReplyParent? = null,
+    ) {
+        val loader = enteredScopeSnapshotLoader ?: return
         val stillCurrent = { isCurrentReplyCacheProvenance(context.provenance) }
-        when (admission) {
-            DurableScopeAdmission.TopLevel -> loader.loadOnEnter(partition, channelId, stillCurrent)
-            is DurableScopeAdmission.ReplyThread ->
-                loader.loadReplyThreadOnEnter(partition, channelId, admission.parent, stillCurrent)
-        }
-        return true
+        val effective =
+            ticket ?: run {
+                // Never read at write time: the stamp must predate the request (see above).
+                if (stamp == null) return
+                if (!routeIdentity.canRenderTimelineCandidates) return
+                val admission = durableScopeAdmission(routeIdentity, replyParent) ?: return
+                val partition =
+                    context.provenance.durableMessagePartitionOrNull(SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID)
+                        ?: return
+                if (stamp.partition != partition) return
+                if (!stillCurrent()) return
+                loader.beginEnter(
+                    partition,
+                    page.channelId,
+                    (admission as? DurableScopeAdmission.ReplyThread)?.parent,
+                    registerBaseline = false,
+                    stamp = stamp,
+                ) ?: return
+            }
+        loader.persistEnteredPage(effective, page, stillCurrent)
+    }
+
+    /** Phase 2b: [ticket]'s request produced no page to write. */
+    internal suspend fun abandonEnteredPage(ticket: ThreadDurableEnterTicket) {
+        enteredScopeSnapshotLoader?.abandonEnter(ticket)
     }
 
     /**
@@ -2645,7 +2698,7 @@ internal class SharedThreadDataSource(
     /**
      * Offline cache paging entry (task #168): hand a fetched older / newer page to the durable window
      * extender, which appends it only when it is exactly adjacent to the stored window. Same admission
-     * as [loadEnteredScopeSnapshotIfCurrent]; `stillCurrent` is re-read by the extender after its own
+     * as [beginEnteredPageIfCurrent]; `stillCurrent` is re-read by the extender after its own
      * network round trip. Returns whether the extender was asked at all (diagnostics only).
      */
     internal suspend fun extendDurableWindowIfCurrent(
@@ -2655,6 +2708,7 @@ internal class SharedThreadDataSource(
         anchorSeq: Long,
         rawPage: RawMessagePage,
         replyParent: ThreadDurableReplyParent? = null,
+        headEpochAtRequest: Long? = null,
     ): Boolean {
         val extender = durablePageExtender ?: return false
         if (!routeIdentity.canRenderTimelineCandidates) return false
@@ -2672,6 +2726,7 @@ internal class SharedThreadDataSource(
             rawMessages = rawPage.messages,
             requestedLimit = rawPage.requestedLimit,
             replyParent = (admission as? DurableScopeAdmission.ReplyThread)?.parent,
+            requestHeadEpoch = headEpochAtRequest,
         ) { isCurrentReplyCacheProvenance(context.provenance) }
         return true
     }
@@ -2712,6 +2767,7 @@ internal class SharedThreadDataSource(
             hasOlder = page.hasOlder,
             hasNewer = page.hasNewer,
             replyParent = (admission as? DurableScopeAdmission.ReplyThread)?.parent,
+            requestHeadEpoch = page.headEpochAtRequest,
         ) { isCurrentReplyCacheProvenance(page.context.provenance) }
         return true
     }
@@ -2729,9 +2785,11 @@ internal class SharedThreadDataSource(
         rawPage: RawMessagePage,
         replyParent: ThreadDurableReplyParent? = null,
         baseline: CanonicalMessageV2EnterBaseline? = null,
+        headEpochAtRequest: Long? = null,
+        revAtRequest: Long? = null,
     ): Boolean =
         try {
-            applyDurableLatestPage(routeIdentity, context, rawPage, replyParent, baseline)
+            applyDurableLatestPage(routeIdentity, context, rawPage, replyParent, baseline, headEpochAtRequest, revAtRequest)
         } finally {
             // No-op once the page committed under it; otherwise the frames it buffered were never written.
             baseline?.let { abandonDurableLatestPageBaseline(it) }
@@ -2743,6 +2801,8 @@ internal class SharedThreadDataSource(
         rawPage: RawMessagePage,
         replyParent: ThreadDurableReplyParent?,
         baseline: CanonicalMessageV2EnterBaseline?,
+        headEpochAtRequest: Long?,
+        revAtRequest: Long?,
     ): Boolean {
         val extender = durablePageExtender ?: return false
         if (!routeIdentity.canRenderTimelineCandidates) return false
@@ -2760,6 +2820,10 @@ internal class SharedThreadDataSource(
             replyParent = (admission as? DurableScopeAdmission.ReplyThread)?.parent,
             // The writer uses it only for this exact partition + top-level channel.
             baseline = baseline,
+            messageWindow = rawPage.messageWindow,
+            historyLimited = rawPage.historyLimited,
+            requestHeadEpoch = headEpochAtRequest,
+            revAtRequest = revAtRequest,
         ) { isCurrentReplyCacheProvenance(context.provenance) }
         return true
     }
@@ -2771,6 +2835,19 @@ internal class SharedThreadDataSource(
      * member, or the connection has not seen `rooms:joined`): the catch-up commits as before. Task #14c: a
      * reply-thread route with its typed parent registers its thread scope's baseline the same way.
      */
+    /**
+     * Message storage Phase 2b: the current identity's durable write revision, read BEFORE a page fetch and handed to
+     * the page's writer as `revAtRequest`. `null` = no writer / no identity (the writer then reads it itself).
+     */
+    internal suspend fun durableLocalRevIfCurrent(): Long? {
+        val extender = durablePageExtender ?: return null
+        val resolution = readReplyResolutionScope() ?: return null
+        val partition =
+            resolution.provenance.durableMessagePartitionOrNull(SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID)
+                ?: return null
+        return extender.currentLocalRev(partition)
+    }
+
     internal suspend fun beginDurableLatestPageBaselineIfCurrent(
         routeIdentity: ThreadRouteIdentity,
         replyParent: ThreadDurableReplyParent? = null,
@@ -2793,7 +2870,7 @@ internal class SharedThreadDataSource(
 
     /**
      * Task #14c: the late-ack catch-up requests for this reply-thread route's own thread scope (same admission and
-     * partition as [loadEnteredScopeSnapshotIfCurrent]); `null` for any other route or without a writer.
+     * partition as [beginEnteredPageIfCurrent]); `null` for any other route or without a writer.
      */
     internal fun threadJoinConfirmationsIfCurrent(
         routeIdentity: ThreadRouteIdentity,
@@ -3672,9 +3749,7 @@ internal class SharedThreadDataSource(
     suspend fun commitAgentCreateActionCardFromDialog(
         messageId: String,
         card: ThreadActionCard,
-        submit: SharedCreateAgentDialogSubmit,
-        formStore: SharedCreateAgentFormStore?,
-        serverId: String?
+        submit: SharedCreateAgentDialogSubmit
     ): DataResult<ThreadActionCard> {
         if (!card.type.equals("agent:create", ignoreCase = true)) {
             return DataResult.Error(ScreenError(code = "action_card_unsupported", retryable = false))
@@ -3684,12 +3759,7 @@ internal class SharedThreadDataSource(
         val coordinator = createAgentCoordinator
             ?: return DataResult.Error(ScreenError(code = "action_card_coordinator_missing", retryable = false))
 
-        val created =
-            coordinator
-                .createAgent(submit.toCreateAgentRequest())
-                .recoverRejectedCreateAgentFormOrRetry(formStore, serverId, submit) { retrySubmit ->
-                    coordinator.createAgent(retrySubmit.toCreateAgentRequest())
-                }
+        val created = coordinator.createAgent(submit.toCreateAgentRequest())
         return when (created) {
             is DataResult.Content -> {
                 val resultName = created.data.name.takeIf { it.isNotBlank() } ?: submit.name
@@ -4077,6 +4147,8 @@ internal class SharedThreadDataSource(
         replaceReplyAccessFailure: Boolean = false,
         /** Task #14 part C: receives the anchor context page of a focused open, for the durable writer. */
         onFocusedContextPage: ((SharedThreadDurableContextPage) -> Unit)? = null,
+        /** Message storage Phase 2b: receives the request's own latest page, for the durable write-through. */
+        onEnteredPage: ((ThreadDurableEnteredPage) -> Unit)? = null,
     ): DataResult<RaftThreadScreenPayload> {
         if (!isCurrentReplyCacheProvenanceForLocalSend(expectedContext.provenance)) {
             return staleReplyCacheProvenanceResult()
@@ -4093,6 +4165,7 @@ internal class SharedThreadDataSource(
                 ),
             replaceReplyAccessFailure = replaceReplyAccessFailure,
             onFocusedContextPage = onFocusedContextPage,
+            onEnteredPage = onEnteredPage,
         )
     }
 
@@ -4102,7 +4175,8 @@ internal class SharedThreadDataSource(
         reusePrewarm: Boolean,
         replyResolutionScope: ReplyResolutionScope?,
         replaceReplyAccessFailure: Boolean = false,
-        onFocusedContextPage: ((SharedThreadDurableContextPage) -> Unit)? = null
+        onFocusedContextPage: ((SharedThreadDurableContextPage) -> Unit)? = null,
+        onEnteredPage: ((ThreadDurableEnteredPage) -> Unit)? = null,
     ): DataResult<RaftThreadScreenPayload> {
         val resolutionScope = replyResolutionScope ?: readReplyResolutionScope() ?: return authSessionRequiredResult()
         val session = resolutionScope.session
@@ -4172,6 +4246,14 @@ internal class SharedThreadDataSource(
                         basePayload = resolvedBasePayload,
                         replyResolutionScope = resolutionScope,
                         replaceReplyAccessFailure = replaceReplyAccessFailure,
+                        onRawReplyPage =
+                            onEnteredPage?.let { sink ->
+                                { threadChannelId, page ->
+                                    if (threadChannelId != null && page != null) {
+                                        sink(page.toEnteredPage(threadChannelId, channelType = null))
+                                    }
+                                }
+                            },
                         onFocusedContextPage = onFocusedContextPage
                     )
                 } else {
@@ -4183,7 +4265,8 @@ internal class SharedThreadDataSource(
                         basePayload = resolvedBasePayload,
                         threadId = ThreadId(resolvedThreadId),
                         replyResolutionScope = resolutionScope,
-                        onFocusedContextPage = onFocusedContextPage
+                        onFocusedContextPage = onFocusedContextPage,
+                        onEnteredPage = onEnteredPage
                     )
                 }
             } else {
@@ -4384,6 +4467,12 @@ internal class SharedThreadDataSource(
         val durableCommitGeneration =
             replyResolutionScope.provenance.durableMessagePartitionOrNull(SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID)
                 ?.let { partition -> enteredScopeSnapshotLoader?.replyThreadCommitGeneration(partition, key.threadChannelId) }
+        val durableHeadEpoch = durableHeadEpochOrNull(replyResolutionScope.provenance)
+        // Message storage Phase 2b: the write revision before the fetch too — a realtime loose write bumps no commit
+        // generation, but its revision is newer than the page, so the page never overwrites it.
+        val durableRevAtRequest =
+            replyResolutionScope.provenance.durableMessagePartitionOrNull(SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID)
+                ?.let { partition -> enteredScopeSnapshotLoader?.currentLocalRev(partition) }
         val result =
             payloadCache.prewarm(
                 serverId = key.serverId,
@@ -4429,7 +4518,9 @@ internal class SharedThreadDataSource(
                     context = ReplyCacheProducerContext(session, replyResolutionScope.provenance),
                     resolvedThreadChannelId = threadChannelId,
                     rawPage = page,
-                    expectedCommitGeneration = durableCommitGeneration ?: return@let
+                    expectedCommitGeneration = durableCommitGeneration ?: return@let,
+                    headEpochAtRequest = durableHeadEpoch,
+                    revAtRequest = durableRevAtRequest,
                 )
             }
         }
@@ -4445,7 +4536,7 @@ internal class SharedThreadDataSource(
      * Task #14b ("every authoritative page is persisted"): hand the reply page an Activity prewarm just
      * fetched to the durable V2 writer as the thread scope's window, so opening the thread later renders
      * `thread_durable_last_known` even after the in-memory prewarm was invalidated or the process restarted.
-     * Same admission as [loadEnteredScopeSnapshotIfCurrent] for the prewarm's reply route (renderable reply
+     * Same admission as [persistEnteredPageIfCurrent] for the prewarm's reply route (renderable reply
      * route with its typed parent, an owning partition, current provenance); additionally the page must be
      * the one the server resolved for exactly this thread. The parent named here is only the route's claim —
      * the writer has the server confirm it. Every refusal on this side logs one `canonical_v2_prewarm_page`
@@ -4457,6 +4548,8 @@ internal class SharedThreadDataSource(
         resolvedThreadChannelId: String?,
         rawPage: RawMessagePage?,
         expectedCommitGeneration: Long,
+        headEpochAtRequest: Long?,
+        revAtRequest: Long?,
     ) {
         val loader = enteredScopeSnapshotLoader ?: return
         val threadChannelId = basePayload.streamChannelId.orEmpty()
@@ -4488,6 +4581,10 @@ internal class SharedThreadDataSource(
             rawMessages = rawPage.messages,
             requestedLimit = rawPage.requestedLimit,
             expectedCommitGeneration = expectedCommitGeneration,
+            messageWindow = rawPage.messageWindow,
+            historyLimited = rawPage.historyLimited,
+            requestHeadEpoch = headEpochAtRequest,
+            revAtRequest = revAtRequest,
         ) { isCurrentReplyCacheProvenance(context.provenance) }
     }
 
@@ -5813,6 +5910,28 @@ internal class SharedThreadDataSource(
         }
     }
 
+    /**
+     * botiverse/slock #11687: Mark as Unread on an open reply thread (its header ⋯ and its messages'
+     * menus): `POST /channels/:threadChannelId/unread`, the same write as the thread's Activity row,
+     * through the process read-receipt coordinator so it goes out after this channel's reads.
+     */
+    suspend fun markThreadChannelUnread(threadChannelId: String): DataResult<ReadReceiptResult> {
+        if (threadChannelId.isBlank()) {
+            return DataResult.Error(ScreenError(code = "thread_id_missing", retryable = false))
+        }
+        val coordinator = readReceiptCoordinator
+        val ownerFactory = readReceiptOwnerFactory
+        if (coordinator == null || ownerFactory == null) {
+            return DataResult.Error(ScreenError(code = "thread_mark_unread_unavailable", retryable = false))
+        }
+        val session = readSession() ?: return authSessionRequiredResult()
+        val serverId =
+            selectedServerStore?.selectedServerId?.value
+                ?: session.currentServerId
+                ?: return DataResult.Error(ScreenError(code = "server_missing", retryable = false))
+        return coordinator.markUnread(ownerFactory(serverId, session.user.id), ChannelId(threadChannelId))
+    }
+
     suspend fun openMessageContext(
         messageId: String,
         basePayload: RaftThreadScreenPayload
@@ -5865,6 +5984,8 @@ internal class SharedThreadDataSource(
             "thread_page_size source=$source server=${session.currentServerId.orEmpty()} pageSize=$pageSize"
         )
         var rawPage = RawMessagePageWitness.None
+        // Phase 3b: read before the request (with the identity): a horizonReset during it voids the page's head claim.
+        val headEpochAtRequest = durableHeadEpochOrNull(resolutionScope.provenance)
         val result =
             if (conversationRepository != null) {
                 fetchThreadPayloadFromRepository(
@@ -5912,7 +6033,8 @@ internal class SharedThreadDataSource(
                             rawPage.page?.let { page ->
                                 SharedThreadDurablePage(
                                     context = ReplyCacheProducerContext(session, resolutionScope.provenance),
-                                    rawPage = page
+                                    rawPage = page,
+                                    headEpochAtRequest = headEpochAtRequest,
                                 )
                             }
                     )
@@ -5949,7 +6071,8 @@ internal class SharedThreadDataSource(
         threadId: ThreadId,
         replyResolutionScope: ReplyResolutionScope,
         includeFollowedSummaries: Boolean = false,
-        onFocusedContextPage: ((SharedThreadDurableContextPage) -> Unit)? = null
+        onFocusedContextPage: ((SharedThreadDurableContextPage) -> Unit)? = null,
+        onEnteredPage: ((ThreadDurableEnteredPage) -> Unit)? = null
     ): DataResult<RaftThreadScreenPayload> {
         val focusedContext =
             if (includeFollowedSummaries) {
@@ -5970,7 +6093,8 @@ internal class SharedThreadDataSource(
         val initialResult =
             fetchThreadSnapshotFromRepository(
                 fallbackCode = "thread_network",
-                expectedProvenance = replyResolutionScope.provenance
+                expectedProvenance = replyResolutionScope.provenance,
+                loadedConversationId = threadId.value,
             ) { repository ->
                 val pageSize = threadPageSize(session.currentServerId)
                 diagnosticsLogger?.invoke(
@@ -5980,10 +6104,25 @@ internal class SharedThreadDataSource(
                 repository.getThread(
                     threadId = threadId,
                     includeFollowedSummaries = includeFollowedSummaries,
-                    limit = pageSize
+                    limit = pageSize,
+                    captureRawMessagePage = onEnteredPage != null
                 )
             }
         val initialData = initialResult as? DataResult.Content
+        // Message storage Phase 2b: the page this request fetched is the durable write (with the channel detail the
+        // same load fetched: its kind names the scope).
+        initialData?.data?.let { snapshot ->
+            val raw = snapshot.rawMessagePage.page ?: return@let
+            onEnteredPage?.invoke(
+                raw.toEnteredPage(
+                    channelId = threadId.value,
+                    channelType =
+                        snapshot.canonicalConversationDetail
+                            ?.takeIf { detail -> detail.channelId?.value == null || detail.channelId?.value == threadId.value }
+                            ?.channelType,
+                )
+            )
+        }
         // If the route's stream hint is untrusted (stream != parent channel) and the
         // thread-channel snapshot's reported parent pair differs from the route,
         // fall back to the resolve path which POSTs createOrOpenThread to
@@ -6024,6 +6163,8 @@ internal class SharedThreadDataSource(
     ): DataResult<RaftThreadScreenPayload>? {
         val focusedMessageId = basePayload.focusedMessageId?.takeIf { it.isNotBlank() } ?: return null
         val focusedContextChannelId = basePayload.focusedMessageContextChannelIdOrNull()
+        // Phase 3b: read before the request: a horizonReset during it voids the page's head claim.
+        val headEpochAtRequest = durableHeadEpochOrNull(replyResolutionScope.provenance)
         val contextResult =
             fetchThreadSnapshotFromRepository(
                 fallbackCode = "thread_focused_context",
@@ -6054,6 +6195,7 @@ internal class SharedThreadDataSource(
                         rawPage = rawPage,
                         hasOlder = context.canLoadMoreBefore,
                         hasNewer = context.canLoadMoreAfter,
+                        headEpochAtRequest = headEpochAtRequest,
                     )
                 )
             }
@@ -6208,7 +6350,11 @@ internal class SharedThreadDataSource(
                 )
             }
         val accessFlightKey = replyThreadAccessFlightKey(replyResolutionScope, basePayload)
+        // Message storage Phase 2b: set only when THIS caller's request ran. A joined access flight (another
+        // caller's request, possibly sent before this caller took its durable ticket) never hands its page over.
+        var ownFetch = false
         suspend fun fetchInitialSnapshot(): DataResult<ThreadSnapshot> {
+            ownFetch = true
             if (accessFlightKey != null &&
                 !replyThreadAccessAuthorityStillCurrent(
                     expectedKey = accessFlightKey,
@@ -6267,7 +6413,7 @@ internal class SharedThreadDataSource(
                 onReplyThreadAccessValidatedForTest?.invoke()
                 onRawReplyPage?.invoke(
                     initialResult.data.conversation.thread?.streamChannelId?.value?.takeIf { it.isNotBlank() },
-                    initialResult.data.rawMessagePage.page
+                    initialResult.data.rawMessagePage.page?.takeIf { ownFetch }
                 )
                 val hasReplyContent = initialResult.data.hasRenderableReplyThreadMessages(basePayload)
                 val parentContextRemainingGraceMillis =
@@ -6613,11 +6759,15 @@ internal class SharedThreadDataSource(
         fallbackCode: String,
         expectedProvenance: ReplyCacheProvenance,
         allowCapturedScopeResultAfterProvenanceChange: Boolean = false,
+        /** The conversation this request loads: gone (404 / lost permission) = its stored header detail goes. */
+        loadedConversationId: String? = null,
         call: suspend (ConversationRepository) -> DataResult<ThreadSnapshot>
     ): DataResult<ThreadSnapshot> {
         val repository =
             conversationRepository
                 ?: return DataResult.Error(ScreenError(code = fallbackCode, retryable = true))
+        // Offline-first header: the stored detail is fenced from now (the request's start), not its answer.
+        val detailFetchStartedAt = storedConversationDetails?.fetchStarted()
         val result =
             try {
                 call(repository)
@@ -6636,6 +6786,13 @@ internal class SharedThreadDataSource(
             } else {
                 try {
                     val published = canonicalConversationIdentityPublisher(expectedProvenance, detail)
+                    if (published) {
+                        storedConversationDetails?.recordCanonical(
+                            owner = expectedProvenance.storedConversationDetailOwner(),
+                            detail = detail,
+                            startedAt = detailFetchStartedAt,
+                        )
+                    }
                     diagnosticsLogger(
                         "conversation_directory_canonical_publish " +
                             "serverId=${expectedProvenance.serverId} channelId=${detail.channelId?.value.orEmpty()} " +
@@ -6650,6 +6807,11 @@ internal class SharedThreadDataSource(
                     )
                 }
             }
+        }
+        val goneConversationId = loadedConversationId?.trim()?.takeIf { it.isNotEmpty() && result.isConversationGone() }
+        if (goneConversationId != null && storedConversationDetails != null && isCurrentReplyCacheProvenance(expectedProvenance)) {
+            // Deleted / no longer visible: its name and topic must not come back on a cold open.
+            storedConversationDetails.remove(expectedProvenance.storedConversationDetailOwner(), goneConversationId)
         }
         if (
             !allowCapturedScopeResultAfterProvenanceChange &&
@@ -6827,7 +6989,6 @@ private const val SharedThreadFirstFrameDelayMillis = 16L
  * Hands 4b6ccb0d: how long after a confirmed send the durable frame is checked for it. Long enough for the
  * realtime echo to reach a continuous window (then nothing is fetched), short enough to land before a page close.
  */
-internal const val SharedThreadOwnSendDurableCheckDelayMillis = 1_500L
 
 /**
  * Task #390: on a memory-miss entry the store waits at most this long for the entered-scope
@@ -6839,7 +7000,6 @@ internal const val SharedThreadOwnSendDurableCheckDelayMillis = 1_500L
  * or an older durable frame, then the refresh result. The load keeps running past the timeout;
  * nothing it wrote is rolled back.
  */
-private const val SharedThreadEnterBaselineAwaitMillis = 500L
 private const val ThreadVisibleReadCoalesceWindowMillis = 2_000L
 private const val ThreadInitialAccessLookupTimeoutMillis = 1_000L
 
@@ -6889,6 +7049,12 @@ internal data class SharedThreadState(
      * value never matches a later focus.
      */
     val unreadThreadJumpFocusNonce: Int = 0,
+    /**
+     * Web ThreadUnreadJumpPill busy (#11358): a pill jump is loading the messages around a parent
+     * that was not loaded. The pill shows "Loading Thread…" and a further tap starts no second
+     * jump until the parent lands (or the load fails).
+     */
+    val unreadThreadJumpLoading: Boolean = false,
 )
 
 /**
@@ -7150,6 +7316,13 @@ internal sealed interface SharedThreadIntent {
     data class ApplyRealtimeEvent(val event: RealtimeEvent, val activeReplyParentMessageId: MessageId? = null) :
         SharedThreadIntent
     data class MarkVisibleRead(val visibleTailIndex: Int? = null) : SharedThreadIntent
+
+    /**
+     * botiverse/slock #11687: Mark as Unread from inside an open reply thread (its header ⋯ and its
+     * messages' menus). The whole thread, as the server's `/unread` marks it; it then stays unread
+     * while this page shows it (its visible reads are held for [threadChannelId]).
+     */
+    data class MarkThreadUnread(val threadChannelId: String) : SharedThreadIntent
     data object FirstContentReady : SharedThreadIntent
     data object LoadMembers : SharedThreadIntent
     data object LoadOlder : SharedThreadIntent
@@ -7232,6 +7405,11 @@ internal class SharedThreadStore(
             .map { threadState -> threadState.unreadThreadJumpFocusNonce }
             .distinctUntilChanged()
 
+    fun unreadThreadJumpLoadingFlow(): Flow<Boolean> =
+        state
+            .map { threadState -> threadState.unreadThreadJumpLoading }
+            .distinctUntilChanged()
+
     // Event-driven drainer for durably journaled pending sends. Resends reuse the journaled
     // randomId so a request that committed server-side before its response was lost is deduped
     // by the server rather than duplicated; row fencing stays with the journal's exact
@@ -7283,7 +7461,8 @@ internal class SharedThreadStore(
     // Foreground priority lease for this page's first-content load (see [SharedForegroundLoadGate]).
     private val foregroundLoadLeaseLock = SynchronizedObject()
     private var foregroundLoadLease: SharedForegroundLoadGate.Lease? = null
-    private var enteredScopeSnapshotJob: Job? = null
+    /** Message storage Phase 2b: the durable write of the last refresh's own page (a context page write waits for it). */
+    private var enteredPagePersistJob: Job? = null
     private var threadJoinCatchUpJob: Job? = null
     private var secondaryTimelineRefreshJob: Job? = null
     private var focusedOriginHydrationJob: Job? = null
@@ -7296,6 +7475,17 @@ internal class SharedThreadStore(
     private var deferredReadJob: Job? = null
     private var lastCompletedReadMarker: ThreadVisibleReadMarker? = null
     private var lastCompletedReadAt: TimeMark? = null
+    // botiverse/slock #11687: the thread this page marked unread. Its visible reads are held while
+    // the page shows it (web threadUnreadHold / autoReadHold), so the open page does not read it
+    // again at once; leaving the page (a new store) or showing another thread ends the hold.
+    private var markedUnreadHoldChannelId: String? = null
+    // #proj-mobile:#70: the thread whose Mark as Unread was answered 202 (admitted, result unknown). The
+    // `read_state:updated` for it decides; it says so (the nothing toast) only while the hold is still on.
+    private var pendingMarkUnreadChannelId: String? = null
+    private val _readToggleNotices = MutableSharedFlow<RaftReadToggleNotice>(extraBufferCapacity = 4)
+
+    /** One-shot Mark as Unread notices (Nothing to mark), shown by the page as a toast. */
+    val readToggleNotices: SharedFlow<RaftReadToggleNotice> = _readToggleNotices.asSharedFlow()
     private var lastRoutePayload: RaftThreadScreenPayload? = null
     private var visiblePayloadOwnerScopeId: String? = null
     private var firstContentReadyRouteKey: String? = null
@@ -7438,6 +7628,9 @@ internal class SharedThreadStore(
             is SharedThreadIntent.MarkVisibleRead -> {
                 scope.launch { markVisibleRead(intent.visibleTailIndex) }
             }
+            is SharedThreadIntent.MarkThreadUnread -> {
+                scope.launch { markThreadUnread(intent.threadChannelId) }
+            }
             SharedThreadIntent.FirstContentReady -> {
                 scope.launch { markFirstContentReady() }
             }
@@ -7522,6 +7715,7 @@ internal class SharedThreadStore(
                     activeReplyParentMessageId = intent.activeReplyParentMessageId
                 )
             is SharedThreadIntent.MarkVisibleRead -> markVisibleRead(intent.visibleTailIndex)
+            is SharedThreadIntent.MarkThreadUnread -> markThreadUnread(intent.threadChannelId)
             SharedThreadIntent.FirstContentReady -> markFirstContentReady()
             SharedThreadIntent.LoadMembers -> loadMembers()
             SharedThreadIntent.LoadOlder -> loadOlder()
@@ -7568,37 +7762,6 @@ internal class SharedThreadStore(
         pendingReadMarker = null
         lastCompletedReadMarker = null
         lastCompletedReadAt = null
-    }
-
-    /** Task #390 / #18: no frame on disk yet — wait (bounded) for the entry's baseline load, then read again. */
-    private suspend fun awaitBaselineThenReadDurable(
-        threadId: String,
-        routeContextPayload: RaftThreadScreenPayload,
-        routeIdentity: ThreadRouteIdentity,
-        context: ReplyCacheProducerContext,
-        baselineJob: Job?,
-    ): RaftThreadScreenPayload? {
-        baselineJob?.let { job ->
-            try {
-                val completed =
-                    withTimeoutOrNull(SharedThreadEnterBaselineAwaitMillis) { job.join() } != null
-                diagnosticsLogger?.invoke(
-                    "thread_enter_baseline_await threadId=$threadId completed=$completed"
-                )
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (failure: Throwable) {
-                diagnosticsLogger?.invoke(
-                    "thread_enter_baseline_await threadId=$threadId outcome=error " +
-                        "reason=${failure.message ?: failure::class.simpleName.orEmpty()}"
-                )
-            }
-        }
-        return dataSource.durableLastKnownPayloadIfCurrent(
-            routePayload = routeContextPayload,
-            routeIdentity = routeIdentity,
-            context = context,
-        )
     }
 
     /**
@@ -7758,37 +7921,15 @@ internal class SharedThreadStore(
             } else {
                 emptyList()
             }
-        // Offline cache write entry (task #1124): every entry of a channel / DM refreshes that one
-        // channel's durable baseline in the background. Task #390 moves the launch ahead of the
-        // offline read below so that on a memory miss the load and the read overlap: the durable
-        // last-known read can see a snapshot the load committed while it ran, and the first frame
-        // is the entered content instead of a loading shell that the refresh replaces a beat later.
-        // Fire-and-forget on the store scope: it never touches the visible payload, and closing
-        // the screen cancels it.
+        // Offline cache write entry (task #1124; message storage Phase 2b): the entry's own page request (the
+        // refresh below) is written through to the durable partition, so there is no separate enter load to start
+        // or wait for here. Task #14c: subscribed before that request can commit, so a late ack is not missed.
         if (producerContext != null) {
-            enteredScopeSnapshotJob?.cancel()
-            val replyParent = routeContextPayload.durableReplyParentOrNull()
-            // Task #14c: subscribed before the enter can commit, so a late ack during its fetch is not missed.
-            watchThreadJoinConfirmations(routeIdentity, producerContext, replyParent)
-            enteredScopeSnapshotJob =
-                scope.launch {
-                    dataSource.loadEnteredScopeSnapshotIfCurrent(routeIdentity, producerContext, replyParent)
-                }
+            watchThreadJoinConfirmations(routeIdentity, producerContext, routeContextPayload.durableReplyParentOrNull())
         }
-        // This entry's own load: the disk read below suspends, and the field may be replaced meanwhile.
-        val entryBaselineJob = if (producerContext != null) enteredScopeSnapshotJob else null
         // Offline cache read entry (task #1123): only when no in-memory candidate exists does the
         // durable last-known frame stand in for the loading shell. Memory candidates are newer by
         // construction (they were written by a network response in this process).
-        // Task #390: on that read path only, wait (bounded by SharedThreadEnterBaselineAwaitMillis)
-        // for the baseline load just launched to finish first. When it commits inside the window
-        // the disk read returns that snapshot and the entry fetches the channel exactly once;
-        // when it does not, the read proceeds as before. The await only joins — a timeout leaves
-        // the load running so nothing it wrote is rolled back.
-        // Task #18 (Hands e342666b): the wait applies only when the disk has NO frame yet. With a
-        // frame on disk the entry shows it at once and the load replaces it when it lands: on a real
-        // network the load never finished inside the window (51 of 51 waits timed out on 1.15.1), so
-        // every entry with local data showed the loading shell for an extra half second.
         val durableLastKnown =
             if (cached == null && current == null && threadId != null) {
                 producerContext?.let { context ->
@@ -7796,13 +7937,7 @@ internal class SharedThreadStore(
                         routePayload = routeContextPayload,
                         routeIdentity = routeIdentity,
                         context = context,
-                    ) ?: if (supersededMemory != null || activitySeed.isNotEmpty()) {
-                        // A memory or Activity candidate already stands in: no reason to hold the first
-                        // frame for the baseline.
-                        null
-                    } else {
-                        awaitBaselineThenReadDurable(threadId, routeContextPayload, routeIdentity, context, entryBaselineJob)
-                    }
+                    )
                 }
             } else {
                 null
@@ -8237,15 +8372,35 @@ internal class SharedThreadStore(
         if (!hasRenderableContent) {
             delay(SharedThreadFirstFrameDelayMillis)
         }
+        // Message storage Phase 2b: this request's own page is the durable write (no separate enter fetch). The ticket
+        // (realtime baseline, partition generation, write revision) is taken BEFORE the request.
+        val enteredRoute = basePayload.resolveThreadRouteIdentity()
+        val enteredReplyParent = basePayload.durableReplyParentOrNull()
+        val enteredTicket = dataSource.beginEnteredPageIfCurrent(enteredRoute, refreshProducerContext, enteredReplyParent)
+        // A reply route whose stream this request resolves cannot take a ticket yet; the revision and generation are
+        // still read now, before the request, for the ticket taken after it.
+        val resolvesItsStream =
+            enteredTicket == null && enteredReplyParent != null && enteredRoute.timelineChannelId == null &&
+                dataSource.hasEnteredPageWriter
+        val enteredStamp = if (resolvesItsStream) dataSource.durableRequestStampIfCurrent(refreshProducerContext) else null
+        var enteredPage: ThreadDurableEnteredPage? = null
+        // Capture the raw page only when it can be written (a writer that took a ticket, or will after the request).
+        val onEnteredPage: ((ThreadDurableEnteredPage) -> Unit)? =
+            if (enteredTicket != null || resolvesItsStream) { page -> enteredPage = page } else null
         val result =
-            dataSource.fetchThreadPayloadForContext(
-                basePayload = basePayload,
-                expectedContext = refreshProducerContext,
-                persistResult = true,
-                reusePrewarm = reusePrewarm,
-                replaceReplyAccessFailure = explicitRetry,
-                onFocusedContextPage = ::launchDurableContextPagePersist,
-            )
+            try {
+                dataSource.fetchThreadPayloadForContext(
+                    basePayload = basePayload,
+                    expectedContext = refreshProducerContext,
+                    persistResult = true,
+                    reusePrewarm = reusePrewarm,
+                    replaceReplyAccessFailure = explicitRetry,
+                    onFocusedContextPage = ::launchDurableContextPagePersist,
+                    onEnteredPage = onEnteredPage,
+                )
+            } finally {
+                launchEnteredPagePersist(enteredTicket, enteredStamp, enteredPage, basePayload, refreshProducerContext)
+            }
         val latest = _state.value.payload
         if (
             !dataSource.isCurrentReplyCacheProvenanceForLocalSend(refreshProvenance) ||
@@ -8482,7 +8637,6 @@ internal class SharedThreadStore(
                 "durationMs=${refreshStartedAt.elapsedNow().inWholeMilliseconds} " +
                 nextPayload.originDiagnostics()
         )
-        launchReplyThreadEnteredScopeSnapshotAfterResolution(basePayload, committedPayload, refreshProducerContext)
         launchReplyOriginHydrationIfNeeded(basePayload, staleToken)
         if (!resolvingInitialAccessAtStart && !retryingReadOnlyParentAccess) {
             launchBackgroundHomeContextHydration(basePayload)
@@ -8496,67 +8650,6 @@ internal class SharedThreadStore(
                     !basePayload.needsReplyThreadStreamResolution(),
             launchMembersHydration = nextPayload.hasRenderableThreadContent()
         )
-    }
-
-    /**
-     * Hands 4b6ccb0d: the user's own confirmed send must survive into the durable frame. A continuous window
-     * writes it from the realtime echo; a discontinuous one (e.g. a reply thread under a DM / private parent the
-     * user does not follow, `reason=thread_non_member`) never does, so a later open from disk showed the thread
-     * without the message just sent. Shortly after the send succeeds, the durable frame is checked: when it does
-     * not store every sent message, the scope's enter snapshot is fetched again. That is the authoritative page
-     * write the entry itself uses (the canary's enter rules decide continuity), never a hand-written fact that
-     * could claim a range it did not load. Sends in quick succession coalesce into one check; the job shares
-     * [enteredScopeSnapshotJob] with the entry so two enters of one scope never run at once.
-     */
-    private fun launchOwnSendDurableCatchUp(
-        routePayload: RaftThreadScreenPayload,
-        expectedRoute: ThreadRouteIdentity,
-        sentMessageIds: Set<String>,
-    ) {
-        if (sentMessageIds.isEmpty()) return
-        val routeIdentity = routePayload.resolveThreadRouteIdentity()
-        if (!routeIdentity.isPendingSendEquivalentTo(expectedRoute)) return
-        if (routeIdentity.timelineChannelId == null) return
-        val replyParent = routePayload.durableReplyParentOrNull()
-        enteredScopeSnapshotJob?.cancel()
-        enteredScopeSnapshotJob =
-            scope.launch {
-                delay(SharedThreadOwnSendDurableCheckDelayMillis)
-                val context = dataSource.captureReplyCacheProducerContext() ?: return@launch
-                val stored =
-                    dataSource.durableFrameStoresAllIfCurrent(routeIdentity, context, replyParent, sentMessageIds)
-                if (stored == true) return@launch
-                val requested = dataSource.loadEnteredScopeSnapshotIfCurrent(routeIdentity, context, replyParent)
-                diagnosticsLogger?.invoke(
-                    "thread_own_send_durable_catchup route=${routeIdentity.instanceKey} " +
-                        "sent=${sentMessageIds.size} stored=${stored ?: "unknown"} requested=$requested"
-                )
-            }
-    }
-
-    /**
-     * Offline cache write entry for a reply thread opened before its stream was known (task #168
-     * step 3): `start()` could not name the thread scope, so the enter snapshot is requested once the
-     * first canonical refresh committed a payload that resolved it. A route that already had its
-     * stream at `start()` was requested there and is not requested again.
-     */
-    private fun launchReplyThreadEnteredScopeSnapshotAfterResolution(
-        basePayload: RaftThreadScreenPayload,
-        committedPayload: RaftThreadScreenPayload?,
-        context: ReplyCacheProducerContext,
-    ) {
-        val baseIdentity = basePayload.resolveThreadRouteIdentity()
-        if (baseIdentity.surfaceKind != RaftThreadSurfaceKind.ReplyThread || baseIdentity.timelineChannelId != null) {
-            return
-        }
-        val resolved = committedPayload ?: return
-        val resolvedIdentity = resolved.resolveThreadRouteIdentity()
-        if (resolvedIdentity.timelineChannelId == null) return
-        val replyParent = resolved.durableReplyParentOrNull() ?: basePayload.durableReplyParentOrNull()
-        enteredScopeSnapshotJob?.cancel()
-        watchThreadJoinConfirmations(resolvedIdentity, context, replyParent)
-        enteredScopeSnapshotJob =
-            scope.launch { dataSource.loadEnteredScopeSnapshotIfCurrent(resolvedIdentity, context, replyParent) }
     }
 
     /**
@@ -9660,6 +9753,7 @@ internal class SharedThreadStore(
         val eventRouteIdentity = acceptedPayload.realtimeGapRouteIdentity()
         val currentSession = dataSource.readSession()
         val currentUserId = currentSession?.user?.id
+        if (event is PerReceiverReadStateChanged) resolvePendingMarkUnread(event, currentSession?.currentServerId)
         val readStateOwner = if (event is PerReceiverReadStateChanged) {
             dataSource.currentReplyCacheProvenance()?.threadPayloadOwnerScopeId
         } else null
@@ -10079,6 +10173,15 @@ internal class SharedThreadStore(
         }
         if (!authorityStillCurrent()) return
         val marker = authorityState.payload.visibleReadMarker(visibleTailIndex) ?: return
+        if (marker.channelId == markedUnreadHoldChannelId) {
+            diagnosticsLogger?.invoke(
+                "thread_read_skip channelId=${marker.channelId} reason=marked_unread_hold latest=${marker.latestMessageId}"
+            )
+            return
+        }
+        // Reading another thread here means the person left the one they marked: its hold ends.
+        markedUnreadHoldChannelId = null
+        pendingMarkUnreadChannelId = null
         if (marker.wasRecentlyMarkedRead()) {
             // Task #19 (Hands 2aa74345): the window only coalesces. A marker NEWER than the completed one
             // (a message that arrived, or a stand-in replaced by the network page, right after the last
@@ -10162,6 +10265,61 @@ internal class SharedThreadStore(
                     null
                 }
         }
+    }
+
+    /**
+     * botiverse/slock #11687 (web threadUnreadHold.markOpenThreadUnread): the hold starts before the
+     * write, so no visible read of this page goes out after it; a read still queued is dropped. The
+     * answer is read as the Activity row reads it ([markUnreadOutcome]): Counted / Marked keep the
+     * hold; Nothing to mark says so (the Activity toast) and, like a failed write, ends the hold, as
+     * nothing was marked. A 202 (Pending, #proj-mobile:#70) keeps the hold with no toast until the
+     * `read_state:updated` for the thread answers ([resolvePendingMarkUnread]).
+     */
+    private suspend fun markThreadUnread(threadChannelId: String) {
+        val channelId = threadChannelId.trim().takeIf { it.isNotBlank() } ?: return
+        markedUnreadHoldChannelId = channelId
+        pendingMarkUnreadChannelId = null
+        deferredReadJob?.cancel()
+        deferredReadJob = null
+        if (pendingReadMarker?.channelId == channelId) pendingReadMarker = null
+        lastCompletedReadMarker = null
+        lastCompletedReadAt = null
+        val result = dataSource.markThreadChannelUnread(channelId)
+        val outcome = (result as? DataResult.Content)?.data?.markUnreadOutcome()
+        diagnosticsLogger?.invoke(
+            "thread_mark_unread channelId=$channelId result=${result.threadDiagnosticsResult()} " +
+                "outcome=${outcome?.name ?: "none"}"
+        )
+        if (outcome == MarkUnreadOutcome.Counted || outcome == MarkUnreadOutcome.Marked) return
+        if (outcome == MarkUnreadOutcome.Pending) {
+            if (markedUnreadHoldChannelId == channelId) pendingMarkUnreadChannelId = channelId
+            return
+        }
+        if (markedUnreadHoldChannelId == channelId) markedUnreadHoldChannelId = null
+        if (outcome == MarkUnreadOutcome.NothingToMark) {
+            _readToggleNotices.tryEmit(RaftReadToggleNotice.MarkUnreadNothing)
+        }
+    }
+
+    /**
+     * #proj-mobile:#70 (Tenny): the `read_state:updated` that answers a 202 Mark as Unread. Marked (a
+     * count or the mark) keeps the hold; not marked reads as a 200 nothing to mark (the toast, the
+     * hold ends), but only while the person is still on the thread (the hold is on). Once they left,
+     * the event only updates the state, with no toast.
+     */
+    private fun resolvePendingMarkUnread(event: PerReceiverReadStateChanged, sessionServerId: String?) {
+        val channelId = pendingMarkUnreadChannelId ?: return
+        if (event.serverId != null && !sessionServerId.isNullOrBlank() && event.serverId.value != sessionServerId) return
+        val scope = event.scopes.lastOrNull { it.scopeId.value == channelId } ?: return
+        pendingMarkUnreadChannelId = null
+        val marked = scope.leftMarkedUnread()
+        val stillThere = markedUnreadHoldChannelId == channelId
+        diagnosticsLogger?.invoke(
+            "thread_mark_unread_pending_resolved channelId=$channelId marked=$marked stillThere=$stillThere"
+        )
+        if (marked || !stillThere) return
+        markedUnreadHoldChannelId = null
+        _readToggleNotices.tryEmit(RaftReadToggleNotice.MarkUnreadNothing)
     }
 
     /** Time left in the coalesce window of the last completed read (at least 1 ms). */
@@ -10248,8 +10406,62 @@ internal class SharedThreadStore(
      * window that exists. Persisting does not depend on the route still being shown (the facts are the
      * identity's, re-checked by the writer); the identity gates are the writer's.
      */
+    /**
+     * Message storage Phase 2b: write the page a refresh fetched ([page]) under the ticket taken before its request,
+     * or release the ticket when the request produced none. UNDISPATCHED and NonCancellable around the release, so
+     * a baseline is always closed even when the scope is already cancelled.
+     */
+    private fun launchEnteredPagePersist(
+        ticket: ThreadDurableEnterTicket?,
+        stamp: ThreadDurableRequestStamp?,
+        page: ThreadDurableEnteredPage?,
+        basePayload: RaftThreadScreenPayload,
+        context: ReplyCacheProducerContext,
+    ) {
+        if (ticket == null && page == null) return
+        enteredPagePersistJob =
+            scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                try {
+                    if (page == null) {
+                        ticket?.let { withContext(NonCancellable) { dataSource.abandonEnteredPage(it) } }
+                        return@launch
+                    }
+                    // The route the page belongs to: a reply thread resolved by the request names its stream now.
+                    val routeIdentity =
+                        basePayload.copy(sourceThreadId = page.channelId, streamChannelId = page.channelId)
+                            .takeIf { basePayload.surfaceKind == RaftThreadSurfaceKind.ReplyThread }
+                            ?.resolveThreadRouteIdentity()
+                            ?: basePayload.resolveThreadRouteIdentity()
+                    dataSource.persistEnteredPageIfCurrent(
+                        ticket = ticket?.takeIf { it.channelId == page.channelId },
+                        stamp = stamp ?: ticket?.stamp,
+                        page = page,
+                        routeIdentity = routeIdentity,
+                        context = context,
+                        replyParent = basePayload.durableReplyParentOrNull(),
+                    )
+                    // Task #14c: a reply route resolved by this request subscribes to its thread's late join acks now
+                    // (start() could not name the thread).
+                    if (ticket == null && basePayload.surfaceKind == RaftThreadSurfaceKind.ReplyThread) {
+                        watchThreadJoinConfirmations(routeIdentity, context, basePayload.durableReplyParentOrNull())
+                    }
+                    if (ticket != null && ticket.channelId != page.channelId) {
+                        withContext(NonCancellable) { dataSource.abandonEnteredPage(ticket) }
+                    }
+                } catch (cancellation: CancellationException) {
+                    ticket?.let { withContext(NonCancellable) { dataSource.abandonEnteredPage(it) } }
+                    throw cancellation
+                } catch (throwable: Throwable) {
+                    ticket?.let { withContext(NonCancellable) { dataSource.abandonEnteredPage(it) } }
+                    diagnosticsLogger?.invoke(
+                        "thread_durable_entered_page_failed reason=${throwable::class.simpleName ?: "unknown"}"
+                    )
+                }
+            }
+    }
+
     private fun launchDurableContextPagePersist(page: SharedThreadDurableContextPage) {
-        val enterJob = enteredScopeSnapshotJob
+        val enterJob = enteredPagePersistJob
         scope.launch {
             try {
                 enterJob?.join()
@@ -10288,6 +10500,7 @@ internal class SharedThreadStore(
                     anchorSeq = anchorSeq,
                     rawPage = durablePage.rawPage,
                     replyParent = replyParent,
+                    headEpochAtRequest = durablePage.headEpochAtRequest,
                 )
             } catch (cancellation: CancellationException) {
                 throw cancellation
@@ -10838,6 +11051,8 @@ internal class SharedThreadStore(
         var durableOffer: SharedThreadPageFetchResult? = null
         // Task #168 step 3: registered before the first fetch; handed to the durable write or abandoned.
         var durableBaseline: CanonicalMessageV2EnterBaseline? = null
+        // Message storage Phase 2b: the durable write revision before the catch-up's fetch (its page's revAtRequest).
+        var durableRevAtRequest: Long? = null
         var recoveryCompleted = false
         try {
             val requestPayload =
@@ -10872,6 +11087,7 @@ internal class SharedThreadStore(
                     initial.resolveThreadRouteIdentity(),
                     initial.durableReplyParentOrNull(),
                 )
+            durableRevAtRequest = dataSource.durableLocalRevIfCurrent()
             val narrow = dataSource.fetchGapCatchUpLatestPage(requestPayload, wide = false)
             val anchorOnNarrowPage =
                 narrow is DataResult.Content &&
@@ -11074,7 +11290,7 @@ internal class SharedThreadStore(
         }
         val offer = durableOffer
         if (offer != null) {
-            launchDurableLatestPageWrite(initial, offer, durableBaseline)
+            launchDurableLatestPageWrite(initial, offer, durableBaseline, durableRevAtRequest)
         } else {
             durableBaseline?.let { dataSource.abandonDurableLatestPageBaseline(it) }
         }
@@ -11113,6 +11329,7 @@ internal class SharedThreadStore(
         routePayload: RaftThreadScreenPayload,
         fetched: SharedThreadPageFetchResult,
         baseline: CanonicalMessageV2EnterBaseline? = null,
+        revAtRequest: Long? = null,
     ) {
         val routeIdentity = routePayload.resolveThreadRouteIdentity()
         val replyParent = routePayload.durableReplyParentOrNull()
@@ -11131,6 +11348,8 @@ internal class SharedThreadStore(
                     rawPage = durablePage.rawPage,
                     replyParent = replyParent,
                     baseline = baseline,
+                    headEpochAtRequest = durablePage.headEpochAtRequest,
+                    revAtRequest = revAtRequest,
                 )
             } catch (cancellation: CancellationException) {
                 throw cancellation
@@ -11429,11 +11648,16 @@ internal class SharedThreadStore(
                                 ?.streamChannelId,
                         diagnostics = diagnosticsLogger ?: strictProjectionDiagnosticsLogger,
                     )
+                // The HTTP success is the terminal proof for [messageId] whatever state the open
+                // row is in: the drainer flips an adopted orphan to failed before resending, so the
+                // row may already read "failed" here. Drop it from the stability baseline too, or
+                // the failed-row retention would resurrect it beside the delivered message even
+                // when the canonical response carries no random-id echo (feedback 03e9a2f6).
                 val selected =
                     appended
                         .withoutLocalSendMessage(messageId)
                         .withRouteContext(payload)
-                        .preserveStableTimelineFrom(payload)
+                        .preserveStableTimelineFrom(payload.withoutLocalSendMessage(messageId))
                 payload.withThreadContentProjectionFrom(selected)
             }
         val terminalProjection =
@@ -11453,11 +11677,6 @@ internal class SharedThreadStore(
                     "serverId=${currentProvenance.serverId} route=${expectedRoute.instanceKey}"
                 )
             }
-            launchOwnSendDurableCatchUp(
-                routePayload = _state.value.payload,
-                expectedRoute = expectedRoute,
-                sentMessageIds = page.messages.mapNotNullTo(mutableSetOf()) { sent -> sent.id.takeIf(String::isNotBlank) },
-            )
         }
         // Realtime may have consumed the row first. The durable send is still terminal after the
         // HTTP success, so journal cleanup is independent of the optional payload-cache commit
@@ -11679,6 +11898,18 @@ internal class SharedThreadStore(
             diagnosticsLogger = { line -> diagnosticsLogger?.invoke(line) },
         )
 
+    /** The thread parents loaded in [payload] when it is a channel's timeline, else none. */
+    private fun loadedChannelThreadParents(payload: RaftThreadScreenPayload): Map<String, ThreadUnreadThreadParent> {
+        val routeIdentity = payload.resolveThreadRouteIdentity()
+        val channelId =
+            routeIdentity.timelineChannelId?.takeIf { routeIdentity.surfaceKind == RaftThreadSurfaceKind.Channel }
+                ?: return emptyMap()
+        return payload.messages.toLoadedThreadParents(channelId)
+    }
+
+    /** Ids asked for while a lookup was in flight: looked up right after it instead of dropped. */
+    private val unreadThreadParentsQueued = LinkedHashSet<String>()
+
     private suspend fun resolveUnreadThreadParents(threadChannelIds: Set<String>) {
         val routeIdentity = _state.value.payload.resolveThreadRouteIdentity()
         val channelId = routeIdentity.timelineChannelId?.takeIf { routeIdentity.surfaceKind == RaftThreadSurfaceKind.Channel }
@@ -11686,7 +11917,12 @@ internal class SharedThreadStore(
             unreadThreadParentsRecovery.reset()
             return
         }
-        if (unreadThreadParentsInFlight) return
+        if (unreadThreadParentsInFlight) {
+            // The page asks again only when its id set changes, so a request dropped here was lost
+            // for good and its threads stayed without a target (artin: the pill worked once).
+            unreadThreadParentsQueued += threadChannelIds
+            return
+        }
         val pending =
             threadChannelIds.filterTo(LinkedHashSet()) { id ->
                 id.isNotBlank() && id !in unreadThreadParentsRequested && id !in _state.value.unreadThreadParents
@@ -11740,6 +11976,11 @@ internal class SharedThreadStore(
             }
         } finally {
             unreadThreadParentsInFlight = false
+            if (unreadThreadParentsQueued.isNotEmpty() && currentCoroutineContext().isActive) {
+                val queued = unreadThreadParentsQueued.toSet()
+                unreadThreadParentsQueued.clear()
+                resolveUnreadThreadParents(queued)
+            }
         }
     }
 
@@ -11818,10 +12059,24 @@ internal class SharedThreadStore(
      */
     private suspend fun jumpToMessage(messageId: String, switchToTab: String?) {
         val target = messageId.trim().takeIf { it.isNotBlank() } ?: return
+        // Web: a second tap while the pill is busy starts no second jump.
+        if (_state.value.unreadThreadJumpLoading) {
+            diagnosticsLogger?.invoke("thread_jump_to_message result=ignored reason=busy target=${target.take(8)}")
+            return
+        }
         // Mark this focus request as the pill's before the payload carries it, so the page sees
         // the mark by the time its focus anchor runs for this nonce (lands on the replies block).
         val nonce = nextThreadFocusedMessageRequestNonce()
-        reduceState(_state.value.copy(unreadThreadJumpFocusNonce = nonce))
+        // Keep the parents of the threads loaded now, before the jump may replace the window: the
+        // pill's next tap must still reach them (see toLoadedThreadParents).
+        val before = _state.value
+        val remembered = loadedChannelThreadParents(before.payload).filterKeys { it !in before.unreadThreadParents }
+        reduceState(
+            before.copy(
+                unreadThreadJumpFocusNonce = nonce,
+                unreadThreadParents = if (remembered.isEmpty()) before.unreadThreadParents else before.unreadThreadParents + remembered,
+            )
+        )
         val initial = _state.value.payload
         if (initial.messages.any { it.id == target }) {
             focusMessage(target, switchToTab, nonce)
@@ -11855,7 +12110,13 @@ internal class SharedThreadStore(
         diagnosticsLogger?.invoke(
             "thread_jump_to_message result=requested target=${target.take(8)} visibleMessages=${initial.messages.size}"
         )
-        refresh(basePayload = focusRoute, staleToken = staleToken)
+        reduceState(_state.value.copy(unreadThreadJumpLoading = true))
+        try {
+            refresh(basePayload = focusRoute, staleToken = staleToken)
+        } finally {
+            // The parent landed, or the load ended without it: the pill can be pressed again.
+            if (_state.value.unreadThreadJumpLoading) reduceState(_state.value.copy(unreadThreadJumpLoading = false))
+        }
         val loaded = _state.value.payload.messages.any { it.id == target }
         diagnosticsLogger?.invoke(
             "thread_jump_to_message result=${if (loaded) "applied" else "failed"} target=${target.take(8)} " +
@@ -12129,6 +12390,9 @@ internal class SharedThreadViewModel(
 
     fun conversationAccessLostFlow(): Flow<Boolean> = store.conversationAccessLostFlow()
 
+    /** Mark as Unread notices from the thread's menus (Nothing to mark), shown as a toast. */
+    fun readToggleNoticesFlow(): Flow<RaftReadToggleNotice> = store.readToggleNotices
+
     fun timelineSliceFlow(): Flow<ThreadTimelineSlice> = store.timelineSliceFlow()
 
     fun replyMetadataFlow(): Flow<Map<String, ThreadReplyMetadata>> = store.replyMetadataFlow()
@@ -12138,6 +12402,7 @@ internal class SharedThreadViewModel(
     fun unreadThreadParentsFlow(): Flow<Map<String, ThreadUnreadThreadParent>> = store.unreadThreadParentsFlow()
 
     fun unreadThreadJumpFocusNonceFlow(): Flow<Int> = store.unreadThreadJumpFocusNonceFlow()
+    fun unreadThreadJumpLoadingFlow(): Flow<Boolean> = store.unreadThreadJumpLoadingFlow()
 
     fun dispatch(intent: SharedThreadIntent) {
         store.dispatch(intent)
@@ -13033,6 +13298,16 @@ internal fun RaftThreadScreenPayload.preserveStableTimelineFrom(
     val stableMessages =
         timelineMessages
             .withRetainedLocalFailedMessagesFrom(previous.messages)
+            // Feedback 03e9a2f6: a retained local shadow (sending OR failed) whose idempotency key
+            // the server has already echoed on a canonical row in this timeline is delivered, not
+            // pending. Retaining the failed copy beside it rendered a false "send failed" bubble
+            // whose Retry invited a duplicate. Exact random-id proof only (no content heuristic).
+            .let { messages ->
+                messages.absorbingCanonicalSendEchoes(
+                    canonicalMessages = messages,
+                    matchPolicy = ThreadSendEchoMatchPolicy.ExactRandomId
+                )
+            }
             .withSelectedReactionsFrom(previous.messages, preserveSelectedReactions)
             .let { messages ->
                 if (preserveAuxiliaryProjectionFromPrevious) {
@@ -15672,3 +15947,31 @@ private fun Throwable.safeThreadDiagnosticsType(): String =
 internal const val RESUME_CATCH_UP_MAX_RETRIES = 3
 
 internal fun resumeCatchUpRetryDelayMs(attempt: Int): Long = 2_000L shl attempt.coerceIn(0, 2)
+
+private fun ReplyCacheProvenance.storedConversationDetailOwner(): build.raft.app.data.StoredConversationDetailOwner =
+    build.raft.app.data.StoredConversationDetailOwner(
+        environmentId = environmentId,
+        accountId = principalId,
+        serverId = serverId,
+    )
+
+/** The conversation itself is gone for this account: not found, or a (non-session) permission loss. */
+private fun DataResult<*>.isConversationGone(): Boolean =
+    when (this) {
+        is DataResult.NoPermission -> !blocker.isAuthSessionBlocker() && !blocker.serverMessage.isEdgeBlockedMarker()
+        is DataResult.Error -> error.code == "http_404"
+        else -> false
+    }
+
+
+/** Message storage Phase 2b: a captured REST page as the durable writer's [ThreadDurableEnteredPage]. */
+internal fun RawMessagePage.toEnteredPage(channelId: String, channelType: String?): ThreadDurableEnteredPage =
+    ThreadDurableEnteredPage(
+        channelId = channelId,
+        rawMessages = messages,
+        requestedLimit = requestedLimit,
+        messageWindow = messageWindow,
+        historyLimited = historyLimited,
+        channelType = channelType?.takeIf { it.isNotBlank() },
+        replyCountByParentId = replyCountsByParentId,
+    )

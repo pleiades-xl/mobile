@@ -27,10 +27,14 @@ import kotlinx.coroutines.launch
  *   the top of the gap, threshold 80dp (Flutter `RefreshIndicator` + moving content).
  * - [Cupertino] (iOS): UIRefreshControl feel: UIScrollView rubber band, a bare spinner centred in
  *   the gap behind the content.
+ * - [None] (desktop): no pull gesture exists there (mouse / trackpad scroll only), so there is no
+ *   gesture and no indicator: a wheel or trackpad overscroll at the top left the Material indicator
+ *   half-pulled under the list header. Refresh state shows in the page header's spinner instead.
  */
 internal enum class RaftPullToRefreshStyle {
     Material,
     Cupertino,
+    None,
 }
 
 /**
@@ -118,6 +122,14 @@ internal class RaftPullToRefreshController(
     var viewportPx: Float = 0f
 
     var onRefresh: () -> Unit = {}
+
+    /**
+     * A pull released past the threshold that did not call [onRefresh], with the reason
+     * (Hands f6c3f3a6: pulls that started nothing left no trace). `store_refreshing`: it joined
+     * the pull refresh already running; `disabled`: refresh was off; `store_did_not_report`: the
+     * store never reported the requested refresh, so the indicator gave up.
+     */
+    var onPullIgnored: (reason: String) -> Unit = {}
 
     var phase: RaftPullToRefreshPhase by mutableStateOf(RaftPullToRefreshPhase.Idle)
         private set
@@ -239,13 +251,18 @@ internal class RaftPullToRefreshController(
         pull = 0f
         val wasArmed = armed
         armed = false
+        val pastThreshold = wasArmed || contentOffset >= geometry.triggerPx
         when {
-            !enabled -> settle(offsetVelocity)
+            !enabled -> {
+                if (pastThreshold) onPullIgnored("disabled")
+                settle(offsetVelocity)
+            }
             storeRefreshing -> {
+                if (pastThreshold) onPullIgnored("store_refreshing")
                 phase = RaftPullToRefreshPhase.Refreshing
                 springToRefreshing(offsetVelocity)
             }
-            wasArmed || contentOffset >= geometry.triggerPx -> {
+            pastThreshold -> {
                 phase = RaftPullToRefreshPhase.AwaitingRefresh
                 springToRefreshing(offsetVelocity)
                 onRefresh()
@@ -326,7 +343,10 @@ internal class RaftPullToRefreshController(
             }
             // The store had the whole spring to report the refresh. If it did not (the request was
             // dropped, or it finished before we saw it), there is nothing to wait for.
-            if (phase == RaftPullToRefreshPhase.AwaitingRefresh && !storeRefreshing) settle(0f)
+            if (phase == RaftPullToRefreshPhase.AwaitingRefresh && !storeRefreshing) {
+                onPullIgnored("store_did_not_report")
+                settle(0f)
+            }
         }
     }
 

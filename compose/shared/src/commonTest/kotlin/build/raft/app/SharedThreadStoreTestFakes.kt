@@ -5,6 +5,7 @@ import build.raft.app.SharedThreadStoreTest.Companion.message
 import build.raft.app.SharedThreadStoreTest.Companion.threadSnapshot
 import build.raft.app.SharedThreadStoreTestFixtures.member
 import build.raft.app.data.AddChannelMemberRequest
+import build.raft.app.data.ChannelMessageWindow
 import build.raft.app.data.AddChannelMembersBatchRequest
 import build.raft.app.data.AddChannelMembersBatchResult
 import build.raft.app.data.AgentActivitySnapshot
@@ -110,6 +111,12 @@ internal object SharedThreadStoreTestFakes {
         val calls = mutableListOf<Call>()
         val replyParents = mutableListOf<ThreadDurableReplyParent?>()
 
+        /** Phase 3b: what [headEpoch] answers (null = not tracked), and the epochs every write was handed. */
+        var headEpochProvider: ((DurablePartitionKey) -> Long?)? = null
+        val requestHeadEpochs = mutableListOf<Long?>()
+
+        override fun headEpoch(partition: DurablePartitionKey): Long? = headEpochProvider?.invoke(partition)
+
         override suspend fun extendWithAdjacentPage(
             partition: DurablePartitionKey,
             channelId: String,
@@ -118,9 +125,11 @@ internal object SharedThreadStoreTestFakes {
             rawMessages: JsonArray,
             requestedLimit: Int,
             replyParent: ThreadDurableReplyParent?,
+            requestHeadEpoch: Long?,
             stillCurrent: () -> Boolean
         ) {
             replyParents += replyParent
+            requestHeadEpochs += requestHeadEpoch
             calls +=
                 Call(
                     partition = partition,
@@ -165,10 +174,17 @@ internal object SharedThreadStoreTestFakes {
             requestedLimit: Int,
             replyParent: ThreadDurableReplyParent?,
             baseline: CanonicalMessageV2EnterBaseline?,
+            messageWindow: ChannelMessageWindow?,
+            historyLimited: Boolean,
+            requestHeadEpoch: Long?,
+            revAtRequest: Long?,
             stillCurrent: () -> Boolean,
         ) {
             baselineEvents += "apply:${baseline != null}"
-            applyLatestPage(partition, channelId, rawMessages, requestedLimit, replyParent, stillCurrent)
+            applyLatestPage(
+                partition, channelId, rawMessages, requestedLimit, replyParent, messageWindow, historyLimited, requestHeadEpoch, revAtRequest,
+                stillCurrent,
+            )
         }
 
         override suspend fun applyLatestPage(
@@ -177,9 +193,14 @@ internal object SharedThreadStoreTestFakes {
             rawMessages: JsonArray,
             requestedLimit: Int,
             replyParent: ThreadDurableReplyParent?,
+            messageWindow: ChannelMessageWindow?,
+            historyLimited: Boolean,
+            requestHeadEpoch: Long?,
+            revAtRequest: Long?,
             stillCurrent: () -> Boolean
         ) {
             replyParents += replyParent
+            requestHeadEpochs += requestHeadEpoch
             latestCalls +=
                 Triple(
                     channelId,

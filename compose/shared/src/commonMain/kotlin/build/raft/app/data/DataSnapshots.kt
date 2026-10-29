@@ -1,5 +1,6 @@
 package build.raft.app.data
 
+import build.raft.app.data.generated.MarkUnreadOutcomeDto
 import build.raft.app.model.*
 import build.raft.app.network.sync.ReplyPreview
 import build.raft.app.resources.StringDesc
@@ -42,6 +43,12 @@ data class InboxItem(
     val parentMessageSenderKind: MemberKind? = null,
     /** Followed-thread rows: when the parent message was posted (its place in the parent channel). */
     val parentMessageCreatedAt: String? = null,
+    /**
+     * Followed-thread rows (server #11517): the parent message / a reply is inside the plan's
+     * history window. Null from an older server (or a row that isn't a followed thread).
+     */
+    val parentInHistory: Boolean? = null,
+    val repliesInHistory: Boolean? = null,
     val latestActivityMessageId: MessageId? = null,
     val latestActivityPreview: String? = null,
     val latestActivityAt: String? = null,
@@ -85,6 +92,12 @@ data class InboxItem(
      * seq domain. Used as the local Done/read overlay marker.
      */
     val readStateLatestActivitySeq: String? = null,
+    /**
+     * Wire `readState.markedUnread` (botiverse/slock #11795): the person marked this conversation
+     * unread and nothing countable is unread. With [unreadCount] 0 the row shows unread with a dot
+     * and no number (and the Unread filter lists it); counts never include it.
+     */
+    val markedUnread: Boolean = false,
     /**
      * Wire `latestActivitySeq`: the display content frontier (decimal string).
      * Realtime reply patches advance a row only on a strictly newer seq, like
@@ -155,6 +168,17 @@ internal fun ActivityDoneRequestFrontier.toInboxDoneFrontier(): InboxDoneFrontie
     }
 
 /** True only for an explicitly server-projected, unfollowed thread row. */
+/**
+ * The row reads as unread: a count, or marked unread with no count (botiverse/slock #11795). The
+ * read toggle offers Mark as read, and opening it sends the read that clears the mark.
+ */
+internal val InboxItem.showsUnread: Boolean
+    get() = unreadCount > 0 || markedUnread
+
+/** Marked unread with nothing counted: the quiet dot instead of a number. */
+internal val InboxItem.showsMarkedUnreadDot: Boolean
+    get() = markedUnread && unreadCount <= 0
+
 internal val InboxItem.isUnfollowedActivityThread: Boolean
     get() = kind == InboxItemKind.Thread && isFollowing == false
 
@@ -581,6 +605,13 @@ data class HomeSnapshot(
     // String keys: JSON map keys must be primitive, and HomeSnapshot is persisted.
     val followedThreadUnread: Map<String, HomeFollowedThreadUnread> = emptyMap(),
     /**
+     * Channels and DMs marked unread with nothing countable (botiverse/slock #11795, the unread
+     * summary's `readState.markedUnread`), by channel id value: the row shows unread with a dot and
+     * no number. Counts never include them. A read of the row (local or a newer read-state version)
+     * clears its entry.
+     */
+    val markedUnreadIds: Set<String> = emptySet(),
+    /**
      * Task #164: this load's unread reads were the server's remembered bodies (`X-Raft-Stale`) or
      * `503 rw_overloaded`. Never persisted; the store turns it into [SharedHomeState.unreadStale].
      */
@@ -633,10 +664,18 @@ data class ThreadSnapshot(
     val rawMessagePage: RawMessagePageWitness = RawMessagePageWitness.None,
 )
 
-/** One fetched REST message page: the server's raw `messages` array and the `limit` the request sent. */
+/**
+ * One fetched REST message page: the server's raw `messages` array and the `limit` the request sent, plus
+ * (message storage Phase 1, no reader yet) the page's [messageWindow] (`messages/channel` only; `null` when
+ * absent or malformed) and its `historyLimited` flag, which together say what range the page proves.
+ */
 data class RawMessagePage(
     val messages: JsonArray,
     val requestedLimit: Int,
+    val messageWindow: ChannelMessageWindow? = null,
+    val historyLimited: Boolean = false,
+    /** Phase 2b: the page's embedded reply counts by parent message id; `null` = the page carried none. */
+    val replyCountsByParentId: Map<String, Int>? = null,
 )
 
 /**
@@ -1215,7 +1254,23 @@ data class ReadReceiptResult(
     val maxReadSeq: Long? = null,
     val scopes: List<ReadStateV1AckScope> = emptyList(),
     val unreadCount: Int = 0,
-    val changed: Boolean = true
+    val changed: Boolean = true,
+    /**
+     * `POST /channels/:id/unread` (botiverse/slock #11795): true = saved as "marked unread" with no
+     * count; false = nothing to mark (refused); null = a server older than the mark (or another write).
+     */
+    val markedUnread: Boolean? = null,
+    /**
+     * `POST /channels/:id/unread` (botiverse/slock #11854): what the write left, decided by the server in
+     * the read-state transaction. Null from a server older than the field (or another write);
+     * [MarkUnreadOutcomeDto.Unknown] from a newer one. Read it through [markUnreadOutcome].
+     */
+    val serverMarkUnreadOutcome: MarkUnreadOutcomeDto? = null,
+    /**
+     * `POST /channels/:id/unread` answered 202 ([build.raft.app.data.generated.ReadMutationPendingResponseDto]):
+     * the write was admitted, its result is not known yet; the `read_state:updated` that follows carries it.
+     */
+    val markUnreadPending: Boolean = false,
 )
 
 @Serializable
@@ -1865,13 +1920,6 @@ data class SettingsMobileSnapshot(
             available = true,
             statusLabel = if (RAFT_LONG_MESSAGE_COLLAPSE_DEFAULT_ENABLED) "Enabled" else "Off",
             detail = RAFT_LONG_MESSAGE_COLLAPSE_SETTINGS_DETAIL
-        ),
-    val singleTapOpensThread: SettingsMobileToggleSnapshot =
-        SettingsMobileToggleSnapshot(
-            enabled = false,
-            available = true,
-            statusLabel = "Off",
-            detail = "Open a message Thread by tapping its body once. When off, use the replies action or message menu."
         ),
     val newMessageMenu: SettingsMobileToggleSnapshot =
         SettingsMobileToggleSnapshot(

@@ -48,6 +48,7 @@ import build.raft.designsystem.components.RaftBackButton
 import build.raft.designsystem.components.raftCopyable
 import build.raft.designsystem.components.raftSafeAreaHorizontalPadding
 import build.raft.designsystem.components.RaftBackButtonDefaults
+import build.raft.designsystem.components.RaftGlyph
 
 // raft-ui `sidebarSectionDisclosure`: a 14px chevron (`size-3.5`), `gap-1.5`, all in ink-3.
 private val SectionChevronSize = 14.dp
@@ -129,18 +130,25 @@ internal fun RaftTopPageHeader(
     val topSafeArea =
         (topSafeAreaOverride ?: if (applyTopSafeArea) raftTopSafeAreaPadding() else 0.dp)
             .coerceAtLeast(0.dp)
+    // iPhone Duo (raft-design #859): with the system's side column, Back is the column's first
+    // button, and the header keeps the title from the 16dp margin.
+    val backInColumn = onBack != null && raftSideColumnControls(back = raftSideColumnBackAction(onBack))
     Column(modifier = Modifier.fillMaxWidth()) {
         RaftTopPageHeaderFrame(
             modifier = modifier,
             backgroundColor = backgroundColor,
             topSafeArea = topSafeArea,
             headerHeight = headerHeight,
-            contentStartPadding = contentStartPadding,
+            contentStartPadding = if (backInColumn) RaftTopPageHeaderContentStartPadding else contentStartPadding,
             contentEndPadding = contentEndPadding,
-            contentSpacing = contentSpacing,
+            contentSpacing = if (backInColumn) RaftTopPageHeaderContentSpacing else contentSpacing,
         ) {
             when {
-                onBack != null ->
+                // The first page of the wide supporting pane: Back closes the pane, so it is the
+                // design system's leading Close (web drawer ×); pages pushed in the pane keep Back.
+                onBack != null && !backInColumn && LocalRaftPaneBackCloses.current ->
+                    RaftBackButton(onClick = onBack, label = stringResource(Res.string.common_close), glyph = RaftGlyph.X)
+                onBack != null && !backInColumn ->
                     RaftBackButton(onClick = onBack, label = stringResource(Res.string.common_back))
                 leadingContent != null ->
                     Box(
@@ -227,6 +235,10 @@ internal fun RaftPanelBackHeader(
     onTitleClick: (() -> Unit)? = null,
 ) {
     val safeTop = topSafeArea.coerceAtLeast(0.dp)
+    // iPhone Duo: Back moves to the system's side column (raft-design #859).
+    val backInColumn = onBack != null && raftSideColumnControls(back = raftSideColumnBackAction(onBack))
+    @Suppress("NAME_SHADOWING")
+    val onBack = onBack.takeUnless { backInColumn }
     Box(
         modifier =
             modifier
@@ -294,6 +306,7 @@ internal fun RaftPanelBackHeader(
 
 private val RaftPanelHeaderHeight = 56.dp
 
+
 // raft-ui `text-headline`: 17/22 700, no tracking.
 private val RaftPanelHeaderTitleStyle: TextStyle
     get() = RaftType.PageTitle.copy(fontSize = 17.sp, lineHeight = 22.sp, letterSpacing = 0.sp)
@@ -309,6 +322,13 @@ internal fun RaftTopPageHeaderFrame(
     contentSpacing: Dp = RaftTopPageHeaderContentSpacing,
     content: @Composable RowScope.() -> Unit,
 ) {
+    // iPhone Duo (raft-design #859, "Foldable phones"): with the system's side column a top-level
+    // page has no yellow navigation row. Its name (the search field on Search) is the page's first
+    // header line, on paper, 56pt with the seam under it like every top-level head, so tops line up
+    // across pages (Kirby, 2026-10-28: spacing.md Heights, page-structure.md).
+    val sideColumnTitleLine = raftSideColumnActive() && backgroundColor == RaftColor.Frame
+    @Suppress("NAME_SHADOWING")
+    val backgroundColor = if (sideColumnTitleLine) RaftColor.Canvas else backgroundColor
     val metrics = raftTopPageHeaderFrameMetrics(topSafeArea = topSafeArea, headerHeight = headerHeight)
     // A head that pads for the status bar paints under it: the host's status bar icons follow.
     RaftStatusBarBackdropClaim(backgroundColor, enabled = topSafeArea > 0.dp)

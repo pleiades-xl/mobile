@@ -46,11 +46,35 @@ object RealtimeSocketEvents {
     const val TaskUpdated = GeneratedRealtimeContract.SocketEvent.TaskUpdated
     const val TaskDeleted = GeneratedRealtimeContract.SocketEvent.TaskDeleted
     const val AgentActivity = GeneratedRealtimeContract.SocketEvent.AgentActivity
+
+    /**
+     * Agent activity subscriptions (botiverse/slock 968d102d `packages/shared/src/agentActivitySubscriptions.ts`).
+     * A socket whose handshake `auth.capabilities` lists [AgentActivitySubscriptionsCapability] gets the
+     * detailed [AgentActivity] only for the agents it subscribed to ([AgentActivitySubscribe]
+     * `{ agentIds }`, at most [AgentActivitySubscribeMaxIds] per emit, answered with
+     * [AgentActivitySubscribed] `{ agentIds }` = the ids actually joined), and [AgentActivityState]
+     * `{ agentId, state, activity, timestamp, serverSeq }` for every agent of the server, only when the
+     * coarse state (offline / online / busy / error) changes. Both pushes share one serverSeq counter.
+     */
+    const val AgentActivityState = GeneratedRealtimeContract.SocketEvent.AgentActivityState
+    const val AgentActivitySubscribe = GeneratedRealtimeContract.SocketEvent.AgentActivitySubscribe
+    const val AgentActivityUnsubscribe = GeneratedRealtimeContract.SocketEvent.AgentActivityUnsubscribe
+    const val AgentActivitySubscribed = GeneratedRealtimeContract.SocketEvent.AgentActivitySubscribed
+    const val AgentActivitySubscriptionsCapability = "agent_activity_subscriptions_v1"
+    const val AgentActivitySubscribeMaxIds = 200
+
+    /** The handshake `auth.capabilities` every socket of this app declares (a JSON array of strings). */
+    val HandshakeCapabilities: List<String> = listOf(AgentActivitySubscriptionsCapability)
     const val AgentSeen = GeneratedRealtimeContract.SocketEvent.AgentSeen
     /** Agent typing line (slock `packages/shared/src/agentTyping.ts`): an agent is about to post into `channel:<channelId>`. */
     const val AgentTyping = GeneratedRealtimeContract.SocketEvent.AgentTyping
     const val AgentSession = GeneratedRealtimeContract.SocketEvent.AgentSession
     const val AgentCreated = GeneratedRealtimeContract.SocketEvent.AgentCreated
+    /**
+     * `{ agentId }` to `server:<id>` after any stored agent profile write (name, description, avatar,
+     * pause; botiverse/slock #8954 `routes/agentUpdatedBroadcast.ts`). Like web, re-read `/agents`.
+     */
+    const val AgentUpdated = GeneratedRealtimeContract.SocketEvent.AgentUpdated
     const val AgentDeleted = GeneratedRealtimeContract.SocketEvent.AgentDeleted
     const val MachineStatus = GeneratedRealtimeContract.SocketEvent.MachineStatus
     const val MachineCapabilities = GeneratedRealtimeContract.SocketEvent.MachineCapabilities
@@ -89,6 +113,14 @@ object RealtimeSocketEvents {
     // `user:<id>` room at the sendPushNotifications call point (server PR
     // #4233, staging 31042ed06). Literal until the next contract regeneration.
     const val NotificationPush = "notification:push"
+
+    /**
+     * Sent to the member's own `user:<id>` room about one of their servers, so the socket of
+     * whichever server the app has open receives it: the payload `serverId` names the server
+     * that changed, not the connected one. Gates that drop a payload naming another server than
+     * the connection's let these through (web applies them by payload `serverId`).
+     */
+    val UserScopedServerEvents: Set<String> = setOf(AppearanceUpdated)
 
     val ServerWireEvents: List<String> =
         GeneratedRealtimeContract.SocketEvent.ServerWireEvents + listOf(

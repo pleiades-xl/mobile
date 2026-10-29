@@ -3,6 +3,8 @@ package build.raft.app
 import build.raft.designsystem.haptics.rememberRaftHaptics
 import build.raft.designsystem.components.raftSafeAreaHorizontalPadding
 import build.raft.app.resources.*
+import build.raft.app.emoji.RaftEmojiCatalog
+import build.raft.app.emoji.RaftEmojiPickerPreferences
 import build.raft.app.transfer.RaftTransferMeter
 import build.raft.app.transfer.RaftTransferProgress
 import build.raft.app.markdown.markdownToPreviewText
@@ -12,6 +14,7 @@ import build.raft.designsystem.components.RaftTextFieldDefaults
 import build.raft.designsystem.components.RaftMessageListJumpSide
 import build.raft.designsystem.components.RaftLocatedMillis
 import build.raft.designsystem.components.RaftSpinner
+import build.raft.designsystem.components.RaftMenuSurface
 import build.raft.designsystem.components.RaftSpinnerSize
 import build.raft.designsystem.components.raftLocatedStrength
 import build.raft.designsystem.components.raftCopyable
@@ -28,7 +31,9 @@ import build.raft.app.components.RaftSlotIcon
 import build.raft.app.components.RaftIconSpinner
 import build.raft.designsystem.components.RaftGlyph
 import build.raft.designsystem.components.RaftBackButton
+import build.raft.designsystem.components.RaftSideAction
 import build.raft.designsystem.components.RaftBanner
+import build.raft.designsystem.components.RaftToast
 import build.raft.designsystem.components.RaftBannerStatus
 import build.raft.designsystem.components.RaftReadOnlyComposer
 import build.raft.designsystem.components.RaftBackButtonDefaults
@@ -44,6 +49,7 @@ import build.raft.app.data.RaftKnownEntityResolver
 import build.raft.app.data.RaftAgentCreateEntry
 import build.raft.app.data.RaftMessageAction
 import build.raft.app.data.RaftProductEvents
+import build.raft.app.data.RaftReadToggleNotice
 import build.raft.app.data.RAFT_SHELL_OVERLAY_REQUEST_EVENT
 import build.raft.app.data.RAFT_SHELL_OVERLAY_RESULT_EVENT
 import build.raft.app.data.SHELL_OVERLAY_SELECTED_ID
@@ -78,7 +84,6 @@ import build.raft.app.components.RaftBrutalTextField
 import build.raft.app.components.RaftUiBanner
 import build.raft.app.components.RaftUiBannerSize
 import build.raft.app.components.RaftUiBannerStatus
-import build.raft.app.components.RaftUiSuccessBanner
 import build.raft.app.components.RaftUiControlledMenu
 import build.raft.app.components.RaftUiMenuItem
 import build.raft.app.components.RaftSwitchButton
@@ -113,6 +118,11 @@ import build.raft.app.data.ForwardMessageTargetKind
 import build.raft.app.data.ForwardMessageTargetRepository
 import build.raft.app.data.ForwardMessageTargetRequiredAction
 import build.raft.app.data.HomeSnapshot
+import build.raft.app.data.ArtifactLinkTarget
+import build.raft.app.data.NetworkRaftConversationArtifactsApi
+import build.raft.app.data.WORKSPACE_ARTIFACTS_FEATURE_FLAG_KEY
+import build.raft.app.data.artifactWebUrl
+import build.raft.app.data.rememberServerFeatureLatched
 import build.raft.app.data.NetworkRaftTasksApi
 import build.raft.app.data.NetworkRaftThreadApi
 import build.raft.app.data.RaftThreadApiClient
@@ -143,6 +153,7 @@ import build.raft.app.data.ThreadComposerDirectUploadClientRequestIds
 import build.raft.app.data.newAttachmentUploadClientRequestId
 import build.raft.app.data.KeyValueChatLayoutPreferenceStore
 import build.raft.app.data.THREAD_UNREAD_BADGE_FEATURE_FLAG_KEY
+import build.raft.app.data.TASK_V2_CONVERSATIONS_FEATURE_FLAG_KEY
 import build.raft.app.data.ThreadApiResult
 import build.raft.app.data.ownSentConversationIds
 import build.raft.app.data.RaftAgentsApiClient
@@ -174,6 +185,7 @@ import build.raft.app.data.SettingsServerSidebarOrderSnapshot
 import build.raft.app.data.toSharedConversationDirectoryState
 import build.raft.app.data.SharedHomeContentState
 import build.raft.app.data.SharedHomeIntent
+import build.raft.app.data.unfollowThreadProjectingHome
 import build.raft.app.data.SharedHomeState
 import build.raft.app.data.SharedMembersIntent
 import build.raft.app.data.SharedMembersChannelSuggestionSlice
@@ -192,7 +204,12 @@ import build.raft.app.data.SharedTasksDataStore
 import build.raft.app.data.SharedTasksDataStoreStatus
 import build.raft.app.data.SharedTasksEvent
 import build.raft.app.data.SharedTasksRouteIntent
+import build.raft.app.data.TaskConversationDetailsRepository
+import build.raft.app.data.TaskConversationDetailsState
+import build.raft.app.data.TaskConversationDetailsViewModel
 import build.raft.app.data.TaskConversationHeaderEvent
+import build.raft.app.data.taskHeadSourceMessageId
+import build.raft.app.data.valueOrNull
 import build.raft.app.data.TaskConversationHeaderViewModel
 import build.raft.app.data.TasksUnassignedAssigneeFilterId
 import build.raft.app.data.tasksIdentityFilterId
@@ -264,6 +281,7 @@ import build.raft.app.markdown.RaftDirectMessagePeerKindSeparator
 import build.raft.app.markdown.formatRaftDirectMessagePeerRef
 import build.raft.app.markdown.LocalRaftMarkdownRenderConfig
 import build.raft.app.markdown.RaftMarkdownBody
+import build.raft.app.markdown.LocalRaftMarkdownCodeTapObserver
 import build.raft.app.markdown.LocalRaftMarkdownPlainCandidateSession
 import build.raft.app.markdown.RaftMarkdownPlainCandidateSession
 import build.raft.app.markdown.resolveThreadMarkdownSingleParagraphLightPathEnabled
@@ -325,6 +343,8 @@ import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
@@ -379,6 +399,7 @@ import androidx.compose.material3.Text
 import build.raft.app.compat.ui.imageResource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
@@ -387,6 +408,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.RectangleShape
+import build.raft.designsystem.components.RaftHoverTier
+import build.raft.designsystem.components.raftPointerHover
+import build.raft.designsystem.components.raftStateOverlay
+import build.raft.designsystem.components.rememberRaftStateOverlay
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.input.pointer.PointerType
@@ -420,7 +446,10 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import build.raft.app.compat.pager.LocalActivity
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
@@ -594,6 +623,8 @@ internal enum class ThreadNewMessageMenuTool {
     ConvertToTask,
     /** Opens the Select Text sheet (third row, first slot; Kirby, web #11467). */
     SelectText,
+    /** botiverse/slock #11687: a followed reply thread's messages mark the whole thread unread. */
+    MarkThreadUnread,
     /** In-place text selection context only: select the whole message body. */
     SelectAll
 }
@@ -632,6 +663,7 @@ internal val ThreadNewMessageMenuSecondaryToolOrder =
         ThreadNewMessageMenuTool.SelectText,
         ThreadNewMessageMenuTool.AddReaction,
         ThreadNewMessageMenuTool.CopyLink,
+        ThreadNewMessageMenuTool.MarkThreadUnread,
         ThreadNewMessageMenuTool.FollowThread,
         ThreadNewMessageMenuTool.TaskStatus,
         ThreadNewMessageMenuTool.ConvertToTask
@@ -656,7 +688,8 @@ internal data class ThreadNewMessageMenuToolCallbacks(
     val onTaskStatus: () -> Unit = {},
     val onConvertToTask: () -> Unit = {},
     val onSelectText: () -> Unit = {},
-    val onSelectAll: () -> Unit = {}
+    val onSelectAll: () -> Unit = {},
+    val onMarkThreadUnread: () -> Unit = {}
 )
 
 internal fun ThreadNewMessageMenuTool.dispatch(callbacks: ThreadNewMessageMenuToolCallbacks) {
@@ -674,6 +707,7 @@ internal fun ThreadNewMessageMenuTool.dispatch(callbacks: ThreadNewMessageMenuTo
         ThreadNewMessageMenuTool.ConvertToTask -> callbacks.onConvertToTask()
         ThreadNewMessageMenuTool.SelectText -> callbacks.onSelectText()
         ThreadNewMessageMenuTool.SelectAll -> callbacks.onSelectAll()
+        ThreadNewMessageMenuTool.MarkThreadUnread -> callbacks.onMarkThreadUnread()
     }
 }
 
@@ -694,9 +728,13 @@ internal data class ThreadNewMessageMenuActionAvailability(
     val copyLink: Boolean = false,
     val followThread: Boolean = false,
     val threadFollowed: Boolean = false,
+    /** botiverse/slock #11687: "Mark Thread as Unread" (a followed reply thread's messages). */
+    val markThreadUnread: Boolean = false,
     val taskStatus: Boolean = false,
     val taskDone: Boolean = false,
     val convertToTask: Boolean = false,
+    /** Task v2: the task slot reads "Create Task from Message" (web) instead of "Convert to Task". */
+    val createTaskFromMessage: Boolean = false,
     /** Shown for an in-place text selection: Copy copies the selection. */
     val selectionContext: Boolean = false,
     /** The in-place selection covers only part of the message: Copy reads "Copy selection" and Select All appears. */
@@ -714,6 +752,8 @@ internal data class ThreadNewMessageMenuActionAvailability(
             ThreadNewMessageMenuTool.AddReaction -> addReaction
             ThreadNewMessageMenuTool.CopyLink -> copyLink
             ThreadNewMessageMenuTool.FollowThread -> followThread
+            // A message's action on its thread, not on picked text.
+            ThreadNewMessageMenuTool.MarkThreadUnread -> markThreadUnread && !selectionContext
             ThreadNewMessageMenuTool.TaskStatus -> taskStatus
             ThreadNewMessageMenuTool.ConvertToTask -> convertToTask
             // The sheet is for picking text; an in-place selection already does that.
@@ -756,9 +796,11 @@ internal fun ThreadMessageMenuCapabilities.toThreadNewMessageMenuActionAvailabil
         copyLink = copyLink,
         followThread = follow,
         threadFollowed = replyMetadata.isThreadFollowed,
+        markThreadUnread = markThreadUnreadChannelId != null,
         taskStatus = taskStatus,
         taskDone = message.isThreadTaskDone(),
-        convertToTask = convertToTask
+        convertToTask = convertToTask,
+        createTaskFromMessage = createTaskFromMessage
     )
 
 internal fun threadMessageMetadataSlotLayout(
@@ -1923,7 +1965,7 @@ private object ThreadLocalSendNextId {
     }
 }
 
-private fun newThreadSendRandomId(): String =
+internal fun newThreadSendRandomId(): String =
     "mobile-${Random.nextLong().toULong().toString(36)}-${Random.nextLong().toULong().toString(36)}"
 
 /**
@@ -1978,7 +2020,7 @@ private val ThreadHeaderChannelTileSize = 27.dp
 private val ThreadHeaderChannelIconSize = 14.dp
 private val ThreadHeaderDmAvatarSize = 34.dp
 // raft-ui `panelHeader` on a phone: `max-md:gap-2` between Back, the tile, the title and actions.
-private val ThreadHeaderContentSpacing = 8.dp
+internal val ThreadHeaderContentSpacing = 8.dp
 private val ThreadHeaderChannelTitleGapExtra = 0.dp
 
 private object ThreadReactionGlyphDiagnostics {
@@ -2410,7 +2452,9 @@ internal fun RaftThreadScreenPayload.threadActivityMuteState(
     // but must not rewrite what surface this page is.
     if (surfaceKind == RaftThreadSurfaceKind.ReplyThread) return null
     val supported = projection?.activityMuteSupported ?: activityMuteSupported
-    if (!supported) return null
+    val muted = projection?.activityMuted ?: activityMuted
+    // Unmute stays reachable while muted even once mute is no longer offered (removed App bot DM).
+    if (!supported && !muted) return null
     val resolvedJoined = projection?.joined ?: joined
     if (surfaceKind != RaftThreadSurfaceKind.DirectMessage && !resolvedJoined) return null
     val channelId =
@@ -2420,7 +2464,7 @@ internal fun RaftThreadScreenPayload.threadActivityMuteState(
             ?: return null
     return ThreadActivityMuteUiState(
         channelId = channelId,
-        muted = projection?.activityMuted ?: activityMuted,
+        muted = muted,
         supported = supported,
         muteFromSeq = projection?.muteFromSeq ?: muteFromSeq
     )
@@ -2429,8 +2473,7 @@ internal fun RaftThreadScreenPayload.threadActivityMuteState(
 internal fun RaftThreadScreenPayload.threadActivityMutedIndicatorVisible(
     projection: SharedConversationDirectoryProjection?
 ): Boolean {
-    val supported = projection?.activityMuteSupported ?: activityMuteSupported
-    return supported && (projection?.activityMuted ?: activityMuted)
+    return projection?.activityMuted ?: activityMuted
 }
 
 internal data class ThreadConversationPinTarget(
@@ -2722,7 +2765,11 @@ internal fun RaftThreadScreenPayload.toThreadMemberDetailPageData(
 internal fun RaftThreadScreenPayload.threadChannelSearchChannelId(): String? =
     sourceThreadId
         ?.trim()
-        ?.takeIf { it.isNotBlank() && surfaceKind == RaftThreadSurfaceKind.Channel }
+        ?.takeIf { it.isNotBlank() && surfaceKind == RaftThreadSurfaceKind.Channel && !isTaskConversationSurface() }
+
+/** Task v2: this page is a task's own conversation (`channels.type = 'task'`). */
+internal fun RaftThreadScreenPayload.isTaskConversationSurface(): Boolean =
+    channelKind.normalizedThreadChannelKind() == RaftTaskConversationChannelKind
 
 internal enum class ThreadHeaderSearchAction {
     ChannelSearch,
@@ -2732,7 +2779,8 @@ internal enum class ThreadHeaderSearchAction {
 internal fun RaftThreadScreenPayload.threadHeaderSearchAction(): ThreadHeaderSearchAction? =
     when {
         threadChannelSearchChannelId() != null -> ThreadHeaderSearchAction.ChannelSearch
-        surfaceKind == RaftThreadSurfaceKind.ReplyThread -> ThreadHeaderSearchAction.InlineThreadSearch
+        // Web Search in Task runs the conversation's own search (ThreadPanel searchCommandRef).
+        surfaceKind == RaftThreadSurfaceKind.ReplyThread || isTaskConversationSurface() -> ThreadHeaderSearchAction.InlineThreadSearch
         else -> null
     }
 
@@ -3371,6 +3419,8 @@ private data class ThreadAttachmentOpenResult(
 internal fun raftThreadAttachmentOpenStatus(nativeStatus: String): String =
     when (nativeStatus) {
         "opened", "cancelled", "save_cancelled", "missing", "no_app", "storage_failed", "download_failed" -> nativeStatus
+        // APK install handed to the settings switch or the file manager: that screen is the feedback.
+        "install_permission_required", "install_via_files" -> "opened"
         else -> "failed"
     }
 
@@ -3792,6 +3842,9 @@ internal sealed interface MarkdownTaskNumberOpenResult {
         val source: SharedTaskReferenceResolutionSource
     ) : MarkdownTaskNumberOpenResult
 
+    /** The task opens without a page of its own: its empty conversation or its legacy panel. */
+    data class OpensInPlace(val task: TaskSummary) : MarkdownTaskNumberOpenResult
+
     data object NotFound : MarkdownTaskNumberOpenResult
     data object AuthRequired : MarkdownTaskNumberOpenResult
     data object Failed : MarkdownTaskNumberOpenResult
@@ -3816,6 +3869,8 @@ internal suspend fun openMarkdownTaskNumberPayload(
     currentTaskChannelId: ChannelId?,
     tasksDataSource: SharedTasksDataSource,
     tasksDataStore: SharedTasksDataStore?,
+    /** `task_v2_conversations_v0` for the server ([taskOpenTarget]). */
+    taskV2Enabled: Boolean = false,
     conversationIdentityProvider: SharedConversationIdentityProvider? = null
 ): MarkdownTaskNumberOpenResult {
     return when (
@@ -3829,6 +3884,9 @@ internal suspend fun openMarkdownTaskNumberPayload(
             )
     ) {
         is SharedTaskReferenceResolution.Found -> {
+            if (resolution.task.taskOpenSurface(taskV2Enabled) != null) {
+                return MarkdownTaskNumberOpenResult.OpensInPlace(resolution.task)
+            }
             val payload =
                 currentPayload.taskThreadLaunchPayload(
                     task = resolution.task,
@@ -3839,6 +3897,7 @@ internal suspend fun openMarkdownTaskNumberPayload(
                             task = resolution.task,
                             serverId = serverId.value,
                             tasksDataSource = tasksDataSource,
+                            taskV2Enabled = taskV2Enabled,
                         ),
                 ) ?: return MarkdownTaskNumberOpenResult.Failed
             MarkdownTaskNumberOpenResult.Found(
@@ -3918,6 +3977,10 @@ internal fun RaftThreadScreenPayload.canConvertMessagesToTasks(): Boolean =
         !surfaceKind.equals(RaftThreadSurfaceKind.ReplyThread, ignoreCase = true) &&
         parentMessageId.isNullOrBlank() &&
         originParentMessageId.isNullOrBlank()
+
+/** Task v2: any sent, non-system message can have tasks created from it (several, too). */
+internal fun RaftThreadMessageItem.canCreateTaskFromMessage(): Boolean =
+    !isSystemMessage() && !hasLocalSendState()
 
 internal fun RaftThreadMessageItem.canConvertToTask(): Boolean =
     !isSystemMessage() &&
@@ -4512,6 +4575,7 @@ private fun ThreadPageScreen(
                 canonicalConversationIdentityPublisher = { provenance, detail ->
                     sharedStores.publishCanonicalConversationIdentity(storeScope, provenance, detail)
                 },
+                storedConversationDetails = sharedStores.storedConversationDetails,
                 payloadStore = sharedStores.threadPayloadStore,
                 durableLastKnownReader = sharedStores.threadDurableLastKnownReader,
                 enteredScopeSnapshotLoader = sharedStores.threadEnteredScopeSnapshotLoader,
@@ -4557,7 +4621,9 @@ private fun ThreadPageScreen(
     val unableToOpenProfileLabel = stringResource(Res.string.thread_error_open_profile)
     fun openStandaloneThreadPayload(
         nextPayload: RaftThreadScreenPayload,
-        serverIdOverride: String? = null
+        serverIdOverride: String? = null,
+        /** False: the page appears without the push (a task's first send, where it takes the pending page's place). */
+        animated: Boolean = true,
     ) {
         val launchPayload = nextPayload.toWireThreadLaunchPayloadOrNull()
         if (launchPayload == null) {
@@ -4595,7 +4661,7 @@ private fun ThreadPageScreen(
                 }
             } else pager.openRaftPage(
                 pageName = THREAD_PAGE,
-                pageData = launchPayload.toThreadPageData(),
+                pageData = launchPayload.toThreadPageData().withRaftOpenAnimation(animated),
                 storeScopeOverride = targetStoreScope,
                 onMissingScope = {
                     bridge.toast(unableToOpenThreadLabel)
@@ -4658,6 +4724,7 @@ private fun ThreadPageScreen(
         },
         onOpenThreadPayload = { nextPayload -> openStandaloneThreadPayload(nextPayload) },
         onReplaceThreadPayload = {},
+        onOpenThreadPayloadWithoutAnimation = { nextPayload -> openStandaloneThreadPayload(nextPayload, animated = false) },
         onOpenParentThread = { currentPayload, currentSessionServerId ->
             val parentServerId = threadParentNavigationServerId(currentSessionServerId)
                 ?: return@SharedThreadRouteContent false
@@ -4909,6 +4976,17 @@ private fun ThreadMembersPageScreen() {
                 row.copy(canRemove = row.canRemove && channelMembersSlice.canRemoveMembers)
             } }
     }
+    // The roster's own-server agents get detailed activity while this page is open (at most 200).
+    RaftAgentActivitySubscriptionEffect(
+        subscriptions = sharedStores.agentActivitySubscriptions,
+        serverId = route.serverId.value,
+        agentIds =
+            remember(members, route.serverId) {
+                members
+                    .filter { it.kind.equals("agent", ignoreCase = true) && it.sourceServerId in setOf(null, route.serverId.value) }
+                    .map { it.id }
+            },
+    )
     val candidates = remember(serverMembersEntry.members, route.serverId, members) {
         threadAddMemberCandidatesExcludingJoined(
             candidates = serverMembersEntry.members.map { it.toRaftThreadMemberItem(route.serverId) },
@@ -6107,6 +6185,7 @@ private class SharedThreadRouteContentCallbacks(
     val onBack: () -> Unit,
     val onOpenThreadPayload: (RaftThreadScreenPayload) -> Unit,
     val onReplaceThreadPayload: (RaftThreadScreenPayload) -> Unit,
+    val onOpenThreadPayloadWithoutAnimation: (RaftThreadScreenPayload) -> Unit,
     val onOpenParentThread: (RaftThreadScreenPayload, String?) -> Boolean,
     val onAuthRequired: (String) -> Unit,
     val onResolvedAuxiliaryThreadIdChanged: (String?) -> Unit,
@@ -6136,6 +6215,8 @@ internal fun SharedThreadRouteContent(
     onBack: () -> Unit,
     onOpenThreadPayload: (RaftThreadScreenPayload) -> Unit = {},
     onReplaceThreadPayload: (RaftThreadScreenPayload) -> Unit = onOpenThreadPayload,
+    /** A page that takes the place of what this page shows over it (the pending task page's first send). */
+    onOpenThreadPayloadWithoutAnimation: (RaftThreadScreenPayload) -> Unit = onOpenThreadPayload,
     onOpenParentThread: (RaftThreadScreenPayload, String?) -> Boolean = { _, _ -> false },
     onAuthRequired: (String) -> Unit = {},
     active: Boolean = true,
@@ -6172,6 +6253,7 @@ internal fun SharedThreadRouteContent(
                 onBack = onBack,
                 onOpenThreadPayload = onOpenThreadPayload,
                 onReplaceThreadPayload = onReplaceThreadPayload,
+                onOpenThreadPayloadWithoutAnimation = onOpenThreadPayloadWithoutAnimation,
                 onOpenParentThread = onOpenParentThread,
                 onAuthRequired = onAuthRequired,
                 onResolvedAuxiliaryThreadIdChanged = onResolvedAuxiliaryThreadIdChanged,
@@ -6208,6 +6290,7 @@ private fun SharedThreadRouteContentContent(
     val onBack = callbacks.onBack
     val onOpenThreadPayload = callbacks.onOpenThreadPayload
     val onReplaceThreadPayload = callbacks.onReplaceThreadPayload
+    val onOpenThreadPayloadWithoutAnimation = callbacks.onOpenThreadPayloadWithoutAnimation
     val onOpenParentThread = callbacks.onOpenParentThread
     val onAuthRequired = callbacks.onAuthRequired
     val onResolvedAuxiliaryThreadIdChanged = callbacks.onResolvedAuxiliaryThreadIdChanged
@@ -6649,6 +6732,19 @@ private fun SharedThreadRouteContentContent(
                 input = headerProjectionInput
             )
         }
+    // Offline-first header: the stored channel detail (offline resource) stands in on a cold start or an
+    // offline open until the network's detail arrives; it never replaces a detail already there.
+    LaunchedEffect(sharedStores, storeScope, headerProjectionServerId, conversationDirectoryLookupIds) {
+        val serverId = headerProjectionServerId?.value ?: return@LaunchedEffect
+        if (conversationDirectoryLookupIds.isEmpty()) return@LaunchedEffect
+        try {
+            sharedStores.restoreStoredConversationIdentities(storeScope, serverId, conversationDirectoryLookupIds)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            // Best effort: the header falls back to its candidates.
+        }
+    }
     val directoryConversationProjectionFlow = remember(
         conversationIdentityProvider,
         headerProjectionServerId,
@@ -7318,19 +7414,19 @@ private fun SharedThreadRouteContentContent(
     }
     var pendingActionCardIds by remember(threadInstanceKey) { mutableStateOf<Set<String>>(emptySet()) }
     var pendingTaskConvertMessageIds by remember(threadInstanceKey) { mutableStateOf<Set<String>>(emptySet()) }
+    // Task v2: "Create Task from Message" (the message it is open for, its create in flight, its failure).
+    val createTaskFromMessage = remember(threadInstanceKey) { TaskCreateFromMessageFlow() }
+    // Task v2: a task opened without a page of its own (its empty conversation, or a legacy panel).
+    val taskOpenSurfaceFlow = remember(threadInstanceKey) { TaskOpenSurfaceFlow() }
+    val taskOpenGate = remember(threadInstanceKey) { TaskOpenGate() }
     var pendingThreadFollowMessageIds by remember(threadInstanceKey) { mutableStateOf<Set<String>>(emptySet()) }
-    var markdownReferencePending by remember(threadInstanceKey) {
-        mutableStateOf(ThreadMarkdownReferencePendingState())
-    }
-    fun beginMarkdownReferencePending(actionId: String?): ThreadMarkdownReferencePendingToken? {
-        val started = markdownReferencePending.start(actionId.orEmpty())
-        markdownReferencePending = started.state
-        return started.token
-    }
+    // Reference-chip opens are single-flight in their store: busy chip, ignored repeat taps.
+    val markdownRefOpenStore = remember(threadInstanceKey) { ThreadMarkdownRefOpenStore(coroutineScope) }
+    val markdownReferencePending by markdownRefOpenStore.state.collectAsState()
+    fun beginMarkdownReferencePending(actionId: String?): ThreadMarkdownReferencePendingToken? =
+        markdownRefOpenStore.begin(actionId)
     fun finishMarkdownReferencePending(token: ThreadMarkdownReferencePendingToken?) {
-        if (token != null) {
-            markdownReferencePending = markdownReferencePending.finish(token)
-        }
+        markdownRefOpenStore.finish(token)
     }
     var textSelectionMessage by remember(threadInstanceKey) { mutableStateOf<RaftThreadMessageItem?>(null) }
     var createAgentDialogState by remember(threadInstanceKey) { mutableStateOf<ThreadCreateAgentActionDialogState?>(null) }
@@ -7509,7 +7605,6 @@ private fun SharedThreadRouteContentContent(
             conversationId = payload.longMessageCollapseConversationId()
         )
     val longMessageCollapseEnabled = longMessageCollapseConversationSetting.effective
-    val singleTapOpensThreadEnabled = chatLayoutPreferenceStore.readSingleTapOpensThreadEnabledSync()
     val newMessageMenuEnabled = chatLayoutPreferenceStore.readNewMessageMenuEnabledSync()
     val commentsUnavailableLabel = stringResource(Res.string.thread_error_comments_unavailable)
     val unableToSendCommentLabel = stringResource(Res.string.thread_error_send_comment)
@@ -7647,6 +7742,8 @@ private fun SharedThreadRouteContentContent(
     val unableToDeleteChannelLabel = stringResource(Res.string.thread_error_delete_channel)
     val unableToConvertMessageLabel = stringResource(Res.string.thread_error_convert_message)
     val taskCreatedLabel = stringResource(Res.string.thread_feedback_task_created)
+    val unableToCreateTaskLabel = stringResource(Res.string.tasks_create_failed)
+    val unableToSendTaskMessageLabel = stringResource(Res.string.task_conversation_send_failed)
     val unsupportedTaskStatusLabel = stringResource(Res.string.thread_error_task_status_unsupported)
     val unableToUpdateTaskLabel = stringResource(Res.string.thread_error_update_task)
     val unableToUpdateAssigneeLabel = stringResource(Res.string.thread_error_update_assignee)
@@ -7669,6 +7766,7 @@ private fun SharedThreadRouteContentContent(
         attachmentTooLargeTemplate
             .replace(ThreadLocalizedFeedbackPlaceholder, RaftFormat.bytes(fileSize))
             .replace("__RAFT_ATTACHMENT_LIMIT__", RaftFormat.byteLimit(maxBytes))
+    val unableToOpenThreadRefLabel = stringResource(Res.string.thread_error_open_thread_ref)
     fun localizedUnableToOpenTarget(target: String): String =
         unableToOpenTargetTemplate.replace(ThreadLocalizedFeedbackPlaceholder, target)
     fun localizedUnableToOpenTaskNumber(taskNumber: Int): String =
@@ -7890,7 +7988,13 @@ private fun SharedThreadRouteContentContent(
                     conversationChannelId = conversationId,
                     loadRef = dataSource::loadTaskConversationRef,
                     follow = dataSource::followTaskConversation,
-                    unfollow = dataSource::unfollowThread,
+                    unfollow = { conversationId ->
+                        unfollowThreadProjectingHome(
+                            conversationId,
+                            project = { intent -> sharedHomeStore?.dispatch(intent) },
+                            unfollow = dataSource::unfollowThread,
+                        )
+                    },
                     log = { bridge.log(it) },
                     loadTask = { serverId, parentChannelId, taskNumber ->
                         tasksDataSource
@@ -7904,21 +8008,9 @@ private fun SharedThreadRouteContentContent(
         taskConversationHeaderViewModel?.state?.collectAsState()?.value
     LaunchedEffect(taskConversationHeaderViewModel) { taskConversationHeaderViewModel?.start() }
     val taskConversationParentChannelId = taskConversationHeaderState?.ref?.parentChannelId
+    // The task channel's tasks store, shared with the pending task page ([TaskOpenSurfaceHost]).
     val taskConversationTasksViewModel: SharedTasksViewModel? =
-        taskConversationParentChannelId?.let { parentChannelId ->
-            viewModel(key = "task-conversation-tasks-${parentChannelId.value}") {
-                SharedTasksViewModel(
-                    authStore = authStore,
-                    dataSource = tasksDataSource,
-                    sharedTasksDataStore = tasksDataStore,
-                    scope = SharedTasksScope.Channel(parentChannelId),
-                    diagnosticsLogger = { bridge.log(it) }
-                )
-            }
-        }
-    LaunchedEffect(taskConversationTasksViewModel) {
-        taskConversationTasksViewModel?.dispatch(SharedTasksRouteIntent.Start)
-    }
+        rememberTaskChannelTasksViewModel(taskConversationParentChannelId, authStore, tasksDataSource, tasksDataStore) { bridge.log(it) }
     val taskConversationTasksState = taskConversationTasksViewModel?.state?.collectAsState()?.value
     val taskConversationListedTask =
         taskConversationHeaderState?.ref?.taskId?.let { taskId ->
@@ -7963,6 +8055,35 @@ private fun SharedThreadRouteContentContent(
     val memberSuggestionScopeChannelId = memberSuggestionScopePayload.threadComposerMentionScopeChannelId()
     val memberSuggestionScopedMentions = memberSuggestionScopePayload.threadComposerMemberScopedMentions()
     val currentServerId = currentSession?.currentServerId?.trim()?.takeIf { it.isNotBlank() }
+    // Task v2 (web TaskConversationDialog head): the task's history, its source message and a pre-v2
+    // task's earlier discussion, read for the task the head shows (again for each newer revision).
+    val taskConversationDetailsServerId by rememberUpdatedState(currentServerId)
+    val taskConversationDetailsRepository =
+        remember(sharedStores, storeScope) { TaskConversationDetailsRepository(sharedStores.networkClient(storeScope)) }
+    val taskConversationDetailsViewModel: TaskConversationDetailsViewModel? =
+        taskConversationId?.let { conversationId ->
+            viewModel(key = "task-conversation-details-${conversationId.value}") {
+                fun server(): ServerId? = taskConversationDetailsServerId?.let(::ServerId)
+                val noServer = DataResult.Error(ScreenError(code = "task_head_no_server", retryable = true))
+                TaskConversationDetailsViewModel(
+                    loadHistory = { taskId ->
+                        server()?.let { taskConversationDetailsRepository.loadHistory(it, taskId) } ?: noServer
+                    },
+                    loadSource = { channelId, messageId ->
+                        server()?.let { taskConversationDetailsRepository.loadSourceMessage(it, channelId, messageId) } ?: noServer
+                    },
+                    loadEarlierDiscussion = { channelId, hostMessageId ->
+                        server()?.let { taskConversationDetailsRepository.loadEarlierDiscussion(it, channelId, hostMessageId) } ?: noServer
+                    },
+                    log = { bridge.log(it) },
+                )
+            }
+        }
+    val taskConversationDetailsState =
+        taskConversationDetailsViewModel?.state?.collectAsState()?.value ?: TaskConversationDetailsState()
+    LaunchedEffect(taskConversationDetailsViewModel, taskConversationTask, currentServerId) {
+        if (currentServerId != null) taskConversationTask?.let { taskConversationDetailsViewModel?.onTask(it) }
+    }
     // `feedback:submit` cards open the Feedback WebView only where the viewing server has
     // `product_feedback_multi_app` on; follow the flag live as its evaluation lands.
     val featureFlagSnapshotRevision by sharedStores.serverFeatureFlags.snapshotRevision.collectAsState()
@@ -7972,6 +8093,16 @@ private fun SharedThreadRouteContentContent(
                 sharedStores.serverFeatureFlags.isEnabled(
                     ServerId(currentServerId),
                     PRODUCT_FEEDBACK_MULTI_APP_FEATURE_FLAG_KEY
+                )
+        }
+    // Task v2 (`task_v2_conversations_v0`, as web reads it per server): every task lists under its
+    // source message and the composer drops "As Task".
+    val taskV2Enabled =
+        remember(featureFlagSnapshotRevision, currentServerId) {
+            currentServerId != null &&
+                sharedStores.serverFeatureFlags.isEnabled(
+                    ServerId(currentServerId),
+                    TASK_V2_CONVERSATIONS_FEATURE_FLAG_KEY
                 )
         }
     // Jump pills (ThreadJumpPills.kt): the unread-thread pill follows the web, a channel only and
@@ -8004,6 +8135,9 @@ private fun SharedThreadRouteContentContent(
     val jumpFocusNonce by remember(threadViewModel) {
         threadViewModel.unreadThreadJumpFocusNonceFlow()
     }.collectAsState(threadViewModel.state.value.unreadThreadJumpFocusNonce)
+    val jumpLoading by remember(threadViewModel) {
+        threadViewModel.unreadThreadJumpLoadingFlow()
+    }.collectAsState(threadViewModel.state.value.unreadThreadJumpLoading)
     val jumpInputs =
         remember(
             jumpChannelId,
@@ -8013,6 +8147,7 @@ private fun SharedThreadRouteContentContent(
             jumpConversationUnreadCount,
             jumpUnreadThreadParents,
             jumpFocusNonce,
+            jumpLoading,
         ) {
             ThreadJumpInputs(
                 channelId = jumpChannelId,
@@ -8023,6 +8158,7 @@ private fun SharedThreadRouteContentContent(
                 conversationUnreadCount = jumpConversationUnreadCount,
                 unreadThreadParents = jumpUnreadThreadParents.filterValues { parent -> parent.parentChannelId == jumpChannelId },
                 jumpFocusNonce = jumpFocusNonce,
+                jumpLoading = jumpLoading,
             )
         }
     // The unread threads whose parent is neither loaded nor resolved: look them up (single-flight
@@ -8045,6 +8181,14 @@ private fun SharedThreadRouteContentContent(
                 )
             }
         }
+    val markUnreadNothingLabel by rememberUpdatedState(stringResource(Res.string.home_action_mark_unread_nothing))
+    LaunchedEffect(threadViewModel) {
+        threadViewModel.readToggleNoticesFlow().collect { notice ->
+            when (notice) {
+                RaftReadToggleNotice.MarkUnreadNothing -> bridge.toast(markUnreadNothingLabel)
+            }
+        }
+    }
     LaunchedEffect(threadViewModel, jumpUnresolvedUnreadThreadIds) {
         if (jumpUnresolvedUnreadThreadIds.isNotEmpty()) {
             threadViewModel.dispatch(SharedThreadIntent.ResolveUnreadThreadParents(jumpUnresolvedUnreadThreadIds))
@@ -8250,12 +8394,29 @@ private fun SharedThreadRouteContentContent(
                 loaded = threadMarkdownTaskSourceLoaded(taskProjectionSlice, serverTaskProjectionSlice)
             )
         }
+    val sourceTaskListsEnabled = payload.supportsChannelTasks()
     val linkedTasksProjection =
-        remember(taskProjectionSlice, serverTaskProjectionSlice, taskProjectionReferences) {
+        remember(
+            taskProjectionSlice,
+            serverTaskProjectionSlice,
+            taskProjectionReferences,
+            taskV2Enabled,
+            sourceTaskListsEnabled,
+            currentSession?.user?.id
+        ) {
             threadLinkedTasksProjection(
                 channelProjectionSlice = taskProjectionSlice,
                 serverProjectionSlice = serverTaskProjectionSlice,
                 references = taskProjectionReferences
+            ).copy(
+                sourceTaskLists =
+                    if (sourceTaskListsEnabled) {
+                        taskProjectionSlice.tasks.threadSourceTaskLists(taskV2Enabled)
+                    } else {
+                        emptyMap()
+                    },
+                viewerUserId = currentSession?.user?.id,
+                taskV2Enabled = taskV2Enabled
             )
         }
     val taskAssigneeOptions =
@@ -8325,7 +8486,12 @@ private fun SharedThreadRouteContentContent(
     val filesViewModel: SharedThreadFilesViewModel? =
         if (featureOwnerMountPlan.mountFilesOwner) {
             viewModel(key = "shared-thread-files-$threadInstanceKey") {
-                SharedThreadFilesViewModel(dataSource, diagnosticsLogger = { bridge.log(it) })
+                SharedThreadFilesViewModel(
+                    dataSource,
+                    diagnosticsLogger = { bridge.log(it) },
+                    // The conversation's Artifacts lead its files (workspace_artifacts_v0, read in the tab).
+                    artifactsApi = NetworkRaftConversationArtifactsApi(sharedStores.networkClient)
+                )
             }
         } else {
             null
@@ -8763,14 +8929,15 @@ private fun SharedThreadRouteContentContent(
             headerDisplayModel.title,
             headerDisplayModel.subtitle,
             renderedPayload.surfaceKind,
-            renderedPayload.parentSurfaceKind
+            renderedPayload.parentSurfaceKind,
+            taskV2Enabled
         ) {
             scopedBaseComposerState.toThreadComposerSurface(
                 channelId = resolvedAuxiliaryThreadId.orEmpty(),
                 parentChannelId = renderedPayload.parentChannelId,
                 mentionChannelLabel = headerDisplayModel.threadComposerMentionScopeChannelLabel(),
                 memberSuggestionHeadersVisible = renderedPayload.threadComposerMemberSuggestionHeadersVisible()
-            )
+            ).withTaskV2(taskV2Enabled)
         }
     fun currentComposerPayload(): RaftThreadComposerPayload =
         scopedBaseComposerState.withThreadComposerDraftState(
@@ -8782,6 +8949,12 @@ private fun SharedThreadRouteContentContent(
         remember(serverMembersStore, headerProjectionServerId) {
             raftScopedAgentStatusResolver(serverMembersStore, headerProjectionServerId?.value)
         }
+    // An agent's DM shows its live activity in the header: detailed activity while the DM is open.
+    RaftAgentActivitySubscriptionEffect(
+        subscriptions = sharedStores.agentActivitySubscriptions,
+        serverId = headerProjectionServerId?.value,
+        agentIds = listOfNotNull(headerDisplayModel.dmAgentActivityMemberId()),
+    )
     val messagePermalinkLabelResolver =
         remember(
             conversationIdentityProvider,
@@ -10740,7 +10913,7 @@ private fun SharedThreadRouteContentContent(
                         draftText = draftText,
                         attachmentCount = pendingAttachments.size
                     ),
-                asTask = currentDraftState.seedAsTask,
+                asTask = currentDraftState.seedAsTask && composerSurface.sendsAsTask,
                 attachmentIds = attachmentIds,
                 attachments = pendingAttachments,
                 ownedTemporaryFileRefs = ownedTemporaryFileRefs,
@@ -11313,7 +11486,13 @@ private fun SharedThreadRouteContentContent(
         refreshComposerMemberSuggestions(reason = "membership_mutation")
     }
 
-    fun openCanonicalTaskWith(task: TaskSummary, source: String, resolvedConversationChannelId: ChannelId?) {
+    fun openCanonicalTaskWith(
+        task: TaskSummary,
+        source: String,
+        resolvedConversationChannelId: ChannelId?,
+        /** False: the conversation takes the pending task page's place without the push. */
+        animated: Boolean = true,
+    ) {
         val serverId = currentServerId?.takeIf { it.isNotBlank() }?.let(::ServerId)
         val loadingPayload =
             serverId?.let {
@@ -11341,28 +11520,158 @@ private fun SharedThreadRouteContentContent(
                     "knownThreadChannelId=${loadingPayload.streamChannelId.orEmpty()} " +
                     "loadingInstance=${loadingPayload.resolveThreadRouteIdentity().instanceKey}"
             )
-            onOpenThreadPayload(loadingPayload)
+            if (animated) onOpenThreadPayload(loadingPayload) else onOpenThreadPayloadWithoutAnimation(loadingPayload)
         }
     }
-    val openCanonicalTask: (TaskSummary, String) -> Unit = { task, source ->
-        if (task.taskOpenTarget() == TaskOpenTarget.ResolveConversation) {
-            // Task v2: the local conversation id comes from the server first.
+    val latestTaskOpenServerId by rememberUpdatedState(currentServerId)
+    val openCanonicalTask: (TaskSummary, String) -> Unit = open@{ task, source ->
+        // Web useOpenTask: the legacy panel, or the empty conversation of a task without one
+        // (opening never creates it), or a page.
+        task.taskOpenSurface(taskV2Enabled)?.let { surface ->
+            bridge.log("thread_task_open result=surface kind=${surface::class.simpleName} source=$source taskId=${task.id.value}")
+            taskOpenSurfaceFlow.open(surface)
+            return@open
+        }
+        if (!taskOpenGate.tryBegin(task.id.value)) {
+            bridge.log("thread_task_open result=ignored reason=in_flight source=$source taskId=${task.id.value}")
+            return@open
+        }
+        if (task.taskOpenTarget(taskV2Enabled) == TaskOpenTarget.ResolveConversation) {
+            // Task v2: a joint surface's local conversation id comes from the server first.
             coroutineScope.launch {
-                openCanonicalTaskWith(
-                    task = task,
-                    source = source,
-                    resolvedConversationChannelId =
-                        resolveTaskOpenConversationChannelId(
-                            task = task,
-                            serverId = currentServerId.orEmpty(),
-                            tasksDataSource = tasksDataSource,
-                            log = bridge::log,
-                        ),
-                )
+                try {
+                    openCanonicalTaskWith(
+                        task = task,
+                        source = source,
+                        resolvedConversationChannelId =
+                            resolveTaskOpenConversationChannelId(
+                                task = task,
+                                serverId = currentServerId.orEmpty(),
+                                tasksDataSource = tasksDataSource,
+                                taskV2Enabled = taskV2Enabled,
+                                log = bridge::log,
+                            ),
+                    )
+                } finally {
+                    taskOpenGate.finish(task.id.value)
+                }
             }
         } else {
             openCanonicalTaskWith(task, source, null)
+            taskOpenGate.finish(task.id.value)
         }
+    }
+
+    TaskOpenSurfaceHost(
+        flow = taskOpenSurfaceFlow,
+        detailsRepository = taskConversationDetailsRepository,
+        membersStore = serverMembersStore,
+        serverId = currentServerId,
+        // The conversation page's head writes: the same task channel store, gates and failure toasts.
+        editing =
+            TaskPageEditing(
+                authStore = authStore,
+                tasksDataSource = tasksDataSource,
+                tasksDataStore = tasksDataStore,
+                serverRole = currentSession?.servers?.firstOrNull { it.id == currentServerId }?.role,
+                onFailed = { code ->
+                    when {
+                        code.startsWith("tasks_status") && !routeAuthRequired(code) -> bridge.toast(unableToUpdateTaskLabel)
+                        code.startsWith("tasks_assign") && !routeAuthRequired(code) -> bridge.toast(unableToUpdateAssigneeLabel)
+                    }
+                },
+                log = { bridge.log(it) },
+            ),
+        hostVisible = active,
+        taskV2Enabled = taskV2Enabled,
+        onConversationArrived = { arrived ->
+            bridge.log("thread_task_pending_conversation_arrived taskId=${arrived.id.value}")
+            openCanonicalTask(arrived, "task_conversation_arrived")
+        },
+        timeContext = timeContextProvider.current ?: renderedThread.toRaftTimeCapabilities().staticContext(),
+        // Known for the channel this page shows (web ThreadPanel `parentJoined`); else not known here.
+        joined = { task ->
+            task.channelId?.takeIf { it == renderedThread.joinChannelTargetId() }?.let { renderedThread.joined }
+        },
+        onJoin = { task ->
+            val channelId = task.channelId
+            if (channelId != null) {
+                coroutineScope.launch {
+                    when (val result = dataSource.joinChannel(channelId)) {
+                        is DataResult.Content -> {
+                            threadViewModel.dispatch(SharedThreadIntent.ApplyChannelJoined(result.data.channelId.value))
+                            currentSession?.currentServerId?.takeIf(String::isNotBlank)?.let { serverId ->
+                                realtimeRoomLeaseRegistry.markJoinedByUser(serverId, result.data.channelId.value)
+                            }
+                            realtimeEvents.joinChannel(result.data.channelId.value, currentSession?.currentServerId)
+                            bridge.toast(joinedChannelLabel)
+                        }
+                        is DataResult.NoPermission -> if (!routeAuthRequired(result)) bridge.toast(unableToJoinChannelLabel)
+                        else -> bridge.toast(unableToJoinChannelLabel)
+                    }
+                }
+            }
+        },
+        onSend = { task, text ->
+            val serverId = currentServerId?.takeIf { it.isNotBlank() }
+            if (serverId != null) {
+                coroutineScope.launch {
+                    val opened =
+                        taskOpenSurfaceFlow.send(
+                            text = text,
+                            serverId = serverId,
+                            tasksDataSource = tasksDataSource,
+                            sendMessage = { channelId, body, randomId ->
+                                dataSource.sendMessage(channelId = channelId, body = body, asTask = false, randomId = randomId)
+                            },
+                            currentServerId = { latestTaskOpenServerId },
+                            fallbackError = unableToSendTaskMessageLabel,
+                        )
+                    bridge.log("thread_task_first_send taskId=${task.id.value} opened=${opened != null}")
+                    // The conversation takes the pending page's place: no push; the pending page goes once it is covered.
+                    opened?.let { (sentTask, conversationId) ->
+                        openCanonicalTaskWith(sentTask, "task_first_send", conversationId, animated = false)
+                    }
+                }
+            }
+        },
+    )
+    // web TaskConversationDialog binds to a conversation created elsewhere (`task:updated`): the open
+    // sheet follows the store's copy of its task and gives way to the conversation page.
+    val taskOpenSurfaceTaskId = taskOpenSurfaceFlow.surface?.task?.id
+    LaunchedEffect(taskOpenSurfaceTaskId, taskProjectionSlice, serverTaskProjectionSlice, taskV2Enabled) {
+        val taskId = taskOpenSurfaceTaskId ?: return@LaunchedEffect
+        val fresh =
+            taskProjectionSlice.tasks.firstOrNull { it.id == taskId }
+                ?: serverTaskProjectionSlice.tasks.firstOrNull { it.id == taskId }
+        taskOpenSurfaceFlow.onTaskChanged(fresh, taskV2Enabled)?.let { arrived ->
+            bridge.log("thread_task_pending_conversation_arrived taskId=${arrived.id.value}")
+            openCanonicalTask(arrived, "task_conversation_arrived")
+        }
+    }
+
+    createTaskFromMessage.source?.let { source ->
+        TaskCreateFromMessageDialog(
+            source = source,
+            submitting = createTaskFromMessage.submitting,
+            errorText = createTaskFromMessage.errorText,
+            onDismiss = { createTaskFromMessage.dismiss() },
+            onSubmit = { titles ->
+                val serverId = currentServerId?.takeIf { it.isNotBlank() }
+                if (serverId != null && !createTaskFromMessage.submitting) {
+                    coroutineScope.launch {
+                        val outcome =
+                            createTaskFromMessage.submit(titles, serverId, tasksDataSource, tasksDataStore, unableToCreateTaskLabel)
+                        bridge.log(
+                            "thread_task_create_from_message result=${outcome?.let { it::class.simpleName }} " +
+                                "messageId=${source.messageId.value}"
+                        )
+                        val blocker = (outcome as? TaskCreateFromMessageOutcome.Failed)?.blocker
+                        if (blocker != null) routeAuthRequired(DataResult.NoPermission(blocker))
+                    }
+                }
+            },
+        )
     }
 
     RaftForegroundBannerHost(
@@ -11494,6 +11803,8 @@ private fun SharedThreadRouteContentContent(
                 LocalThreadReverseLayout provides threadReverseLayoutEnabled,
                 LocalThreadFeedbackCardEntryEnabled provides feedbackCardEntryEnabled,
                 LocalThreadViewerServerId provides currentServerId,
+                // The Add Reaction picker keeps its skin tone and frequently used emoji per account.
+                LocalRaftEmojiPickerOwnerKey provides messageBodyOwnerKey,
                 LocalThreadActionCardNames provides actionCardNames,
                 LocalThreadActionCardSpecHost provides actionCardSpecHost,
                 LocalThreadMessagePointerSessionKey provides threadPointerSessionKey,
@@ -11522,27 +11833,120 @@ private fun SharedThreadRouteContentContent(
         }.collectAsState(SharedServerChannelMembersSlice(serverId = currentServerId, channelId = taskConversationParentChannelId?.value.orEmpty()))
         val taskConversationServerRole =
             currentSession?.servers?.firstOrNull { it.id == currentServerId }?.role
-        val taskConversationBar: (@Composable () -> Unit)? =
+        // Task v2: leave the task for a place in its channel (web `onLeave` + `nav.toMessage`): its
+        // source / host message, the channel itself, or a pre-v2 task's earlier discussion thread.
+        fun openTaskConversationTarget(request: HomeMessageOpenRequest?, action: String) {
+            val loadingPayload =
+                request?.let { openRequest ->
+                    buildAppShellThreadPayload(
+                        conversation = openRequest.conversationIdentity,
+                        timeContext = renderedThread.toRaftTimeCapabilities().staticContext(),
+                        alignOwnMessagesRight = renderedThread.alignOwnMessagesRight,
+                        compactConsecutiveMessages = renderedThread.compactConsecutiveMessages,
+                        anchorMessageId = openRequest.anchorMessageId,
+                        originFallback = openRequest.originFallback,
+                        onWarn = bridge::logWarn
+                    )
+                }
+            if (loadingPayload == null) {
+                bridge.logWarn(
+                    "task_conversation_open_rejected action=$action reason=identity_unresolved " +
+                        "taskId=${taskConversationTask?.id?.value.orEmpty()}"
+                )
+                bridge.toast(unableToOpenTaskLabel)
+                return
+            }
+            bridge.log(
+                "task_conversation_open action=$action taskId=${taskConversationTask?.id?.value.orEmpty()} " +
+                    "targetThreadId=${loadingPayload.sourceThreadId.orEmpty()} " +
+                    "focusedMessageId=${loadingPayload.focusedMessageId.orEmpty()}"
+            )
+            onOpenThreadPayload(loadingPayload)
+        }
+        fun taskConversationDirectory(task: TaskSummary): SharedConversationDirectoryState =
+            listOfNotNull(
+                currentServerId?.let(::ServerId)?.let { server ->
+                    task.channelId?.let { conversationIdentityProvider?.resolveProjection(server, it.value) }
+                }
+            ).toSharedConversationDirectoryState()
+        val openTaskInChannel: ((TaskSummary, MessageId?, String) -> Unit) = { task, anchor, action ->
+            openTaskConversationTarget(
+                task.taskChannelOpenRequest(currentServerId.orEmpty(), anchor, taskConversationDirectory(task)),
+                action,
+            )
+        }
+        // Task v2 on a phone: the head scrolls with the conversation (web mobile); the top bar names
+        // the task's state while it is out of view and pulls the head down over the messages.
+        val taskHeadScrollState = remember(taskConversationId) { TaskHeadScrollState() }
+        // Back (and Escape) puts the pulled-down head back up before it leaves the page.
+        RaftBackHandler(enabled = taskHeadScrollState.floatOpen, label = "task_head_float") {
+            taskHeadScrollState.closeFloat()
+        }
+        val taskConversationChrome: TaskConversationHeaderChrome? =
             if (taskConversationTask != null && taskConversationHeaderState != null && !taskConversationHeaderState.removed) {
-                {
-                    TaskConversationBarRoute(
+                taskConversationTask.taskConversationHeaderChrome(
+                    state = taskConversationHeaderState,
+                    summarized = taskHeadScrollState.collapsed,
+                    headFloatOpen = taskHeadScrollState.floatOpen,
+                    onToggleHeadFloat = { taskHeadScrollState.toggleFloat() },
+                    onViewInChannel = {
+                        openTaskInChannel(taskConversationTask, taskConversationTask.taskViewInChannelAnchor(), "view_in_channel")
+                    },
+                    onToggleFollow = { followed -> taskConversationHeaderViewModel?.toggleFollow(followed) },
+                )
+            } else {
+                null
+            }
+        // The page's live clock supplies "today": the static context has none, and without it the
+        // head's Source and History times fell back to the raw wire timestamp (1.17.0 build 3 smoke).
+        val taskConversationTimeContext =
+            timeContextProvider.current ?: renderedThread.toRaftTimeCapabilities().staticContext()
+        // The head in the conversation ([floating] false) and pulled down from the bar (true).
+        val taskConversationHeadRoute: (@Composable (floating: Boolean) -> Unit)? =
+            if (taskConversationTask != null && taskConversationHeaderState != null && !taskConversationHeaderState.removed) {
+                { floating ->
+                    TaskConversationHeadRoute(
                         task = taskConversationTask,
                         state = taskConversationHeaderState,
+                        details = taskConversationDetailsState,
                         serverRole = taskConversationServerRole,
                         statusUpdating = taskConversationTasksState?.statusUpdatingTaskId == taskConversationTask.id.value,
                         assigneeCandidates = taskConversationMembersSlice.members,
+                        timeContext = taskConversationTimeContext,
                         onUpdateStatus = { status ->
-                            taskConversationTasksViewModel?.dispatch(SharedTasksRouteIntent.UpdateStatus(taskConversationTask, status))
+                            taskConversationTasksViewModel?.let { TaskHeadEdits(it::dispatch).updateStatus(taskConversationTask, status) }
                         },
                         onAssign = { member ->
-                            taskConversationTasksViewModel?.dispatch(SharedTasksRouteIntent.AssignTask(taskConversationTask, member))
+                            taskConversationTasksViewModel?.let { TaskHeadEdits(it::dispatch).assign(taskConversationTask, member) }
                         },
-                        onToggleFollow = { followed -> taskConversationHeaderViewModel?.toggleFollow(followed) },
+                        onOpenSource = {
+                            openTaskInChannel(taskConversationTask, taskConversationTask.taskHeadSourceMessageId(), "source")
+                        },
+                        onOpenEarlierDiscussion = {
+                            val earlier = taskConversationDetailsState.earlierDiscussion.valueOrNull
+                            openTaskConversationTarget(
+                                taskConversationTask.taskEarlierDiscussionOpenRequest(
+                                    serverId = currentServerId.orEmpty(),
+                                    threadChannelId = earlier?.threadChannelId,
+                                    conversationDirectory = taskConversationDirectory(taskConversationTask),
+                                ),
+                                "earlier_discussion",
+                            )
+                        },
+                        scrollState = taskHeadScrollState,
+                        // Typing on a phone: the head folds away so the conversation keeps its room.
+                        keyboardUp = adaptivePageKeyboardInsetDp > 0f,
+                        onRetryHistory = { taskConversationDetailsViewModel?.retryHistory() },
+                        // The offline stand-in refuses writes: its status and assignee are plain facts.
+                        editable = taskConversationTasksState?.standIn != true,
+                        floating = floating,
                     )
                 }
             } else {
                 null
             }
+        val taskConversationBar: (@Composable () -> Unit)? = taskConversationHeadRoute?.let { route -> { route(false) } }
+        val taskConversationFloat: (@Composable () -> Unit)? = taskConversationHeadRoute?.let { route -> { route(true) } }
         CompositionLocalProvider(*threadProvidedValues) {
             ThreadPageContent(
                 onComposerKeyboardInsetChanged = { adaptivePageKeyboardInsetDp = it },
@@ -11550,8 +11954,13 @@ private fun SharedThreadRouteContentContent(
                 onToggleFocusMode = threadFocusModeToggle,
                 focusModeActive = threadFocusModeActive,
             taskConversationBar = taskConversationBar,
+            taskConversationChrome = taskConversationChrome,
+            taskConversationHead = taskHeadScrollState.takeIf { taskConversationBar != null },
+            taskConversationFloat = taskConversationFloat,
             agentFollowersHeader = {
-                if (renderedThread.surfaceKind == RaftThreadSurfaceKind.ReplyThread) {
+                // Task v2: a task conversation's bar carries its Agent followers too (web
+                // ThreadAgentFollowers `subject="task"` on the conversation channel).
+                if (renderedThread.surfaceKind == RaftThreadSurfaceKind.ReplyThread || renderedThread.isTaskConversationSurface()) {
                     ThreadAgentFollowersRoute(
                         threadId = renderedThread.streamChannelId,
                         serverId = currentServerId,
@@ -11690,13 +12099,12 @@ private fun SharedThreadRouteContentContent(
             },
             pendingActionCardIds = pendingActionCardIds,
             pendingTaskConvertMessageIds = pendingTaskConvertMessageIds,
-            markdownReferencePendingActionId = markdownReferencePending.active?.actionId,
+            markdownReferencePendingActionId = markdownReferencePending.busyActionId,
             attachmentOpenStates = attachmentOpenStates,
             composerSendKeyEnabled = composerSendKeyEnabled,
             newDesignSettingsEnabled = chatLayoutPreferenceStore::readNewDesignSettingsEnabledSync,
             longMessageCollapseEnabled = longMessageCollapseEnabled,
             longMessageCollapseConversationSetting = longMessageCollapseConversationSetting,
-            singleTapOpensThreadEnabled = singleTapOpensThreadEnabled,
             jumpInputs = jumpInputs,
             newMessageMenuEnabled = newMessageMenuEnabled,
             currentServerSlug = currentServerSlug,
@@ -11868,6 +12276,37 @@ private fun SharedThreadRouteContentContent(
                                 switchToTab = RaftThreadTab.Chat.wireValue
                             )
                         )
+                    }
+                    action == ThreadOpenUnreadThreadPastHistoryAction && !itemId.isNullOrBlank() &&
+                        !eventThreadChannelId.isNullOrBlank() -> {
+                        // Web #11494: the parent is past the plan's history window (the channel shows
+                        // the paywall there) but replies are inside it: open the thread, which reads it.
+                        // Its parent is not loaded, so nothing seeds the reply page; it loads canonically.
+                        bridge.log(
+                            "thread_unread_thread_jump_open_past_history parent=${itemId.take(8)} " +
+                                "thread=${eventThreadChannelId.take(8)}"
+                        )
+                        sharedHomeStore?.dispatch(SharedHomeIntent.MarkFollowedThreadRead(eventThreadChannelId))
+                        onOpenThreadPayload(
+                            renderedThread.replyThreadLoadingPayload(
+                                parentMessageId = itemId,
+                                parentChannelId = renderedThread.replyParentChannelIdForNestedOpen(),
+                                threadChannelId = eventThreadChannelId,
+                            )
+                        )
+                    }
+                    action == ThreadJumpToUnreadThreadPastHistoryAction && !itemId.isNullOrBlank() &&
+                        !eventThreadChannelId.isNullOrBlank() -> {
+                        // Web #11494: the parent and its replies are past the window; the jump lands on
+                        // the paywall, where the thread can't be opened, so read it now: the count drops
+                        // and the next tap moves on instead of staying on this thread.
+                        threadViewModel.dispatch(
+                            SharedThreadIntent.JumpToMessage(
+                                messageId = itemId,
+                                switchToTab = RaftThreadTab.Chat.wireValue,
+                            )
+                        )
+                        sharedHomeStore?.dispatch(SharedHomeIntent.MarkFollowedThreadRead(eventThreadChannelId))
                     }
                     action == ThreadJumpToUnreadThreadParentAction && !itemId.isNullOrBlank() -> {
                         // The unread-thread pill: focus (scroll to and highlight) the parent
@@ -12080,7 +12519,14 @@ private fun SharedThreadRouteContentContent(
                     pendingThreadFollowMessageIds = pendingThreadFollowMessageIds + threadChannelId
                     coroutineScope.launch {
                         try {
-                            when (val result = dataSource.unfollowThread(ChannelId(threadChannelId))) {
+                            // Web #11687: the thread's unread leaves Home at once, back if this fails.
+                            val unfollowResult =
+                                unfollowThreadProjectingHome(
+                                    ChannelId(threadChannelId),
+                                    project = { intent -> sharedHomeStore?.dispatch(intent) },
+                                    unfollow = dataSource::unfollowThread,
+                                )
+                            when (val result = unfollowResult) {
                                 is DataResult.Content -> {
                                     threadViewModel.dispatch(
                                         SharedThreadIntent.ApplyMessageThreadFollowed(
@@ -12104,6 +12550,10 @@ private fun SharedThreadRouteContentContent(
                             pendingThreadFollowMessageIds = pendingThreadFollowMessageIds - threadChannelId
                         }
                     }
+                }
+                action == MARK_THREAD_UNREAD_ACTION && !attachmentId.isNullOrBlank() -> {
+                    // botiverse/slock #11687: the reads of this page are held for it until it leaves.
+                    threadViewModel.dispatch(SharedThreadIntent.MarkThreadUnread(attachmentId))
                 }
                 action == "openParentMessage" -> {
                     val sideParentFocus =
@@ -12319,6 +12769,17 @@ private fun SharedThreadRouteContentContent(
                         }
                     }
                 }
+                action == "openSourceTask" && !itemId.isNullOrBlank() -> {
+                    // Task v2: a row of the list under a message opens its task (web useOpenTask):
+                    // its own conversation, or a pre-v2 task's host thread.
+                    val task = linkedTasksProjection.sourceTaskById(itemId)
+                    if (task == null) {
+                        bridge.logWarn("thread_task_open_rejected reason=source_task_missing taskId=$itemId")
+                        bridge.toast(unableToOpenTaskLabel)
+                    } else {
+                        openCanonicalTask(task, "message_task_list")
+                    }
+                }
                 action == "openTask" && !itemId.isNullOrBlank() -> {
                     val markdownPendingToken = markdownActionId?.let(::beginMarkdownReferencePending)
                     if (markdownActionId != null && markdownPendingToken == null) return@ThreadPageContent
@@ -12428,6 +12889,7 @@ private fun SharedThreadRouteContentContent(
                                     currentTaskChannelId = taskChannelId,
                                     tasksDataSource = tasksDataSource,
                                     tasksDataStore = tasksDataStore,
+                                    taskV2Enabled = taskV2Enabled,
                                     conversationIdentityProvider = conversationIdentityProvider
                                 )
                             val result = markdownTaskOpenRequestGate.accept(requestGeneration, resolved)
@@ -12463,6 +12925,9 @@ private fun SharedThreadRouteContentContent(
                                             taskNumber = result.taskNumber,
                                             candidates = result.candidates
                                         )
+                                }
+                                is MarkdownTaskNumberOpenResult.OpensInPlace -> {
+                                    openCanonicalTask(result.task, "markdown_task")
                                 }
                                 MarkdownTaskNumberOpenResult.NotFound -> {
                                     bridge.log(
@@ -12634,7 +13099,7 @@ private fun SharedThreadRouteContentContent(
                                 dataSource.replyCacheProvenanceState.value
                                     .currentRevisionForReplyCacheOwner(replyCacheProvenanceOwner)
                             if (provenance == null) {
-                                bridge.toast(localizedUnableToOpenTarget(itemId.take(32)))
+                                bridge.toast(unableToOpenThreadRefLabel)
                                 return@launch
                             }
                             when (
@@ -12677,10 +13142,10 @@ private fun SharedThreadRouteContentContent(
                                     }
                                 }
                                 is DataResult.Empty -> {
-                                    bridge.toast(localizedUnableToOpenTarget(itemId.take(32)))
+                                    bridge.toast(unableToOpenThreadRefLabel)
                                 }
                                 is DataResult.Error -> {
-                                    bridge.toast(localizedUnableToOpenTarget(itemId.take(32)))
+                                    bridge.toast(unableToOpenThreadRefLabel)
                                 }
                                 is DataResult.NoPermission -> {
                                     routeAuthRequired(result)
@@ -12814,6 +13279,23 @@ private fun SharedThreadRouteContentContent(
                             }
                         }
                     }
+                }
+                action == "convertMessageToTask" && !itemId.isNullOrBlank() && taskV2Enabled -> {
+                    // Task v2 (web MessageItem `openCreateFromMessage`): tasks are created FROM the
+                    // message (several, under it), never converted from it.
+                    val message = renderedTimelineSlice.threadActionMessage(itemId, linkedTasksProjection)
+                    if (message == null || !renderedTimelineSlice.canConvertMessagesToTasks || !message.canCreateTaskFromMessage() || taskChannelId == null) {
+                        bridge.toast(unableToCreateTaskLabel)
+                        return@ThreadPageContent
+                    }
+                    createTaskFromMessage.open(
+                        TaskCreateSourceMessage(
+                            channelId = taskChannelId,
+                            messageId = MessageId(message.id),
+                            senderName = message.threadAvatarName().ifBlank { message.authorName },
+                            text = message.body,
+                        )
+                    )
                 }
                 action == "convertMessageToTask" && !itemId.isNullOrBlank() -> {
                     if (itemId in pendingTaskConvertMessageIds) {
@@ -13679,9 +14161,7 @@ private fun SharedThreadRouteContentContent(
                                     dataSource.commitAgentCreateActionCardFromDialog(
                                         messageId = dialogState.messageId,
                                         card = submitCard,
-                                        submit = request,
-                                        formStore = createAgentFormStore,
-                                        serverId = createAgentComputerServerId
+                                        submit = request
                                     )
                             ) {
                                 is DataResult.Content -> {
@@ -14749,6 +15229,12 @@ private data class ThreadPageContentData(
     val agentFollowersHeader: @Composable () -> Unit,
     /** Task v2: the task conversation's status / assignee / follow bar under the header; null elsewhere. */
     val taskConversationBar: (@Composable () -> Unit)? = null,
+    /** Task v2: the top bar's task title and More menu rows; null elsewhere or before the task is known. */
+    val taskConversationChrome: TaskConversationHeaderChrome? = null,
+    /** Task v2 on a phone: the head moves with the conversation's scroll and is pulled down from the bar. */
+    val taskConversationHead: TaskHeadScrollState? = null,
+    /** Task v2 on a phone: the head pulled down from the bar over the messages ([TaskHeadFloat]). */
+    val taskConversationFloat: (@Composable () -> Unit)? = null,
     val threadInstanceKey: String,
     val routeActive: Boolean,
     val hostForeground: Boolean,
@@ -14795,7 +15281,6 @@ private data class ThreadPageContentData(
     val composerSendKeyEnabled: Boolean,
     val longMessageCollapseEnabled: Boolean,
     val longMessageCollapseConversationSetting: RaftLongMessageCollapseConversationSetting?,
-    val singleTapOpensThreadEnabled: Boolean,
     val jumpInputs: ThreadJumpInputs,
     val newMessageMenuEnabled: Boolean,
     val currentServerSlug: String?,
@@ -14855,6 +15340,9 @@ private @Composable
 fun ThreadPageContent(
     agentFollowersHeader: @Composable () -> Unit = {},
     taskConversationBar: (@Composable () -> Unit)? = null,
+    taskConversationChrome: TaskConversationHeaderChrome? = null,
+    taskConversationHead: TaskHeadScrollState? = null,
+    taskConversationFloat: (@Composable () -> Unit)? = null,
     scaffold: @Composable (ThreadRouteScaffoldSlots) -> Unit,
     threadInstanceKey: String,
     routeActive: Boolean,
@@ -14921,7 +15409,6 @@ fun ThreadPageContent(
     newDesignSettingsEnabled: () -> Boolean = { false },
     longMessageCollapseEnabled: Boolean = false,
     longMessageCollapseConversationSetting: RaftLongMessageCollapseConversationSetting? = null,
-    singleTapOpensThreadEnabled: Boolean = false,
     jumpInputs: ThreadJumpInputs = ThreadJumpInputs(),
     newMessageMenuEnabled: Boolean = false,
     currentServerSlug: String? = null,
@@ -14960,6 +15447,9 @@ fun ThreadPageContent(
             ThreadPageContentData(
                 agentFollowersHeader = agentFollowersHeader,
                 taskConversationBar = taskConversationBar,
+                taskConversationChrome = taskConversationChrome,
+                taskConversationHead = taskConversationHead,
+                taskConversationFloat = taskConversationFloat,
                 threadInstanceKey = threadInstanceKey,
                 routeActive = routeActive,
                 hostForeground = hostForeground,
@@ -15006,7 +15496,6 @@ fun ThreadPageContent(
                 composerSendKeyEnabled = composerSendKeyEnabled,
                 longMessageCollapseEnabled = longMessageCollapseEnabled,
                 longMessageCollapseConversationSetting = longMessageCollapseConversationSetting,
-                singleTapOpensThreadEnabled = singleTapOpensThreadEnabled,
                 jumpInputs = jumpInputs,
                 newMessageMenuEnabled = newMessageMenuEnabled,
                 currentServerSlug = currentServerSlug,
@@ -15138,7 +15627,6 @@ private fun ThreadPageContentContent(
     val newDesignSettingsEnabled = callbacks.newDesignSettingsEnabled
     val longMessageCollapseEnabled = data.longMessageCollapseEnabled
     val longMessageCollapseConversationSetting = data.longMessageCollapseConversationSetting
-    val singleTapOpensThreadEnabled = data.singleTapOpensThreadEnabled
     val jumpInputs = data.jumpInputs
     val newMessageMenuEnabled = data.newMessageMenuEnabled
     val currentServerSlug = data.currentServerSlug
@@ -15904,7 +16392,6 @@ private fun ThreadPageContentContent(
                         currentServerSlug = currentServerSlug,
                         contentExtrasVisible = contentExtrasVisible,
                         longMessageCollapseEnabled = longMessageCollapseEnabled,
-                        singleTapOpensThreadEnabled = singleTapOpensThreadEnabled,
                         jumpInputs = jumpInputs,
                         newMessageMenuEnabled = newMessageMenuEnabled,
                         inlineSearchVisible = inlineSearchVisible,
@@ -16043,10 +16530,24 @@ private fun ThreadPageContentContent(
             rootModifier =
                 Modifier.onGloballyPositioned { coordinates ->
                     onLayoutGeneration(coordinates.size.width, coordinates.size.height)
-                },
+                }.then(data.taskConversationHead?.let { Modifier.taskHeadFloatOutsidePress(it) } ?: Modifier),
             header = {
                 // task #180: computed once per header composition, outside the header's own scope.
-                val panelFollowAction = threadPanelFollowAction(timelineSlice.originMessage)
+                // The slice keeps reply facts out of its rows: the origin's thread channel and follow
+                // state come from the page's reply metadata (without it there was never a row here).
+                val originReplyMetadata =
+                    timelineSlice.originMessage?.let { origin -> replyMetadataByParentId.threadReplyMetadataFor(origin) }
+                val panelFollowAction =
+                    threadPanelFollowAction(
+                        timelineSlice.originMessage?.let { origin ->
+                            originReplyMetadata?.let { origin.withThreadReplyFacts(it) } ?: origin
+                        }
+                    )
+                val markUnreadThreadChannelId =
+                    threadPanelMarkUnreadChannelId(
+                        replyThreadSurface = timelineSlice.replyThreadSurface && data.taskConversationChrome == null,
+                        originReplyMetadata = originReplyMetadata
+                    )
                 ThreadPageHeader(
                     agentFollowersHeader = data.agentFollowersHeader,
                     payload = payload,
@@ -16098,9 +16599,11 @@ private fun ThreadPageContentContent(
                     // task #180 (artin): the follow row is derived by a pure helper from the same
                     // per-message state the long-press menu reads, so the two cannot disagree and the
                     // decision is unit-testable. Null = nothing to follow -> row is absent.
-                    threadFollowed = panelFollowAction?.followed,
+                    threadFollowed = data.taskConversationChrome?.followed ?: panelFollowAction?.followed,
+                    taskConversationChrome = data.taskConversationChrome,
                     onToggleThreadFollow =
-                        panelFollowAction?.let { follow ->
+                        data.taskConversationChrome?.takeIf { it.followed != null }?.onToggleFollow
+                            ?: panelFollowAction?.let { follow ->
                             {
                                 // The existing handler reads the thread channel from the attachmentId
                                 // slot: onThreadEvent(action, itemId, attachmentId, tab).
@@ -16111,6 +16614,10 @@ private fun ThreadPageContentContent(
                                     null
                                 )
                             }
+                        },
+                    onMarkThreadUnread =
+                        markUnreadThreadChannelId?.let { threadChannelId ->
+                            { onThreadEvent(MARK_THREAD_UNREAD_ACTION, null, threadChannelId, null) }
                         },
                 )
             },
@@ -16137,6 +16644,7 @@ private fun ThreadPageContentContent(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
             }
+            val threadTabContent: @Composable ColumnScope.() -> Unit = {
             data.taskConversationBar?.invoke()
             if (payload.showModeTabs) {
                 RaftTabbedScaffold(
@@ -16152,11 +16660,28 @@ private fun ThreadPageContentContent(
                     content = renderThreadTabContent
                 )
             } else {
-                renderThreadTabContent(
-                    selectedTab,
-                    Modifier.weight(1f).fillMaxWidth().background(RaftColor.SurfaceWhite),
-                    true
-                )
+                // Task v2: the list tells the head how far it may fold ([taskHeadConversationOverflow]).
+                CompositionLocalProvider(LocalTaskHeadScrollState provides data.taskConversationHead) {
+                    renderThreadTabContent(
+                        selectedTab,
+                        Modifier.weight(1f).fillMaxWidth().background(RaftColor.SurfaceWhite)
+                            // Task v2 on a phone: the head above moves with the conversation's scroll.
+                            .then(data.taskConversationHead?.let { Modifier.nestedScroll(it.connection) } ?: Modifier),
+                        true
+                    )
+                }
+            }
+            }
+            if (payload.isTaskConversationSurface()) {
+                // Task v2: the head pulled down from the top bar hangs over the messages (no scrim,
+                // nothing moves under it); a press outside it, anywhere on the page, puts it back up
+                // (rootModifier).
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    Column(Modifier.fillMaxSize()) { threadTabContent() }
+                    data.taskConversationFloat?.invoke()
+                }
+            } else {
+                threadTabContent()
             }
             if (!primaryFooterReady) {
                 // Loading/permission/error owns the whole content frame. Join and
@@ -16306,6 +16831,11 @@ private fun ThreadPageContentContent(
                             bottomSafeArea = composerBottomSafeArea,
                             keyboardInsetExcludesBottomSafeArea =
                                 composerKeyboardInsetExcludesBottomSafeArea
+                        ).then(
+                            // Task v2: focus in the composer puts the pulled-down head back up.
+                            data.taskConversationHead?.let { taskHead ->
+                                Modifier.onFocusChanged { if (it.hasFocus) taskHead.closeFloat() }
+                            } ?: Modifier
                         )
                 ) {
                     CompositionLocalProvider(
@@ -16587,7 +17117,7 @@ private fun ThreadPageContentContent(
                 )
         }
         forwardSuccessBanner?.let { banner ->
-            ThreadForwardSuccessBannerView(
+            ThreadForwardSuccessToastView(
                 banner = banner,
                 onViewInChat = {
                     forwardSuccessBanner = null
@@ -16706,7 +17236,13 @@ internal fun ThreadPageHeader(
     /** task #180: null when this thread has no message column to follow. */
     threadFollowed: Boolean? = null,
     onToggleThreadFollow: (() -> Unit)? = null,
+    /** botiverse/slock #11687: the More menu's Mark as Unread (null: not a followed reply thread). */
+    onMarkThreadUnread: (() -> Unit)? = null,
+    /** Task v2: the task's title block and More menu rows (null: not a task, or not known yet). */
+    taskConversationChrome: TaskConversationHeaderChrome? = null,
 ) {
+    // Task v2 (web TaskConversationBar): a task conversation's search is the More menu's Search in Task.
+    val taskConversation = payload.isTaskConversationSurface()
     val topSafeArea = if (applyTopSafeArea) raftTopSafeAreaPadding() else 0.dp
     val replyThreadPreviewTitle =
         if (headerDisplay.surfaceKind == RaftThreadSurfaceKind.ReplyThread && headerDisplay.title == ThreadReplyPageTitle) {
@@ -16750,23 +17286,64 @@ internal fun ThreadPageHeader(
         showActions &&
             (
                 headerDisplay.surfaceKind == RaftThreadSurfaceKind.ReplyThread ||
+                    taskConversation ||
                     payload.threadHeaderSearchAction() != null ||
                     threadHeaderSettingsActionVisible(payload.showSettingsAction, headerDisplay.surfaceKind) ||
                     payload.threadHeaderOpenInParentActionVisible()
             )
+    // iPhone Duo (raft-design #859): beside the system's side column, Back and the page's actions
+    // are the column's (Back first, two actions, the rest in its ⋯); the header keeps the title
+    // and the subtitle, from the 16dp margin, without Back and without icon buttons.
+    val showsBack = threadHeaderShowsBack(showBack, headerDisplay.surfaceKind)
+    val controlsInColumn =
+        raftSideColumnControls(
+            back =
+                if (showsBack) {
+                    raftSideColumnBackAction(
+                        onBack,
+                        systemSymbol = RaftSideColumnBackSystemSymbol.takeIf { threadHeaderSideColumnSystemSymbols(headerDisplay.surfaceKind) },
+                    )
+                } else {
+                    null
+                },
+            actions =
+                if (showActions) {
+                    threadHeaderSideColumnActions(
+                        payload = payload,
+                        surfaceKind = headerDisplay.surfaceKind,
+                        taskConversation = taskConversation,
+                        onOpenSearch = onOpenSearch,
+                        onShowSettings = onShowSettings,
+                        onOpenInChannel = onOpenInChannel,
+                        onToggleFocusMode = onToggleFocusMode,
+                        focusModeActive = focusModeActive,
+                        threadFollowed = threadFollowed,
+                        onToggleThreadFollow = onToggleThreadFollow,
+                        onMarkThreadUnread = onMarkThreadUnread,
+                        onViewTaskInChannel = taskConversationChrome?.onViewInChannel,
+                    )
+                } else {
+                    emptyList()
+                },
+        )
     RaftTopPageHeader(
         title = localizedHeaderTitle,
         backgroundColor = RaftColor.Canvas,
         topSafeAreaOverride = topSafeArea,
-        contentStartPadding = if (showBack) ThreadHeaderEdgeInset else ThreadSplitDetailEdgeInset,
+        contentStartPadding =
+            when {
+                controlsInColumn -> RaftTopPageHeaderContentEndPadding
+                showBack -> ThreadHeaderEdgeInset
+                else -> ThreadSplitDetailEdgeInset
+            },
         // The 3dp edge inset only mirrors Back when a trailing PanelAction sits at the end;
         // without one the title keeps the default end padding instead of running to the edge.
-        contentEndPadding = if (showHeaderActions) ThreadHeaderEdgeInset else RaftTopPageHeaderContentEndPadding,
+        contentEndPadding = if (showHeaderActions && !controlsInColumn) ThreadHeaderEdgeInset else RaftTopPageHeaderContentEndPadding,
         contentSpacing = ThreadHeaderContentSpacing,
         titleLeadingContent = {
             // Back is the same 44dp frameless PanelAction as the trailing actions (not the shared
             // 36dp leading slot), so its arrow mirrors the last trailing glyph 14dp from the edge.
-            if (threadHeaderShowsBack(showBack, headerDisplay.surfaceKind)) {
+            if (showsBack && !controlsInColumn) {
                 RaftBackButton(onClick = onBack, label = stringResource(Res.string.common_back))
             }
             if (headerDisplay.surfaceKind == RaftThreadSurfaceKind.DirectMessage) {
@@ -16795,6 +17372,11 @@ internal fun ThreadPageHeader(
             }
         },
         titleContent = {
+            if (taskConversationChrome != null) {
+                // Task v2 (web TaskConversationBar): the ref over "Task #7", and the task's state once
+                // the head has scrolled away.
+                TaskConversationBarTitle(taskConversationChrome, Modifier.weight(1f))
+            } else
             Column(
                 modifier =
                     Modifier
@@ -16846,14 +17428,17 @@ internal fun ThreadPageHeader(
             }
         },
         trailingContent =
-            if (showHeaderActions) {
+            if (showHeaderActions && controlsInColumn) {
+                // The Agent followers are the task's facts, not a button: they stay in the header.
+                { agentFollowersHeader() }
+            } else if (showHeaderActions) {
                 {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(ThreadHeaderActionGroupSpacing)
                 ) {
                     agentFollowersHeader()
-                    if (payload.threadHeaderSearchAction() != null) {
+                    if (!taskConversation && payload.threadHeaderSearchAction() != null) {
                         ThreadHeaderIconButton(icon = RaftLucideIconName.Search, onClick = onOpenSearch)
                     }
                     if (threadHeaderSettingsActionVisible(payload.showSettingsAction, headerDisplay.surfaceKind)) {
@@ -16863,14 +17448,20 @@ internal fun ThreadPageHeader(
                         ThreadHeaderIconButton(icon = RaftLucideIconName.MapPin, onClick = onOpenInChannel)
                     }
                     val toggleFocus = onToggleFocusMode
-                    val hasPanelMenu = toggleFocus != null || onToggleThreadFollow != null
+                    val hasPanelMenu =
+                        toggleFocus != null || onToggleThreadFollow != null || onMarkThreadUnread != null || taskConversation
                     if (hasPanelMenu) {
                         ThreadHeaderFocusModeMenu(
                             focused = focusModeActive,
                             onSelect = { toggleFocus?.invoke() },
                             followed = threadFollowed,
                             onToggleFollow = onToggleThreadFollow,
-                            focusEnabled = focusModeActive || toggleFocus != null
+                            onMarkUnread = onMarkThreadUnread,
+                            focusEnabled = focusModeActive || toggleFocus != null,
+                            onSearchInTask = onOpenSearch.takeIf { taskConversation },
+                            onViewInChannel = taskConversationChrome?.onViewInChannel.takeIf { taskConversation },
+                            taskFollowLabels = taskConversation,
+                            drawLocally = toggleFocus == null,
                         )
                     }
                 }
@@ -16880,6 +17471,108 @@ internal fun ThreadPageHeader(
             },
         showBodyTopBanner = false,
     )
+}
+
+/**
+ * The conversation header's actions for the Duo side column, in the header's order: Search and
+ * Settings (or Open in Channel) first, so they are the two the column shows; the More menu's rows
+ * (Focus mode, Search in Task, View in Channel, Follow) after them, in its ⋯.
+ */
+@Composable
+private fun threadHeaderSideColumnActions(
+    payload: RaftThreadScreenPayload,
+    surfaceKind: String,
+    taskConversation: Boolean,
+    onOpenSearch: () -> Unit,
+    onShowSettings: () -> Unit,
+    onOpenInChannel: () -> Unit,
+    onToggleFocusMode: (() -> Unit)?,
+    focusModeActive: Boolean,
+    threadFollowed: Boolean?,
+    onToggleThreadFollow: (() -> Unit)?,
+    onMarkThreadUnread: (() -> Unit)?,
+    onViewTaskInChannel: (() -> Unit)?,
+): List<RaftSideAction> {
+    val markUnreadLabel = stringResource(Res.string.home_action_mark_as_unread)
+    val searchLabel = stringResource(Res.string.thread_action_search)
+    val settingsLabel = stringResource(Res.string.settings_title)
+    val viewInChannelLabel = stringResource(Res.string.task_conversation_view_in_channel)
+    val focusLabel =
+        stringResource(if (focusModeActive) Res.string.thread_focus_mode_standard else Res.string.thread_focus_mode_focus)
+    val searchInTaskLabel = stringResource(Res.string.task_conversation_search)
+    val followLabel =
+        threadFollowed?.let { followed ->
+            stringResource(
+                when {
+                    taskConversation && followed -> Res.string.task_conversation_unfollow
+                    taskConversation -> Res.string.task_conversation_follow
+                    followed -> Res.string.thread_action_unfollow_thread
+                    else -> Res.string.thread_action_follow_thread
+                }
+            )
+        }
+    // The iOS host's SF Symbols, on the channel page only (the 1.17.1 prototype): every other
+    // surface keeps a column drawn by us.
+    val systemSymbols = threadHeaderSideColumnSystemSymbols(surfaceKind)
+    return buildList {
+        if (!taskConversation && payload.threadHeaderSearchAction() != null) {
+            add(
+                raftSideColumnLucideAction(
+                    "thread-search",
+                    searchLabel,
+                    RaftLucideIconName.Search,
+                    onOpenSearch,
+                    systemSymbol = "magnifyingglass".takeIf { systemSymbols },
+                )
+            )
+        }
+        if (threadHeaderSettingsActionVisible(payload.showSettingsAction, surfaceKind)) {
+            add(
+                raftSideColumnLucideAction(
+                    "thread-settings",
+                    settingsLabel,
+                    RaftLucideIconName.Settings,
+                    onShowSettings,
+                    systemSymbol = "gearshape".takeIf { systemSymbols },
+                )
+            )
+        }
+        if (payload.threadHeaderOpenInParentActionVisible()) {
+            add(raftSideColumnLucideAction("thread-open-in-channel", viewInChannelLabel, RaftLucideIconName.MapPin, onOpenInChannel))
+        }
+        if (onToggleFocusMode != null) {
+            val icon = if (focusModeActive) RaftLucideIconName.Square else RaftLucideIconName.Maximize2
+            add(raftSideColumnLucideAction(FOCUS_MODE_MENU_ITEM_ID, focusLabel, icon, onToggleFocusMode, priority = -1))
+        }
+        if (taskConversation) {
+            add(raftSideColumnLucideAction(SEARCH_IN_TASK_MENU_ITEM_ID, searchInTaskLabel, RaftLucideIconName.Search, onOpenSearch))
+            if (onViewTaskInChannel != null) {
+                add(raftSideColumnLucideAction(VIEW_TASK_IN_CHANNEL_MENU_ITEM_ID, viewInChannelLabel, RaftLucideIconName.MapPin, onViewTaskInChannel))
+            }
+        }
+        if (onMarkThreadUnread != null) {
+            add(
+                raftSideColumnLucideAction(
+                    MARK_THREAD_UNREAD_MENU_ITEM_ID,
+                    markUnreadLabel,
+                    RaftLucideIconName.MessageSquareDot,
+                    onMarkThreadUnread,
+                    priority = -1,
+                )
+            )
+        }
+        if (followLabel != null && threadFollowed != null && onToggleThreadFollow != null) {
+            add(
+                raftSideColumnLucideAction(
+                    FOLLOW_THREAD_MENU_ITEM_ID,
+                    followLabel,
+                    threadFollowMenuIcon(threadFollowed),
+                    onToggleThreadFollow,
+                    priority = -1,
+                )
+            )
+        }
+    }
 }
 
 @Composable
@@ -17424,12 +18117,30 @@ private fun ThreadHeaderFocusModeMenu(
     onSelect: () -> Unit,
     followed: Boolean? = null,
     onToggleFollow: (() -> Unit)? = null,
+    /**
+     * botiverse/slock #11687 (web ThreadOverflowMenu): Mark as Unread, before Follow; null for a
+     * thread the person doesn't follow, as its Activity row has none.
+     */
+    onMarkUnread: (() -> Unit)? = null,
     focusEnabled: Boolean = true,
+    /** Task v2 (web ThreadOverflowMenu `subject="task"`): Search in Task, after Focus mode. */
+    onSearchInTask: (() -> Unit)? = null,
+    /** Task v2: View in Channel (the task's message in its channel, or the channel). */
+    onViewInChannel: (() -> Unit)? = null,
+    /** Task v2: the follow row reads Follow / Unfollow Task. */
+    taskFollowLabels: Boolean = false,
+    /**
+     * Draw the menu here, as a dropdown under the button, instead of asking the shell. Only a host
+     * with a side column has the shell overlay; on a phone the page is the whole window, so a
+     * request to the shell drew nothing (1.17.0 build 3: the task page's More did nothing).
+     */
+    drawLocally: Boolean = false,
 ) {
     val anchorRef = remember { RaftLiveRootAnchorRef(identity = "thread_header_focus_mode") }
+    var localMenuAnchor by remember { mutableStateOf<RaftPopoverAnchor?>(null) }
     val items =
         buildList {
-            add(
+            if (!drawLocally) add(
                 RaftBrutalDropdownMenuItem(
                     id = FOCUS_MODE_MENU_ITEM_ID,
                     label =
@@ -17445,6 +18156,37 @@ private fun ThreadHeaderFocusModeMenu(
                     enabled = focusEnabled
                 )
             )
+            // Task v2: the web menu's next rows for a task, in its order (ThreadOverflowMenu.tsx).
+            if (onSearchInTask != null) {
+                add(
+                    RaftBrutalDropdownMenuItem(
+                        id = SEARCH_IN_TASK_MENU_ITEM_ID,
+                        label = stringResource(Res.string.task_conversation_search),
+                        icon = RaftLucideIconName.Search,
+                        enabled = true
+                    )
+                )
+            }
+            if (onViewInChannel != null) {
+                add(
+                    RaftBrutalDropdownMenuItem(
+                        id = VIEW_TASK_IN_CHANNEL_MENU_ITEM_ID,
+                        label = stringResource(Res.string.task_conversation_view_in_channel),
+                        icon = RaftLucideIconName.MapPin,
+                        enabled = true
+                    )
+                )
+            }
+            if (onMarkUnread != null) {
+                add(
+                    RaftBrutalDropdownMenuItem(
+                        id = MARK_THREAD_UNREAD_MENU_ITEM_ID,
+                        label = stringResource(Res.string.home_action_mark_as_unread),
+                        icon = RaftLucideIconName.MessageSquareDot,
+                        enabled = true
+                    )
+                )
+            }
             // task #180 (artin): follow/unfollow of this thread's message column sits in the same
             // panel menu. `followed` is null when the thread has no message to follow, in which case
             // the row is not offered at all rather than shown disabled.
@@ -17454,10 +18196,11 @@ private fun ThreadHeaderFocusModeMenu(
                         id = FOLLOW_THREAD_MENU_ITEM_ID,
                         label =
                             stringResource(
-                                if (followed) {
-                                    Res.string.thread_action_unfollow_thread
-                                } else {
-                                    Res.string.thread_action_follow_thread
+                                when {
+                                    taskFollowLabels && followed -> Res.string.task_conversation_unfollow
+                                    taskFollowLabels -> Res.string.task_conversation_follow
+                                    followed -> Res.string.thread_action_unfollow_thread
+                                    else -> Res.string.thread_action_follow_thread
                                 }
                             ),
                         icon = threadFollowMenuIcon(followed),
@@ -17476,9 +18219,10 @@ private fun ThreadHeaderFocusModeMenu(
     // RaftSharedStoreRegistry is keyed by pager bridge id, so each page gets the live bus it can
     // actually post on (the same path the rest of ThreadPage already uses).
     val localPager = LocalActivity.current.getPager() as Pager
+    val eventBusOverride = LocalThreadHeaderMenuEventBus.current
     val pageEventBus: build.raft.app.data.RaftEventBus =
-        remember(localPager.pagerId) {
-            RaftSharedStoreRegistry.get(Utils.bridgeModule(localPager.pagerId)).eventBus
+        remember(localPager.pagerId, eventBusOverride) {
+            eventBusOverride ?: RaftSharedStoreRegistry.get(Utils.bridgeModule(localPager.pagerId)).eventBus
         }
     // This page's registry key, mirroring what RaftChildPage publishes for it.
     // This page's registry key, mirroring what RaftChildPage publishes for it. Verified by
@@ -17503,6 +18247,9 @@ private fun ThreadHeaderFocusModeMenu(
                 when (selectedId) {
                     FOCUS_MODE_MENU_ITEM_ID -> onSelect()
                     FOLLOW_THREAD_MENU_ITEM_ID -> onToggleFollow?.invoke()
+                    MARK_THREAD_UNREAD_MENU_ITEM_ID -> onMarkUnread?.invoke()
+                    SEARCH_IN_TASK_MENU_ITEM_ID -> onSearchInTask?.invoke()
+                    VIEW_TASK_IN_CHANNEL_MENU_ITEM_ID -> onViewInChannel?.invoke()
                     else -> Unit // dismissed
                 }
             }
@@ -17522,6 +18269,10 @@ private fun ThreadHeaderFocusModeMenu(
             // produced ZERO trace lines, which could not distinguish "the click never reached this
             // handler" from "the lines went somewhere else". This line fires before any guard.
             raftTraceToPlatformLog("SlockShellOverlay", "click_enter")
+            if (drawLocally) {
+                anchorRef.resolve(RaftPopoverLocalPoint.BottomEnd)?.let { localMenuAnchor = it }
+                return@onClick
+            }
             val bus = pageEventBus
             val anchor = anchorRef.resolve(RaftPopoverLocalPoint.BottomEnd)
             if (anchor == null) {
@@ -17568,10 +18319,36 @@ private fun ThreadHeaderFocusModeMenu(
         modifier = Modifier.raftCaptureLiveRootAnchor(anchorRef),
         contentDescription = stringResource(Res.string.thread_focus_mode_menu_more)
     )
+    localMenuAnchor?.let { anchor ->
+        RaftBrutalDropdownMenu(
+            anchor = anchor,
+            items = items,
+            onSelect = { id ->
+                localMenuAnchor = null
+                when (id) {
+                    FOLLOW_THREAD_MENU_ITEM_ID -> onToggleFollow?.invoke()
+                    MARK_THREAD_UNREAD_MENU_ITEM_ID -> onMarkUnread?.invoke()
+                    SEARCH_IN_TASK_MENU_ITEM_ID -> onSearchInTask?.invoke()
+                    VIEW_TASK_IN_CHANNEL_MENU_ITEM_ID -> onViewInChannel?.invoke()
+                }
+            },
+            onDismiss = { localMenuAnchor = null },
+        )
+    }
 }
 
+/**
+ * Screenshot fixtures only: the bus the header's More menu posts on, instead of the live page's
+ * shared store registry (null in the app).
+ */
+internal val LocalThreadHeaderMenuEventBus =
+    androidx.compose.runtime.staticCompositionLocalOf<build.raft.app.data.RaftEventBus?> { null }
+
 internal const val FOCUS_MODE_MENU_ITEM_ID = "thread-focus-mode"
+internal const val MARK_THREAD_UNREAD_MENU_ITEM_ID = "thread-mark-unread"
 internal const val FOLLOW_THREAD_MENU_ITEM_ID = "thread-toggle-follow"
+internal const val SEARCH_IN_TASK_MENU_ITEM_ID = "task-search"
+internal const val VIEW_TASK_IN_CHANNEL_MENU_ITEM_ID = "task-view-in-channel"
 
 @Composable
 internal fun ThreadHeaderActionButton(
@@ -17699,7 +18476,6 @@ private data class ThreadChatTabData(
     val currentServerSlug: String?,
     val contentExtrasVisible: Boolean,
     val longMessageCollapseEnabled: Boolean,
-    val singleTapOpensThreadEnabled: Boolean,
     val jumpInputs: ThreadJumpInputs,
     val newMessageMenuEnabled: Boolean,
     val inlineSearchVisible: Boolean,
@@ -17776,7 +18552,6 @@ fun ThreadChatTab(
     currentServerSlug: String? = null,
     contentExtrasVisible: Boolean = true,
     longMessageCollapseEnabled: Boolean = false,
-    singleTapOpensThreadEnabled: Boolean = false,
     jumpInputs: ThreadJumpInputs = ThreadJumpInputs(),
     newMessageMenuEnabled: Boolean = false,
     inlineSearchVisible: Boolean = false,
@@ -17843,7 +18618,6 @@ fun ThreadChatTab(
                 currentServerSlug = currentServerSlug,
                 contentExtrasVisible = contentExtrasVisible,
                 longMessageCollapseEnabled = longMessageCollapseEnabled,
-                singleTapOpensThreadEnabled = singleTapOpensThreadEnabled,
                 jumpInputs = jumpInputs,
                 newMessageMenuEnabled = newMessageMenuEnabled,
                 inlineSearchVisible = inlineSearchVisible,
@@ -17923,7 +18697,6 @@ private fun ThreadChatTabContent(
     val currentServerSlug = data.currentServerSlug
     val contentExtrasVisible = data.contentExtrasVisible
     val longMessageCollapseEnabled = data.longMessageCollapseEnabled
-    val singleTapOpensThreadEnabled = data.singleTapOpensThreadEnabled
     val jumpInputs = data.jumpInputs
     val newMessageMenuEnabled = data.newMessageMenuEnabled
     val inlineSearchVisible = data.inlineSearchVisible
@@ -18101,7 +18874,6 @@ private fun ThreadChatTabContent(
                     currentServerSlug = currentServerSlug,
                     contentExtrasVisible = contentExtrasVisible,
                     longMessageCollapseEnabled = longMessageCollapseEnabled,
-                    singleTapOpensThreadEnabled = singleTapOpensThreadEnabled,
                     jumpInputs = jumpInputs,
                     newMessageMenuEnabled = newMessageMenuEnabled,
                     inlineSearchVisible = inlineSearchVisible,
@@ -18192,7 +18964,6 @@ private fun ThreadChatTabContent(
                     currentServerSlug = currentServerSlug,
                     contentExtrasVisible = contentExtrasVisible,
                     longMessageCollapseEnabled = longMessageCollapseEnabled,
-                    singleTapOpensThreadEnabled = singleTapOpensThreadEnabled,
                     jumpInputs = jumpInputs,
                     newMessageMenuEnabled = newMessageMenuEnabled,
                     inlineSearchVisible = inlineSearchVisible,
@@ -18289,7 +19060,6 @@ private fun ThreadChatTabContent(
                 currentServerSlug = currentServerSlug,
                 contentExtrasVisible = contentExtrasVisible,
                 longMessageCollapseEnabled = longMessageCollapseEnabled,
-                singleTapOpensThreadEnabled = singleTapOpensThreadEnabled,
                 jumpInputs = jumpInputs,
                 newMessageMenuEnabled = newMessageMenuEnabled,
                 inlineSearchVisible = inlineSearchVisible,
@@ -18588,7 +19358,6 @@ private data class ThreadMessagesListData(
     val currentServerSlug: String?,
     val contentExtrasVisible: Boolean,
     val longMessageCollapseEnabled: Boolean,
-    val singleTapOpensThreadEnabled: Boolean,
     val jumpInputs: ThreadJumpInputs,
     val newMessageMenuEnabled: Boolean,
     val inlineSearchVisible: Boolean,
@@ -18668,7 +19437,6 @@ fun ThreadMessagesList(
     currentServerSlug: String? = null,
     contentExtrasVisible: Boolean = true,
     longMessageCollapseEnabled: Boolean = false,
-    singleTapOpensThreadEnabled: Boolean = false,
     jumpInputs: ThreadJumpInputs = ThreadJumpInputs(),
     newMessageMenuEnabled: Boolean = false,
     inlineSearchVisible: Boolean = false,
@@ -18736,7 +19504,6 @@ fun ThreadMessagesList(
                 currentServerSlug = currentServerSlug,
                 contentExtrasVisible = contentExtrasVisible,
                 longMessageCollapseEnabled = longMessageCollapseEnabled,
-                singleTapOpensThreadEnabled = singleTapOpensThreadEnabled,
                 jumpInputs = jumpInputs,
                 newMessageMenuEnabled = newMessageMenuEnabled,
                 inlineSearchVisible = inlineSearchVisible,
@@ -18817,7 +19584,6 @@ private fun ThreadMessagesListContent(
     val currentServerSlug = data.currentServerSlug
     val contentExtrasVisible = data.contentExtrasVisible
     val longMessageCollapseEnabled = data.longMessageCollapseEnabled
-    val singleTapOpensThreadEnabled = data.singleTapOpensThreadEnabled
     val jumpInputs = data.jumpInputs
     val newMessageMenuEnabled = data.newMessageMenuEnabled
     val inlineSearchVisible = data.inlineSearchVisible
@@ -19371,6 +20137,8 @@ private fun ThreadMessagesListContent(
         }
     var actionMessageId by remember(threadInstanceKey) { mutableStateOf<String?>(null) }
     var actionMenuAnchor by remember(threadInstanceKey) { mutableStateOf<RaftPopoverAnchor?>(null) }
+    // A double tap's quick reaction bar (stdrc, 2026-10-29, #proj-raft-ui:911ccc08).
+    var quickReactionBar by remember(threadInstanceKey) { mutableStateOf<ThreadQuickReactionBarRequest?>(null) }
     var classicMenuOverrideMessageId by remember(threadInstanceKey) { mutableStateOf<String?>(null) }
     // Product analytics: the open menu came from a long press (not the reaction "+" chip), so its
     // chosen items are `message_action_selected` with surface long_press.
@@ -19388,6 +20156,8 @@ private fun ThreadMessagesListContent(
     var taskStatusMenuMessageId by remember(threadInstanceKey) { mutableStateOf<String?>(null) }
     // Add Reaction: the message whose full emoji picker is open (web hover-toolbar picker).
     var reactionPickerMessageId by remember(threadInstanceKey) { mutableStateOf<String?>(null) }
+    // Where the message menu was, kept for the picker: on wide screens it opens there, like web's.
+    var reactionPickerAnchor by remember(threadInstanceKey) { mutableStateOf<RaftPopoverAnchor?>(null) }
     var taskStatusMenuAnchor by remember(threadInstanceKey) { mutableStateOf<RaftPopoverAnchor?>(null) }
 
     // Long-message collapse: expanded ids, one-way collapsible latch and threshold live for the
@@ -21664,10 +22434,18 @@ private fun ThreadMessagesListContent(
                 )
             }
             val inPlaceSelectionViewportHost = LocalThreadInPlaceTextSelectionHost.current
+            val taskHeadScrollState = LocalTaskHeadScrollState.current
+            val taskHeadOverflowModifier =
+                remember(taskHeadScrollState, listState.raw) {
+                    Modifier.taskHeadConversationOverflow(taskHeadScrollState, listState.raw)
+                }
             LazyColumn(
                 state = listState.raw,
                 reverseLayout = reverseLayout,
                 modifier = Modifier.fillMaxSize()
+                    // Task v2: a short conversation stays bottom-anchored with the head in view
+                    // instead of a gap above its oldest row once the head folds (#proj-mobile:#69).
+                    .then(taskHeadOverflowModifier)
                     .then(
                         if (inPlaceSelectionViewportHost?.enabled == true) {
                             // In-place selection bar stays inside the list's visible viewport.
@@ -21865,6 +22643,10 @@ private fun ThreadMessagesListContent(
                             actionMenuFromLongPress = false
                             diagnosticsLogger("thread_origin_menu_tap messageId=${message.id}")
                         },
+                        writeActionsEnabled = writeActionsEnabled,
+                        onShowQuickReactions = { message, anchor ->
+                            quickReactionBar = ThreadQuickReactionBarRequest(message.id, anchor)
+                        },
                         onLongPressMenuOpened = { message ->
                             if (actionMessageId == message.id) {
                                 actionMenuFromLongPress = true
@@ -22012,10 +22794,19 @@ private fun ThreadMessagesListContent(
                 }
                 val linkedTask = linkedTasksProjection.lookup.threadLinkedTaskForMessage(message)
                 val replyMetadata = replyMetadataByParentId.threadReplyMetadataFor(message)
+                // Task v2: the list under the message replaces its single task chip (web MessageItem).
+                // In a reply thread only the parent message carries it (web ThreadPanel), never a reply.
+                val replyInThread =
+                    threadMessageIsReplyInThread(renderPayload.replyThreadSurface, renderPayload.originMessage?.id, message.id)
+                val sourceTasks =
+                    remember(message.id, linkedTasksProjection, replyInThread) {
+                        if (replyInThread) emptyList() else linkedTasksProjection.sourceTasksFor(message)
+                    }
                 val displayMessage =
-                    remember(message, linkedTasksProjection) {
+                    remember(message, linkedTasksProjection, sourceTasks.isEmpty()) {
                         val startedAt = TimeSource.Monotonic.markNow()
                         message.withLinkedTaskProjection(linkedTasksProjection)
+                            .let { if (sourceTasks.isEmpty()) it else it.withoutLinkedTask() }
                             .also {
                                 val durationMs = startedAt.elapsedNow().inWholeMilliseconds
                                 if (shouldLogThreadPerformance(durationMs)) {
@@ -22116,6 +22907,8 @@ private fun ThreadMessagesListContent(
                                 message = displayMessage,
                                 messageBodyTextStyle = messageBodyTextStyle,
                                 replyMetadata = replyMetadata,
+                                sourceTasks = sourceTasks,
+                                onOpenSourceTask = { onThreadEvent("openSourceTask", it, null, null) },
                                 hasReplyDraft = activeReplyDraftParentMessageIds.hasReplyComposerDraft(message.id),
                                 actionCard = actionCard,
                                 messageIndex = absoluteMessageIndex,
@@ -22127,7 +22920,7 @@ private fun ThreadMessagesListContent(
                                 inlineReplyParticipantsById = inlineReplyParticipantsById,
                                 focused = activeFocusedMessageId == message.id,
                                 searchMatch = activeInlineSearchMessageId == message.id,
-                                popupOpen = actionMessageId == message.id,
+                                popupOpen = actionMessageId == message.id || quickReactionBar?.messageId == message.id,
                                 shareSelectionActive = shareSelectionActive,
                                 selectedForShare = message.id in selectedShareMessageIds,
                                 onToggleShareSelection = { onToggleShareSelection(message.id) },
@@ -22140,7 +22933,7 @@ private fun ThreadMessagesListContent(
                                 compactConsecutiveMessages = renderPayload.compactConsecutiveMessages,
                                 suppressRepeatedAuthor = suppressRepeatedAuthor,
                                 showReplyAction = renderPayload.showReplyActions,
-                                singleTapOpensThreadEnabled = singleTapOpensThreadEnabled,
+                                quickReactionsEnabled = threadMessageCanQuickReact(message, renderPayload, writeActionsEnabled),
                                 resolvedTaskAssigneeName = linkedTaskAssigneeName,
                                 resolveMarkdownTagLabel = resolveMarkdownTagLabel,
                                 markdownTagContextSignature = markdownTagContextSignature,
@@ -22173,6 +22966,9 @@ private fun ThreadMessagesListContent(
                                 onOpenMember = onOpenMember,
                                 onExternalAuthor = onExternalAuthor,
                                 onOpenThread = { onThreadEvent("openMessageThread", it, null, null) },
+                                onShowQuickReactions = { anchor ->
+                                    quickReactionBar = ThreadQuickReactionBarRequest(message.id, anchor)
+                                },
                                 onOpenTask = { onThreadEvent("openTask", it, null, null) },
                                 onOpenTaskStatusMenu = { anchor ->
                                     taskStatusMenuMessageId = message.id
@@ -22470,16 +23266,24 @@ private fun ThreadMessagesListContent(
         val unreadThreadPill: @Composable (ThreadUnreadThreadJump) -> Unit = { jump ->
             ThreadUnreadThreadJumpPill(
                 jump = jump,
+                busy = jumpInputs.jumpLoading,
                 onJump = {
-                    diagnosticsLogger(
-                        "thread_unread_thread_jump_click direction=${jump.direction} count=${jump.count} " +
-                            "target=${jump.targetMessageId.take(8)}"
-                    )
-                    onThreadEvent(
-                        ThreadJumpToUnreadThreadParentAction,
-                        jump.targetMessageId,
-                        threadChannelId = jump.targetThreadChannelId,
-                    )
+                    // Web: busy from the tap until the parent lands; a second tap does nothing.
+                    if (!jumpInputs.jumpLoading) {
+                        diagnosticsLogger(
+                            "thread_unread_thread_jump_click direction=${jump.direction} count=${jump.count} " +
+                                "target=${jump.targetMessageId.take(8)}"
+                        )
+                        onThreadEvent(
+                            when (jump.historyAction) {
+                                ThreadUnreadJumpHistoryAction.FocusParent -> ThreadJumpToUnreadThreadParentAction
+                                ThreadUnreadJumpHistoryAction.OpenThread -> ThreadOpenUnreadThreadPastHistoryAction
+                                ThreadUnreadJumpHistoryAction.FocusParentAndRead -> ThreadJumpToUnreadThreadPastHistoryAction
+                            },
+                            jump.targetMessageId,
+                            threadChannelId = jump.targetThreadChannelId,
+                        )
+                    }
                 },
                 onDismiss = { unreadThreadJumpDismissedAtCount = jump.count },
             )
@@ -22558,12 +23362,14 @@ private fun ThreadMessagesListContent(
         }
         // The Compact menu's message actions, shared by the long-press menu and the in-place
         // selection menu; [close] dismisses whichever surface showed them. [track] is off for the
-        // in-place selection menu, which is not the long-press menu.
+        // in-place selection menu, which is not the long-press menu. [anchor]: where the menu
+        // was, for Add Reaction's picker (none for the selection menu: the picker is a dialog).
         fun compactMenuMessageActions(
             message: RaftThreadMessageItem,
             replyMetadata: ThreadReplyMetadata,
             close: () -> Unit,
-            track: Boolean = true
+            track: Boolean = true,
+            anchor: RaftPopoverAnchor? = null
         ): ThreadNewMessageMenuMessageActions {
             val followThreadChannelId = replyMetadata.threadChannelId?.takeIf { it.isNotBlank() }
             fun trackTool(tool: ThreadNewMessageMenuTool) {
@@ -22618,6 +23424,7 @@ private fun ThreadMessagesListContent(
                         onAddReaction = {
                             close()
                             trackTool(ThreadNewMessageMenuTool.AddReaction)
+                            reactionPickerAnchor = anchor
                             reactionPickerMessageId = message.id
                         },
                         onCopyLink = {
@@ -22653,6 +23460,15 @@ private fun ThreadMessagesListContent(
                             close()
                             trackTool(ThreadNewMessageMenuTool.SelectText)
                             onThreadEvent("openSelectMessageText", message.id, null, null)
+                        },
+                        onMarkThreadUnread = {
+                            close()
+                            threadPanelMarkUnreadChannelId(
+                                renderPayload.replyThreadSurface,
+                                renderPayload.originMessage?.let(replyMetadataByParentId::threadReplyMetadataFor)
+                            )?.let { threadChannelId ->
+                                    onThreadEvent(MARK_THREAD_UNREAD_ACTION, message.id, threadChannelId, null)
+                                }
                         }
                     )
             )
@@ -22672,7 +23488,9 @@ private fun ThreadMessagesListContent(
                         translationState = translationState,
                         translationAvailable = translationStore != null
                     ),
-                taskConvertPending = message.id in pendingTaskConvertMessageIds
+                taskConvertPending = message.id in pendingTaskConvertMessageIds,
+                taskV2Enabled = linkedTasksProjection.taskV2Enabled,
+                originReplyMetadata = renderPayload.originMessage?.let(replyMetadataByParentId::threadReplyMetadataFor)
             ).toThreadNewMessageMenuActionAvailability(message, replyMetadata)
         // New Message Menu toggle: a text selection shows this same Compact menu in place
         // (ThreadInPlaceTextSelection.kt positions it against the visible selection).
@@ -22727,7 +23545,9 @@ private fun ThreadMessagesListContent(
                                 translationState = translationState,
                                 translationAvailable = translationStore != null
                             ),
-                        taskConvertPending = message.id in pendingTaskConvertMessageIds
+                        taskConvertPending = message.id in pendingTaskConvertMessageIds,
+                        taskV2Enabled = linkedTasksProjection.taskV2Enabled,
+                        originReplyMetadata = renderPayload.originMessage?.let(replyMetadataByParentId::threadReplyMetadataFor)
                     )
                 val closeActionMenu: () -> Unit = {
                     actionMessageId = null
@@ -22736,6 +23556,7 @@ private fun ThreadMessagesListContent(
                 val onAddReaction: () -> Unit = {
                     closeActionMenu()
                     trackLongPressMenuAction(message, RaftMessageAction.OpenReactionPicker)
+                    reactionPickerAnchor = resolvedActionAnchor
                     reactionPickerMessageId = message.id
                 }
                 val onTranslate: () -> Unit = {
@@ -22773,7 +23594,8 @@ private fun ThreadMessagesListContent(
                         )
                     }
                 if (variant == ThreadMessageMenuVariant.Compact) {
-                    val actions = compactMenuMessageActions(message, replyMetadata, close = closeActionMenu)
+                    val actions =
+                        compactMenuMessageActions(message, replyMetadata, close = closeActionMenu, anchor = resolvedActionAnchor)
                     ThreadNewMessageMenu(
                         anchor = resolvedActionAnchor,
                         availability = capabilities.toThreadNewMessageMenuActionAvailability(message, replyMetadata),
@@ -22794,7 +23616,8 @@ private fun ThreadMessagesListContent(
                         onFollowThread = actions.tools.onFollowThread,
                         onTaskStatus = actions.tools.onTaskStatus,
                         onConvertToTask = actions.tools.onConvertToTask,
-                        onSelectText = actions.tools.onSelectText
+                        onSelectText = actions.tools.onSelectText,
+                        onMarkThreadUnread = actions.tools.onMarkThreadUnread
                     )
                 } else {
                     ThreadMessageActionMenu(
@@ -22806,6 +23629,7 @@ private fun ThreadMessagesListContent(
                         showFollowAction = capabilities.follow,
                         showTaskStatusAction = capabilities.taskStatus,
                         showConvertToTaskAction = capabilities.convertToTask,
+                        createTaskFromMessage = capabilities.createTaskFromMessage,
                         showReactionActions = capabilities.quickReactions,
                         showCopyLinkAction = capabilities.copyLink,
                         showShareMessagesAction = capabilities.selectMessage,
@@ -22873,20 +23697,71 @@ private fun ThreadMessagesListContent(
                             onForwardMessage(message.id)
                         },
                         onAddReaction = onAddReaction,
+                        showMarkThreadUnreadAction = capabilities.markThreadUnreadChannelId != null,
+                        onMarkThreadUnread = {
+                            closeActionMenu()
+                            capabilities.markThreadUnreadChannelId?.let { threadChannelId ->
+                                onThreadEvent(MARK_THREAD_UNREAD_ACTION, message.id, threadChannelId, null)
+                            }
+                        },
                         diagnosticsLogger = diagnosticsLogger
                     )
                 }
             }
         }
-        reactionPickerMessageId?.let { messageId ->
-            RaftEmojiPickerDialog(
-                title = stringResource(Res.string.thread_action_add_reaction),
-                onDismiss = { reactionPickerMessageId = null },
-                onSelect = { emoji ->
-                    reactionPickerMessageId = null
-                    onThreadEvent("toggleReaction", messageId, null, emoji)
-                }
+        quickReactionBar?.let { request ->
+            val closeQuickReactionBar: () -> Unit = { quickReactionBar = null }
+            val message =
+                request.anchor.takeIf { it.belongsTo(threadMessageMenuOwnerIdentity(request.messageId)) }
+                    ?.let { renderPayload.threadActionMessage(request.messageId, linkedTasksProjection) }
+                    ?.takeIf { threadMessageCanQuickReact(it, renderPayload, writeActionsEnabled) }
+            if (message == null) {
+                // The message went away or can no longer be reacted to: drop the stale bar.
+                SideEffect { closeQuickReactionBar() }
+                return@let
+            }
+            ThreadMessageQuickReactionBar(
+                messageId = message.id,
+                anchor = request.anchor,
+                onDismiss = closeQuickReactionBar,
+                onReact = { emoji ->
+                    closeQuickReactionBar()
+                    diagnosticsLogger("thread_message_double_tap_react messageId=${message.id} emoji=$emoji")
+                    onThreadEvent("toggleReaction", message.id, null, emoji)
+                },
+                diagnosticsLogger = diagnosticsLogger
             )
+        }
+        reactionPickerMessageId?.let { messageId ->
+            val closeReactionPicker: () -> Unit = {
+                reactionPickerMessageId = null
+                reactionPickerAnchor = null
+            }
+            val onPickReaction: (String) -> Unit = { emoji ->
+                closeReactionPicker()
+                onThreadEvent("toggleReaction", messageId, null, emoji)
+            }
+            // Read here: the shell host and the dialog host compose the picker outside this page.
+            val emojiPickerPreferences = rememberRaftEmojiPickerPreferences()
+            val windowWidthDp = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.width.toDp().value }
+            val pickerAnchor = reactionPickerAnchor
+            if (raftEmojiPickerUsesPopover(windowWidthDp, hasAnchor = pickerAnchor != null) && pickerAnchor != null) {
+                ThreadMessageEmojiPickerPopover(
+                    messageId = messageId,
+                    anchor = pickerAnchor,
+                    preferences = emojiPickerPreferences,
+                    onDismiss = closeReactionPicker,
+                    onSelect = onPickReaction,
+                    diagnosticsLogger = diagnosticsLogger
+                )
+            } else {
+                RaftEmojiPickerDialog(
+                    title = stringResource(Res.string.thread_action_add_reaction),
+                    onDismiss = closeReactionPicker,
+                    onSelect = onPickReaction,
+                    preferences = emojiPickerPreferences
+                )
+            }
         }
         taskStatusMenuMessageId?.let { messageId ->
             val resolvedTaskStatusAnchor =
@@ -23481,13 +24356,20 @@ private fun ThreadLazyWindowStats.toDiagnosticsString(result: String): String =
  * `ThreadMenuShellHostPredicateTest`.
  */
 /**
+ * Whether this surface's side-column buttons carry SF Symbols, so the iOS host may draw the Duo
+ * column with system bar buttons (RaftSideActionHost): the channel page only for now. An action
+ * without one (focus mode, a reply thread's follow) keeps the whole column ours.
+ */
+internal fun threadHeaderSideColumnSystemSymbols(surfaceKind: String): Boolean =
+    surfaceKind == RaftThreadSurfaceKind.Channel
+
+/**
  * Back in a conversation header. A channel / DM that is the detail pane of a split has the list on
  * its left and nothing to go back to (web desktop has no Back there); a reply thread keeps it (it
- * returns to its channel) unless the iPhone Duo side dock carries it, and single-pane pages always
- * keep it.
+ * returns to its channel), and single-pane pages always keep it.
  */
 internal fun threadHeaderShowsBack(showBack: Boolean, surfaceKind: String): Boolean =
-    showBack || (surfaceKind == RaftThreadSurfaceKind.ReplyThread && !RaftSideDockState.active)
+    showBack || surfaceKind == RaftThreadSurfaceKind.ReplyThread
 
 /**
  * True when this conversation is the detail pane of a split: an adaptive detail page laid out right
@@ -23495,8 +24377,7 @@ internal fun threadHeaderShowsBack(showBack: Boolean, surfaceKind: String): Bool
  * workspace, full width) and a page not measured yet count as not split, so Back never flickers off.
  */
 internal fun threadSplitDetailPane(adaptiveDetailPage: Boolean, originMeasured: Boolean, windowOriginX: Float): Boolean =
-    // With the side dock the list is on the end side, so the split's detail starts at x = 0.
-    adaptiveDetailPage && ((originMeasured && windowOriginX > 0f) || RaftSideDockState.active)
+    adaptiveDetailPage && originMeasured && windowOriginX > 0f
 
 @Composable
 internal fun threadInSplitDetailPane(): Boolean {
@@ -23510,7 +24391,7 @@ internal fun threadMenuUsesShellHost(
     adaptiveDetailPage: Boolean,
     originMeasured: Boolean,
     windowOriginX: Float,
-): Boolean = adaptiveDetailPage && (!originMeasured || windowOriginX > 0f || RaftSideDockState.active)
+): Boolean = adaptiveDetailPage && (!originMeasured || windowOriginX > 0f)
 
 internal fun threadInitialFirstVisibleItemIndex(latestItemIndex: Int): Int =
     latestItemIndex.coerceAtLeast(0)
@@ -24868,27 +25749,36 @@ internal fun threadRenderedBottomScrollOffset(
 /** The action the unread-thread pill sends: focus that parent message. */
 internal const val ThreadJumpToUnreadThreadParentAction = "focusUnreadThreadParent"
 
+/** The pill's thread has its parent past the history window and replies inside it: open the thread. */
+internal const val ThreadOpenUnreadThreadPastHistoryAction = "openUnreadThreadPastHistory"
+
+/** The pill's thread is wholly past the history window: land on the paywall and read the thread. */
+internal const val ThreadJumpToUnreadThreadPastHistoryAction = "focusUnreadThreadPastHistory"
+
 /** Above the list rows and the inline search bar's neighbours, as the old floating pills. */
 private const val ThreadJumpControlsZIndex = 5f
 
 /** raft-ui MessageListJumpPillGroup: the unread-thread pill with its dismiss. */
 @Composable
-private fun ThreadUnreadThreadJumpPill(
+internal fun ThreadUnreadThreadJumpPill(
     jump: ThreadUnreadThreadJump,
     onJump: () -> Unit,
     onDismiss: () -> Unit,
+    /** Web ThreadUnreadJumpPill busy (#11358): "Loading Thread…" with the spinner, taps ignored. */
+    busy: Boolean = false,
 ) {
     RaftMessageListJumpPillGroup {
         RaftMessageListJumpPill(
             text =
-                when (jump.direction) {
-                    ThreadUnreadThreadJumpDirection.Next ->
+                when {
+                    busy -> stringResource(Res.string.thread_jump_unread_thread_loading)
+                    jump.direction == ThreadUnreadThreadJumpDirection.Next ->
                         stringResource(Res.string.thread_jump_next_unread_thread, jump.count)
-                    ThreadUnreadThreadJumpDirection.Earliest ->
-                        stringResource(Res.string.thread_jump_earliest_unread_thread, jump.count)
+                    else -> stringResource(Res.string.thread_jump_earliest_unread_thread, jump.count)
                 },
             onClick = onJump,
             icon = if (jump.direction == ThreadUnreadThreadJumpDirection.Earliest) RaftGlyph.ArrowUp else RaftGlyph.ArrowDown,
+            busy = busy,
         )
         RaftMessageListJumpPillDismiss(
             label = stringResource(Res.string.thread_jump_unread_thread_dismiss),
@@ -25306,6 +26196,7 @@ private data class ThreadMessageCardData(
     val messageBodyTextStyle: TextStyle,
     val replyMetadata: ThreadReplyMetadata,
     val hasReplyDraft: Boolean,
+    val sourceTasks: List<ThreadMessageSourceTaskItem> = emptyList(),
     val actionCard: ThreadActionCard?,
     val messageIndex: Int,
     val highlightedMentions: Set<String>,
@@ -25314,7 +26205,8 @@ private data class ThreadMessageCardData(
     val compactConsecutiveMessages: Boolean,
     val suppressRepeatedAuthor: Boolean,
     val showReplyAction: Boolean,
-    val singleTapOpensThreadEnabled: Boolean,
+    /** The message can be reacted to (the menu's quick reaction gate): its double tap shows the bar. */
+    val quickReactionsEnabled: Boolean = false,
     val resolvedTaskAssigneeName: String?,
     val markdownTagContextSignature: String,
     val taskOpenEnabled: Boolean,
@@ -25349,6 +26241,7 @@ private data class ThreadMessageCardData(
 /** task #346: callback payload of [ThreadMessageCard]. See ThreadMessageCardData. */
 private class ThreadMessageCardCallbacks(
     val diagnosticsLogger: (String) -> Unit,
+    val onOpenSourceTask: (String) -> Unit = {},
     val agentStatusResolver: RaftAgentStatusResolver,
     val resolveMarkdownTagLabel: ((ThreadMarkdownTag) -> String)?,
     val isMarkdownTagValid: (ThreadMarkdownTag) -> Boolean,
@@ -25358,6 +26251,8 @@ private class ThreadMessageCardCallbacks(
     val onOpenMember: (MemberDetailIdentity) -> Unit,
     val onExternalAuthor: (RaftThreadMessageItem) -> Unit,
     val onOpenThread: (String) -> Unit,
+    /** Double tap (or the "Add reaction" accessibility action): the quick reaction bar at the anchor. */
+    val onShowQuickReactions: (RaftPopoverAnchor) -> Unit = {},
     val onOpenTask: (String) -> Unit,
     val onOpenTaskStatusMenu: (RaftPopoverAnchor) -> Unit,
     val onToggleReaction: (String) -> Unit,
@@ -25392,6 +26287,9 @@ fun ThreadMessageCard(
     messageBodyTextStyle: TextStyle,
     replyMetadata: ThreadReplyMetadata = message.toThreadReplyMetadata(),
     hasReplyDraft: Boolean = false,
+    /** Task v2: the tasks listed under the message (web `TaskChipList`); tapping one opens it. */
+    sourceTasks: List<ThreadMessageSourceTaskItem> = emptyList(),
+    onOpenSourceTask: (String) -> Unit = {},
     actionCard: ThreadActionCard? = message.threadActionCard(),
     messageIndex: Int = -1,
     diagnosticsLogger: (String) -> Unit = {},
@@ -25402,7 +26300,7 @@ fun ThreadMessageCard(
     compactConsecutiveMessages: Boolean = false,
     suppressRepeatedAuthor: Boolean = false,
     showReplyAction: Boolean = true,
-    singleTapOpensThreadEnabled: Boolean = false,
+    quickReactionsEnabled: Boolean = false,
     resolvedTaskAssigneeName: String? = null,
     resolveMarkdownTagLabel: ((ThreadMarkdownTag) -> String)? = null,
     markdownTagContextSignature: String = "",
@@ -25420,6 +26318,7 @@ fun ThreadMessageCard(
     onOpenMember: (MemberDetailIdentity) -> Unit,
     onExternalAuthor: (RaftThreadMessageItem) -> Unit = {},
     onOpenThread: (String) -> Unit,
+    onShowQuickReactions: (RaftPopoverAnchor) -> Unit = {},
     onOpenTask: (String) -> Unit,
     onOpenTaskStatusMenu: (RaftPopoverAnchor) -> Unit,
     onToggleReaction: (String) -> Unit,
@@ -25474,6 +26373,8 @@ fun ThreadMessageCard(
                 messageBodyTextStyle = messageBodyTextStyle,
                 replyMetadata = replyMetadata,
                 hasReplyDraft = hasReplyDraft,
+                // A retracted message keeps none of its content (web hides the list with it).
+                sourceTasks = if (retracted) emptyList() else sourceTasks,
                 actionCard = if (retracted) null else actionCard,
                 messageIndex = messageIndex,
                 highlightedMentions = highlightedMentions,
@@ -25482,7 +26383,7 @@ fun ThreadMessageCard(
                 compactConsecutiveMessages = compactConsecutiveMessages,
                 suppressRepeatedAuthor = suppressRepeatedAuthor,
                 showReplyAction = showReplyAction,
-                singleTapOpensThreadEnabled = singleTapOpensThreadEnabled,
+                quickReactionsEnabled = quickReactionsEnabled && !retracted,
                 resolvedTaskAssigneeName = resolvedTaskAssigneeName,
                 markdownTagContextSignature = markdownTagContextSignature,
                 taskOpenEnabled = taskOpenEnabled,
@@ -25512,6 +26413,7 @@ fun ThreadMessageCard(
         callbacks =
             ThreadMessageCardCallbacks(
                 diagnosticsLogger = diagnosticsLogger,
+                onOpenSourceTask = onOpenSourceTask,
                 agentStatusResolver = agentStatusResolver,
                 resolveMarkdownTagLabel = resolveMarkdownTagLabel,
                 isMarkdownTagValid = isMarkdownTagValid,
@@ -25520,6 +26422,7 @@ fun ThreadMessageCard(
                 onOpenMember = onOpenMember,
                 onExternalAuthor = onExternalAuthor,
                 onOpenThread = onOpenThread,
+                onShowQuickReactions = if (retracted) ({ _ -> }) else onShowQuickReactions,
                 onOpenTask = onOpenTask,
                 onOpenTaskStatusMenu = onOpenTaskStatusMenu,
                 onToggleReaction = onToggleReaction,
@@ -25559,6 +26462,8 @@ private fun ThreadMessageCardContent(
     val messageBodyTextStyle = data.messageBodyTextStyle
     val replyMetadata = data.replyMetadata
     val hasReplyDraft = data.hasReplyDraft
+    val sourceTasks = data.sourceTasks
+    val onOpenSourceTask = callbacks.onOpenSourceTask
     val actionCard = data.actionCard
     val messageIndex = data.messageIndex
     val diagnosticsLogger = callbacks.diagnosticsLogger
@@ -25569,7 +26474,7 @@ private fun ThreadMessageCardContent(
     val compactConsecutiveMessages = data.compactConsecutiveMessages
     val suppressRepeatedAuthor = data.suppressRepeatedAuthor
     val showReplyAction = data.showReplyAction
-    val singleTapOpensThreadEnabled = data.singleTapOpensThreadEnabled
+    val quickReactionsEnabled = data.quickReactionsEnabled
     val resolvedTaskAssigneeName = data.resolvedTaskAssigneeName
     val resolveMarkdownTagLabel = callbacks.resolveMarkdownTagLabel
     val markdownTagContextSignature = data.markdownTagContextSignature
@@ -25588,6 +26493,7 @@ private fun ThreadMessageCardContent(
     val onOpenMember = callbacks.onOpenMember
     val onExternalAuthor = callbacks.onExternalAuthor
     val onOpenThread = callbacks.onOpenThread
+    val onShowQuickReactions = callbacks.onShowQuickReactions
     val onOpenTask = callbacks.onOpenTask
     val onOpenTaskStatusMenu = callbacks.onOpenTaskStatusMenu
     val onToggleReaction = callbacks.onToggleReaction
@@ -25740,6 +26646,8 @@ private fun ThreadMessageCardContent(
             messageId = message.id
         )
     val tapMovementGate = longPressGestureOwner.tapMovementGate
+    val codeBlockTapObserver: () -> Unit =
+        remember(tapMovementGate) { { tapMovementGate.rejectChildAction("code_block") } }
     fun openAuthorProfile(source: String) {
         if (!message.canOpenThreadAuthorProfile(shareSelectionActive)) return
         tapMovementGate.rejectChildAction("author_profile")
@@ -25821,31 +26729,44 @@ private fun ThreadMessageCardContent(
                 !shareSelectionActive && !message.isRetracted &&
                     threadMessageUsesFullRowLongPressActions(shareSelectionActive)
         )
-    val baseRowTapAction =
+    // stdrc, 2026-10-29 (#proj-raft-ui:911ccc08): a single tap opens the message's thread, with
+    // or without replies; a double tap shows its quick reaction bar where it can be reacted to.
+    // Finger taps only: a mouse, trackpad or stylus click leaves the row alone and selects text
+    // ([threadMessageRowTapGesturesFor], checked per gesture in threadMessageLongPressActions).
+    val rowTapAction: (() -> Unit)? =
         if (
             threadMessageTapOpensThread(
                 showReplyAction = showReplyAction,
-                replyCount = replyMetadata.replyCount,
                 shareSelectionActive = shareSelectionActive,
-                hasLocalSendState = message.hasLocalSendState(),
-                singleTapOpensThreadEnabled = singleTapOpensThreadEnabled
+                hasLocalSendState = message.hasLocalSendState()
             )
         ) {
             {
                 diagnosticsLogger(
-                    "thread_message_row_tap_open messageId=${message.id} " +
-                        "setting=single_tap_opens_thread replyCount=${replyMetadata.replyCount}"
+                    "thread_message_row_tap_open messageId=${message.id} replyCount=${replyMetadata.replyCount}"
                 )
                 onOpenThread(message.id)
             }
         } else {
             null
         }
+    val rowDoubleTapAction: ((RaftPopoverAnchor) -> Unit)? =
+        if (
+            threadMessageDoubleTapShowsReactions(
+                quickReactions = quickReactionsEnabled,
+                shareSelectionActive = shareSelectionActive,
+                hasLocalSendState = message.hasLocalSendState()
+            )
+        ) {
+            { anchor -> onShowQuickReactions(anchor) }
+        } else {
+            null
+        }
     // A tap whose gesture started while a selection was showing (here or on another row) only
     // dismisses it. The flag is captured at DOWN because the selection is already gone by onTap.
-    val rowTapAction =
-        if (inPlaceSelection == null || baseRowTapAction == null) {
-            baseRowTapAction
+    val consumeSelectionDismissalTap: (() -> Boolean)? =
+        if (inPlaceSelection == null || (rowTapAction == null && rowDoubleTapAction == null)) {
+            null
         } else {
             {
                 val selectionShowingAtDown = inPlaceSelection.dismissalGestureInFlight
@@ -25854,20 +26775,68 @@ private fun ThreadMessageCardContent(
                     ThreadInPlaceSelectionTapDecision.DismissSelectionOnly -> {
                         diagnosticsLogger("thread_in_place_selection_tap_clear messageId=${message.id}")
                         inPlaceSelection.clear()
+                        true
                     }
-                    ThreadInPlaceSelectionTapDecision.RunRowAction -> baseRowTapAction()
+                    ThreadInPlaceSelectionTapDecision.RunRowAction -> false
+                }
+            }
+        }
+    val openThreadAccessibilityLabel = stringResource(Res.string.thread_message_a11y_open_thread)
+    val addReactionAccessibilityLabel = stringResource(Res.string.thread_message_a11y_add_reaction)
+    // Screen readers: the row's tap and double tap as named actions (a retracted row has neither).
+    val rowAccessibilityActions: List<CustomAccessibilityAction> =
+        if (message.isRetracted) {
+            emptyList()
+        } else {
+            buildList<CustomAccessibilityAction> {
+                if (rowTapAction != null) {
+                    add(
+                        CustomAccessibilityAction(openThreadAccessibilityLabel) {
+                            diagnosticsLogger("thread_message_a11y_open_thread messageId=${message.id}")
+                            onOpenThread(message.id)
+                            true
+                        }
+                    )
+                }
+                if (rowDoubleTapAction != null) {
+                    add(
+                        CustomAccessibilityAction(addReactionAccessibilityLabel) {
+                            val anchor =
+                                longPressGestureOwner.rootAnchor.resolve(RaftPopoverLocalPoint.BottomStart)
+                            if (anchor != null) {
+                                diagnosticsLogger("thread_message_a11y_reactions messageId=${message.id}")
+                                onShowQuickReactions(anchor)
+                            }
+                            anchor != null
+                        }
+                    )
                 }
             }
         }
     val inPlaceSelectionHost = LocalThreadInPlaceTextSelectionHost.current
+    // raft-ui MessageItem `not-data-located:hover:[--mi-row-fill:var(--fill-subtle)]`: a mouse or
+    // trackpad over the row lays the subtle tier; a finger never does. A row that already has a
+    // fill (checked, its menu open, the current search match, located) keeps it.
+    val rowHoverSource = remember { MutableInteractionSource() }
+    val rowHoverEnabled =
+        !(shareSelectionActive && selectedForShare) && !popupOpen && !searchMatch && locatedStrength <= 0f
+    val rowHover = rememberRaftStateOverlay(rowHoverSource, RaftHoverTier.Subtle, enabled = rowHoverEnabled)
     Box(
         modifier =
             Modifier
                 .fillMaxWidth()
                 .background(RaftColor.Canvas)
+                .raftPointerHover(rowHoverSource)
                 .then(
                     if (inPlaceSelection != null) {
                         Modifier.onGloballyPositioned { inPlaceSelection.rowCoordinates = it }
+                    } else {
+                        Modifier
+                    }
+                )
+                .then(
+                    if (rowAccessibilityActions.isNotEmpty()) {
+                        Modifier.semantics { customActions = rowAccessibilityActions }
                     } else {
                         Modifier
                     }
@@ -25882,6 +26851,8 @@ private fun ThreadMessageCardContent(
                             isScrollInProgress = isMessageListScrolling,
                             diagnosticsLogger = diagnosticsLogger,
                             onTap = rowTapAction,
+                            onDoubleTap = rowDoubleTapAction,
+                            consumeSelectionDismissalTap = consumeSelectionDismissalTap,
                             onTapRejected = { decision ->
                                 diagnosticsLogger(
                                     "thread_message_row_tap_rejected messageId=${message.id} " +
@@ -25894,14 +26865,6 @@ private fun ThreadMessageCardContent(
                                 onShowActions(anchor)
                                 onLongPressMenuOpened()
                             },
-                            // Double tap opens the message's thread wherever a row may open it (not
-                            // inside a thread, not while sharing or sending): artin, #proj-raft-ui:911ccc08.
-                            onDoubleTap =
-                                if (threadMessageBodyTapEligible(showReplyAction, shareSelectionActive, message.hasLocalSendState())) {
-                                    { onOpenThread(message.id) }
-                                } else {
-                                    null
-                                },
                             onInputReady = onLongPressInputReady,
                             deferLongPressAt =
                                 inPlaceSelection?.let { selection ->
@@ -25909,7 +26872,8 @@ private fun ThreadMessageCardContent(
                                 },
                             onPointerDown =
                                 inPlaceSelection?.let { selection ->
-                                    { offset ->
+                                    { offset, pointerType ->
+                                        selection.lastPointerDownFromTouch = pointerType == PointerType.Touch
                                         selection.dismissalGestureInFlight =
                                             inPlaceSelectionHost?.onRowPointerDown(
                                                 messageId = message.id,
@@ -25940,7 +26904,14 @@ private fun ThreadMessageCardContent(
             } else {
                 threadMessageLocatedFill(locatedStrength)
             }
-        val rowSurface = rowFill.compositeOver(RaftColor.Canvas)
+        // The delegated face's ring paints the row's surface, hover included (read only then, so
+        // other rows don't recompose as the hover fades).
+        val rowSurface =
+            if (message.delegatedBy != null) {
+                rowHover.value.compositeOver(rowFill.compositeOver(RaftColor.Canvas))
+            } else {
+                rowFill.compositeOver(RaftColor.Canvas)
+            }
         Column(
             modifier =
                 Modifier
@@ -25948,6 +26919,7 @@ private fun ThreadMessageCardContent(
                     // raft-ui `MessageItem` root: the row wash spans the whole
                     // row and the content sits at px-2 py-2 inside it.
                     .background(rowFill)
+                    .raftStateOverlay(rowHover, RectangleShape)
                     // The wash runs edge to edge; the message stays out of the safe area.
                     .raftSafeAreaHorizontalPadding()
                     .padding(horizontal = outerPadding, vertical = RaftAppSpacing.Sm),
@@ -26187,12 +27159,14 @@ private fun ThreadMessageCardContent(
                             // unless it is the generated placeholder itself.
                             val forwardNoteBody = threadForwardNoteBody(message.body, forwardBundle.displayCount())
                             if (forwardNoteBody != null) {
-                                RaftMarkdownBody(
-                                    body = forwardNoteBody,
-                                    textStyle = messageBodyTextStyle,
-                                    onOpenUrl = onOpenMarkdownUrl,
-                                    modifier = Modifier.threadMessageContentWidth(messageMaxWidthFraction)
-                                )
+                                CompositionLocalProvider(LocalRaftMarkdownCodeTapObserver provides codeBlockTapObserver) {
+                                    RaftMarkdownBody(
+                                        body = forwardNoteBody,
+                                        textStyle = messageBodyTextStyle,
+                                        onOpenUrl = onOpenMarkdownUrl,
+                                        modifier = Modifier.threadMessageContentWidth(messageMaxWidthFraction)
+                                    )
+                                }
                             }
                             ThreadForwardBundleCard(
                                 bundle = forwardBundle,
@@ -26294,6 +27268,8 @@ private fun ThreadMessageCardContent(
                                                               body = message.body,
                                                               enabled = message.pendingSendContext == null,
                                                           ) {
+                                                          // A tap on a code block is not the row's tap (web skips `pre, code`).
+                                                          CompositionLocalProvider(LocalRaftMarkdownCodeTapObserver provides codeBlockTapObserver) {
                                                             RaftMarkdownBody(
                                                                 body = bodyForRender,
                                                                 fillWidth = !alignOwnMessageRight,
@@ -26314,6 +27290,7 @@ private fun ThreadMessageCardContent(
                                                                 performanceKey = messagePerformanceKey,
                                                                 performanceLogger = diagnosticsLogger
                                                             )
+                                                          }
                                                           }
                                                           }
                                                         }
@@ -26436,8 +27413,21 @@ private fun ThreadMessageCardContent(
                         threadMessageTrailingSectionOrder(
                             hasMetaChips = hasFooterMeta,
                             hasInlineReplies = inlineReplyPresentation != null,
+                            hasSourceTasks = sourceTasks.isNotEmpty(),
                         ).forEach { section ->
                             when (section) {
+                                ThreadMessageTrailingSection.SourceTasks -> {
+                                    Box(modifier = Modifier.threadMessageContentWidth(messageMaxWidthFraction)) {
+                                        ThreadMessageSourceTaskList(
+                                            tasks = sourceTasks,
+                                            memberAvatarResolver = memberAvatarResolver,
+                                            agentStatusResolver = agentStatusResolver,
+                                            onOpenTask = onOpenSourceTask,
+                                            // web `mt-1.5`: 6dp under the body (the column adds 4).
+                                            modifier = Modifier.padding(top = RaftAppSpacing.Xxs)
+                                        )
+                                    }
+                                }
                                 ThreadMessageTrailingSection.MetaChips -> {
                                     Box(modifier = Modifier.threadMessageContentWidth(messageMaxWidthFraction)) {
                                         ThreadMessageFooterMeta(
@@ -26545,7 +27535,8 @@ internal fun ThreadNewMessageMenu(
     onFollowThread: () -> Unit = {},
     onTaskStatus: () -> Unit = {},
     onConvertToTask: () -> Unit = {},
-    onSelectText: () -> Unit = {}
+    onSelectText: () -> Unit = {},
+    onMarkThreadUnread: () -> Unit = {}
 ) {
     val density = LocalDensity.current
     val secondaryRowCount = if (availability.secondaryTools().isEmpty()) 0 else 1
@@ -26590,7 +27581,8 @@ internal fun ThreadNewMessageMenu(
             onFollowThread = onFollowThread,
             onTaskStatus = onTaskStatus,
             onConvertToTask = onConvertToTask,
-            onSelectText = onSelectText
+            onSelectText = onSelectText,
+            onMarkThreadUnread = onMarkThreadUnread
         )
     }
 }
@@ -26613,7 +27605,8 @@ internal fun ThreadNewMessageMenuChrome(
     onTaskStatus: () -> Unit = {},
     onConvertToTask: () -> Unit = {},
     onSelectText: () -> Unit = {},
-    onSelectAll: () -> Unit = {}
+    onSelectAll: () -> Unit = {},
+    onMarkThreadUnread: () -> Unit = {}
 ) {
     val callbacks =
         ThreadNewMessageMenuToolCallbacks(
@@ -26629,7 +27622,8 @@ internal fun ThreadNewMessageMenuChrome(
             onTaskStatus = onTaskStatus,
             onConvertToTask = onConvertToTask,
             onSelectText = onSelectText,
-            onSelectAll = onSelectAll
+            onSelectAll = onSelectAll,
+            onMarkThreadUnread = onMarkThreadUnread
         )
     val secondaryTools = availability.secondaryTools()
     // raft-ui overlay: popover layer, seam ring and the float shadow (no offset box).
@@ -26727,9 +27721,15 @@ internal fun ThreadNewMessageMenuTool.compactLabelResource(
             } else {
                 Res.string.thread_action_mark_done
             }
-        ThreadNewMessageMenuTool.ConvertToTask -> Res.string.thread_action_convert_to_task
+        ThreadNewMessageMenuTool.ConvertToTask ->
+            if (availability.createTaskFromMessage) {
+                Res.string.thread_action_create_task_from_message
+            } else {
+                Res.string.thread_action_convert_to_task
+            }
         ThreadNewMessageMenuTool.SelectText -> Res.string.thread_action_select_text
         ThreadNewMessageMenuTool.SelectAll -> Res.string.thread_text_selection_select_all
+        ThreadNewMessageMenuTool.MarkThreadUnread -> Res.string.thread_action_mark_thread_unread
     }
 
 internal fun ThreadNewMessageMenuTool.compactIcon(
@@ -26751,6 +27751,7 @@ internal fun ThreadNewMessageMenuTool.compactIcon(
         ThreadNewMessageMenuTool.ConvertToTask -> RaftLucideIconName.ClipboardCheck
         ThreadNewMessageMenuTool.SelectText -> RaftLucideIconName.FileText
         ThreadNewMessageMenuTool.SelectAll -> RaftLucideIconName.SquareCheckBig
+        ThreadNewMessageMenuTool.MarkThreadUnread -> RaftLucideIconName.MessageSquareDot
     }
 
 @Composable
@@ -28038,16 +29039,19 @@ internal fun decideThreadMessageLongPressDispatch(
         scrollInProgress = isScrollInProgress
     )
 
+/**
+ * A single tap on a message row opens that message's thread, whatever its reply count: a message
+ * without replies opens its empty thread to start one, like the mobile web's `handleMobileTap`
+ * (stdrc, 2026-10-29, #proj-raft-ui:911ccc08; replaces the opt-in "Single tap opens Thread"
+ * setting). Not inside a reply thread (no reply action there), not while sharing, not on a local
+ * send that is still sending or failed.
+ */
 internal fun threadMessageTapOpensThread(
     showReplyAction: Boolean,
-    replyCount: Int,
     shareSelectionActive: Boolean,
-    hasLocalSendState: Boolean,
-    singleTapOpensThreadEnabled: Boolean
+    hasLocalSendState: Boolean
 ): Boolean =
-    singleTapOpensThreadEnabled &&
-        replyCount > 0 &&
-        threadMessageBodyTapEligible(showReplyAction, shareSelectionActive, hasLocalSendState)
+    threadMessageBodyTapEligible(showReplyAction, shareSelectionActive, hasLocalSendState)
 
 internal fun threadMessageBodyTapEligible(
     showReplyAction: Boolean,
@@ -28058,6 +29062,84 @@ internal fun threadMessageBodyTapEligible(
 
 internal fun threadMessageOpenIgnoredForSurface(surfaceKind: String): Boolean =
     surfaceKind == RaftThreadSurfaceKind.ReplyThread
+
+/**
+ * A double tap on a message row shows its quick reaction bar (stdrc, 2026-10-29,
+ * #proj-raft-ui:911ccc08): only where the long-press menu would show its quick reaction row
+ * ([ThreadMessageMenuCapabilities.quickReactions]), inside a reply thread too, never while sharing
+ * or on a local send. Where this is false the row has no double tap and a single tap runs at once.
+ */
+internal fun threadMessageDoubleTapShowsReactions(
+    quickReactions: Boolean,
+    shareSelectionActive: Boolean,
+    hasLocalSendState: Boolean
+): Boolean =
+    quickReactions && !shareSelectionActive && !hasLocalSendState
+
+/** Whether a message may be reacted to: the long-press menu's quick reaction row gate. */
+internal fun threadMessageCanQuickReact(
+    message: RaftThreadMessageItem,
+    slice: ThreadTimelineSlice,
+    writeActionsEnabled: Boolean
+): Boolean =
+    writeActionsEnabled && slice.showReactionActions && !message.hasLocalSendState() && !message.isSystemMessage()
+
+/**
+ * Whether a down of [type] gets the message row's tap gestures (tap opens the thread, double tap
+ * shows the quick reaction bar). Only a finger: with a mouse, a trackpad or a
+ * stylus (desktop, an iPad with a pointer) a click on a message does nothing at row level and a
+ * double click selects a word, like any text (stdrc + raft-design #878, "desktop unchanged").
+ * Links, buttons, reactions and images inside the row keep their own clicks; the press-and-hold
+ * menu off the body and the pressed wash (which also reveals a compact row's time) are not gated.
+ */
+internal fun threadMessageRowTapGesturesFor(type: PointerType): Boolean = type == PointerType.Touch
+
+/** What one accepted tap on a message row does ([decideThreadMessageRowTap]). */
+internal enum class ThreadMessageRowTapOutcome {
+    /** Nothing: the row has no tap action, or the tap may still become a double tap. */
+    None,
+
+    /** The tap only dismissed an in-place text selection that was showing at its down. */
+    DismissSelectionOnly,
+
+    /** Run the single-tap action now: the row has no double tap. */
+    RunSingleTap,
+
+    /** Hold the single-tap action until the double-tap timeout passes without a second tap. */
+    DeferSingleTap,
+
+    /** The tap completed a double tap: show the quick reaction bar. */
+    ShowReactionBar
+}
+
+/**
+ * The row tap state machine (stdrc, 2026-10-29, #proj-raft-ui:911ccc08), kept pure so it is unit
+ * tested apart from pointer input:
+ *  - a tap the movement gate refused (a scroll, a child's own tap, a stale gesture) does nothing;
+ *  - a tap whose gesture began while an in-place selection showed only dismisses it;
+ *  - a click (mouse, trackpad, stylus) does nothing more at row level ([threadMessageRowTapGesturesFor]);
+ *  - the second of two taps within [ThreadMessageDoubleTapTimeoutMillis] and
+ *    [ThreadMessageDoubleTapSlop] shows the reaction bar;
+ *  - otherwise, with a double tap available, the single-tap action waits out the timeout
+ *    (the pressed feedback stays immediate); without one it runs at once, as before.
+ */
+internal fun decideThreadMessageRowTap(
+    tapAccepted: Boolean,
+    fromTouch: Boolean,
+    selectionShowingAtDown: Boolean,
+    hasSingleTapAction: Boolean,
+    doubleTapAvailable: Boolean,
+    completesDoubleTap: Boolean
+): ThreadMessageRowTapOutcome =
+    when {
+        !tapAccepted -> ThreadMessageRowTapOutcome.None
+        selectionShowingAtDown -> ThreadMessageRowTapOutcome.DismissSelectionOnly
+        !fromTouch -> ThreadMessageRowTapOutcome.None
+        doubleTapAvailable && completesDoubleTap -> ThreadMessageRowTapOutcome.ShowReactionBar
+        doubleTapAvailable && hasSingleTapAction -> ThreadMessageRowTapOutcome.DeferSingleTap
+        hasSingleTapAction -> ThreadMessageRowTapOutcome.RunSingleTap
+        else -> ThreadMessageRowTapOutcome.None
+    }
 
 /**
  * The message row's pressed state (raft-ui States > Pressed on touch): the `fill-pressed` wash
@@ -28141,8 +29223,9 @@ internal fun Modifier.threadMessageLongPressActions(
     onShowActions: (RaftPopoverAnchor) -> Unit,
     onInputReady: ((String) -> Unit)? = null,
     deferLongPressAt: ((Offset) -> Boolean)? = null,
-    onPointerDown: ((Offset) -> Unit)? = null,
-    onDoubleTap: (() -> Unit)? = null
+    onPointerDown: ((Offset, PointerType) -> Unit)? = null,
+    onDoubleTap: ((RaftPopoverAnchor) -> Unit)? = null,
+    consumeSelectionDismissalTap: (() -> Boolean)? = null
 ): Modifier {
     SideEffect {
         gestureOwner.updateCallbacks(
@@ -28155,7 +29238,8 @@ internal fun Modifier.threadMessageLongPressActions(
                 onInputReady = onInputReady,
                 deferLongPressAt = deferLongPressAt,
                 onPointerDown = onPointerDown,
-                onDoubleTap = onDoubleTap
+                onDoubleTap = onDoubleTap,
+                consumeSelectionDismissalTap = consumeSelectionDismissalTap
             )
         )
     }
@@ -28172,8 +29256,18 @@ internal fun Modifier.threadMessageLongPressActions(
                 val down = awaitFirstDown(requireUnconsumed = false)
                 val compositionLease =
                     gestureOwner.captureActiveLease() ?: return@awaitEachGesture
-                gestureOwner.callbacksSnapshot(compositionLease)?.onPointerDown?.invoke(down.position)
-                gestureOwner.lastDownFromTouch = down.type == PointerType.Touch
+                // Any new down (a second tap, a long press, a drag) ends a held single tap, here
+                // or on another row: only a tap that stays alone opens the thread.
+                val cancelledHere = gestureOwner.cancelPendingSingleTap()
+                val cancelledElsewhere = gestureOwner.pendingTapSlot?.cancel() == true
+                if (cancelledHere || cancelledElsewhere) {
+                    gestureOwner.callbacksSnapshot(compositionLease)?.diagnosticsLogger?.invoke(
+                        "thread_message_deferred_tap_cancelled messageId=$messageId reason=down " +
+                            "sameRow=$cancelledHere"
+                    )
+                }
+                gestureOwner.callbacksSnapshot(compositionLease)?.onPointerDown?.invoke(down.position, down.type)
+                gestureOwner.lastDownFromTouch = threadMessageRowTapGesturesFor(down.type)
                 gestureOwner.lastDownUptimeMillis = down.uptimeMillis
                 gestureOwner.lastDownPosition = down.position
                 gestureOwner.doubleTapSlopPx = ThreadMessageDoubleTapSlop.toPx()
@@ -28235,27 +29329,60 @@ internal fun Modifier.threadMessageLongPressActions(
                         val callbacks =
                             gestureOwner.callbacksSnapshot(compositionLease) ?: return@launch
                         val decision = gestureOwner.tapMovementGate.decision(gestureToken)
-                        if (decision.allowed) {
-                            val doubleTap =
-                                callbacks.onDoubleTap?.takeIf {
-                                    gestureOwner.lastDownFromTouch &&
-                                        callbacks.deferLongPressAt?.invoke(gestureOwner.lastDownPosition) != true &&
-                                        gestureOwner.doubleTapTracker.onTap(
-                                            gestureOwner.lastDownUptimeMillis,
-                                            gestureOwner.lastDownPosition,
-                                            gestureOwner.doubleTapSlopPx
-                                        )
-                                }
-                            if (doubleTap != null) {
-                                callbacks.diagnosticsLogger("thread_message_double_tap_open messageId=$messageId")
-                                doubleTap()
-                            } else {
-                                callbacks.onTap?.invoke()
-                            }
-                        } else {
-                            // A tap a child took (a link, a reaction) breaks a pending pair.
+                        if (!decision.allowed) {
+                            // A tap a child took (a link, a reaction, a code block) breaks a pending pair.
                             gestureOwner.doubleTapTracker.reset()
-                            if (callbacks.onTap != null) callbacks.onTapRejected(decision)
+                            if (callbacks.onTap != null || callbacks.onDoubleTap != null) {
+                                callbacks.onTapRejected(decision)
+                            }
+                            return@launch
+                        }
+                        val selectionShowingAtDown = callbacks.consumeSelectionDismissalTap?.invoke() == true
+                        val doubleTapAvailable =
+                            callbacks.onDoubleTap != null &&
+                                gestureOwner.lastDownFromTouch &&
+                                callbacks.deferLongPressAt?.invoke(gestureOwner.lastDownPosition) != true
+                        val completesDoubleTap =
+                            doubleTapAvailable && !selectionShowingAtDown &&
+                                gestureOwner.doubleTapTracker.onTap(
+                                    gestureOwner.lastDownUptimeMillis,
+                                    gestureOwner.lastDownPosition,
+                                    gestureOwner.doubleTapSlopPx
+                                )
+                        when (
+                            decideThreadMessageRowTap(
+                                tapAccepted = true,
+                                fromTouch = gestureOwner.lastDownFromTouch,
+                                selectionShowingAtDown = selectionShowingAtDown,
+                                hasSingleTapAction = callbacks.onTap != null,
+                                doubleTapAvailable = doubleTapAvailable,
+                                completesDoubleTap = completesDoubleTap
+                            )
+                        ) {
+                            ThreadMessageRowTapOutcome.None -> Unit
+                            ThreadMessageRowTapOutcome.DismissSelectionOnly ->
+                                gestureOwner.doubleTapTracker.reset()
+                            ThreadMessageRowTapOutcome.RunSingleTap -> callbacks.onTap?.invoke()
+                            ThreadMessageRowTapOutcome.DeferSingleTap ->
+                                gestureOwner.deferSingleTap(compositionLease)
+                            ThreadMessageRowTapOutcome.ShowReactionBar -> {
+                                // The first tap's held action never runs once the pair completed.
+                                gestureOwner.cancelPendingSingleTap()
+                                val anchor =
+                                    gestureOwner.rootAnchor.resolve(
+                                        RaftPopoverLocalPoint.Exact(gestureOwner.lastDownPosition)
+                                    )
+                                if (anchor == null) {
+                                    callbacks.diagnosticsLogger(
+                                        "thread_message_double_tap_anchor_unavailable messageId=$messageId"
+                                    )
+                                } else {
+                                    callbacks.diagnosticsLogger(
+                                        "thread_message_double_tap_reactions messageId=$messageId"
+                                    )
+                                    callbacks.onDoubleTap?.invoke(anchor)
+                                }
+                            }
                         }
                     }
                 },
@@ -28365,19 +29492,26 @@ internal data class ThreadMessageLongPressCallbacks(
     val onInputReady: ((String) -> Unit)? = null,
     // In-place text selection (New Message Menu toggle): body presses belong to the selection.
     val deferLongPressAt: ((Offset) -> Boolean)? = null,
-    val onPointerDown: ((Offset) -> Unit)? = null,
-    // Two quick finger taps on the row: open its thread (null where a double tap does nothing).
-    val onDoubleTap: (() -> Unit)? = null
+    // Every down on the row, with its pointer type (in-place selection: dismissal, and whether a
+    // new selection is a finger's long press or a mouse drag).
+    val onPointerDown: ((Offset, PointerType) -> Unit)? = null,
+    // Two quick finger taps on the row: show its quick reaction bar at the anchor (null where the
+    // message cannot be reacted to; then the row has no double tap and [onTap] runs at once).
+    val onDoubleTap: ((RaftPopoverAnchor) -> Unit)? = null,
+    // In-place selection: true when this tap's gesture began while a selection showed, so the tap
+    // only dismissed it (the callback does the dismissal). Read once per accepted tap.
+    val consumeSelectionDismissalTap: (() -> Boolean)? = null
 )
 
 /**
  * Two finger taps on one message row within [ThreadMessageDoubleTapTimeoutMillis] and
- * [ThreadMessageDoubleTapSlop] open its thread (artin; rules agreed with web, #proj-raft-ui:911ccc08).
- * Detected by hand rather than with the detector's double tap, which would hold every single tap
- * back by the timeout: the first tap runs as before, the second opens the thread instead of
- * running the tap again. Only taps the row accepted count (a link, a button, a reaction or an
- * image takes its own tap), only from a finger (a mouse double click selects a word), and the
- * pair resets after a double tap so a third tap starts over.
+ * [ThreadMessageDoubleTapSlop] show its quick reaction bar; a single tap opens its thread (stdrc,
+ * 2026-10-29, #proj-raft-ui:911ccc08, replacing artin's double tap to open the thread).
+ * Detected by hand rather than with the detector's double tap, so a row without a double tap (no
+ * reactions there) keeps its single tap immediate; where both exist the single tap waits out the
+ * timeout ([decideThreadMessageRowTap]). Only taps the row accepted count (a link, a button, a
+ * reaction, an image or a code block takes its own tap), only from a finger (a mouse double click
+ * selects a word), and the pair resets after a double tap so a third tap starts over.
  */
 internal class ThreadMessageDoubleTapTracker {
     private var lastUptimeMillis = -1L
@@ -28404,19 +29538,57 @@ internal class ThreadMessageDoubleTapTracker {
     }
 }
 
-internal const val ThreadMessageDoubleTapTimeoutMillis = 300L
+internal const val ThreadMessageDoubleTapTimeoutMillis = 250L
 internal val ThreadMessageDoubleTapSlop = 10.dp
 
 internal class ThreadMessageLongPressGestureOwner(
     val key: ThreadMessageLongPressGestureOwnerKey,
-    val tapDispatchScope: CoroutineScope
+    val tapDispatchScope: CoroutineScope,
+    /** The thread's shared held-tap slot ([ThreadMessageLongPressGestureOwnerStore.pendingTapSlot]). */
+    val pendingTapSlot: ThreadMessagePendingTapSlot? = null
 ) {
     val rootAnchor =
         RaftLiveRootAnchorRef(identity = threadMessageMenuOwnerIdentity(key.messageId))
     val tapMovementGate = ThreadMessageTapMovementGate()
     val doubleTapTracker = ThreadMessageDoubleTapTracker()
 
-    /** The current gesture's down: from a finger, when, where, and the slop in px (for the double tap). */
+    /** The single tap held back while a double tap may still come (one per thread, see the slot). */
+    private var pendingSingleTap: Job? = null
+
+    /**
+     * Runs this row's single-tap action once the double-tap timeout passes, unless a down (here
+     * or on another row of the thread: a second tap, a long press, a drag) or leaving composition
+     * cancels it.
+     */
+    fun deferSingleTap(lease: ThreadMessageLongPressCompositionLease) {
+        cancelPendingSingleTap()
+        val slot = pendingTapSlot
+        slot?.cancel()
+        val job =
+            tapDispatchScope.launch {
+                delay(ThreadMessageDoubleTapTimeoutMillis)
+                // A row that left composition has no callbacks. A scroll is not re-checked here:
+                // the list also reports programmatic anchoring as scrolling, and a drag begins
+                // with a down, which already cancelled this.
+                callbacksSnapshot(lease)?.onTap?.invoke()
+            }
+        pendingSingleTap = job
+        slot?.hold(job)
+        job.invokeOnCompletion { if (pendingSingleTap === job) pendingSingleTap = null }
+    }
+
+    /** Cancels a held single tap; true when one was waiting. */
+    fun cancelPendingSingleTap(): Boolean {
+        val job = pendingSingleTap ?: return false
+        pendingSingleTap = null
+        job.cancel()
+        return true
+    }
+
+    /**
+     * The current gesture's down: from a finger ([threadMessageRowTapGesturesFor]: only then do the
+     * row's tap and double tap act), when, where, and the slop in px (for the double tap).
+     */
     var lastDownFromTouch = false
     var lastDownUptimeMillis = 0L
     var lastDownPosition = Offset.Zero
@@ -28441,6 +29613,8 @@ internal class ThreadMessageLongPressGestureOwner(
         if (!compositionActive) return
         compositionActive = false
         callbacks = ThreadMessageLongPressCallbacks()
+        cancelPendingSingleTap()
+        doubleTapTracker.reset()
         tapMovementGate.invalidateCompositionAuthority()
         rootAnchor.invalidate()
         pressed = false
@@ -28499,6 +29673,27 @@ internal fun nextThreadMessageCompositionGeneration(current: Long): Long =
 
 internal const val ThreadMessageLongPressGestureOwnerRetentionLimit = 256
 
+/**
+ * The one single tap a thread holds back for a possible double tap. A down on any row cancels it,
+ * so a quick tap on another message (or a drag starting there) never lets the first one fire late.
+ */
+internal class ThreadMessagePendingTapSlot {
+    private var job: Job? = null
+
+    fun hold(next: Job) {
+        job = next
+        next.invokeOnCompletion { if (job === next) job = null }
+    }
+
+    /** Cancels the held tap; true when one was waiting. */
+    fun cancel(): Boolean {
+        val held = job ?: return false
+        job = null
+        held.cancel()
+        return true
+    }
+}
+
 internal class ThreadMessageLongPressGestureOwnerStore(
     private val tapDispatchScope: CoroutineScope,
     private val maxRetainedOwners: Int = ThreadMessageLongPressGestureOwnerRetentionLimit
@@ -28506,6 +29701,9 @@ internal class ThreadMessageLongPressGestureOwnerStore(
     init {
         require(maxRetainedOwners > 0) { "maxRetainedOwners must be positive" }
     }
+
+    /** Shared by every row of this thread: see [ThreadMessagePendingTapSlot]. */
+    val pendingTapSlot = ThreadMessagePendingTapSlot()
 
     private data class Entry(
         val owner: ThreadMessageLongPressGestureOwner,
@@ -28525,7 +29723,7 @@ internal class ThreadMessageLongPressGestureOwnerStore(
             entry.lastAccessOrdinal = nextAccessOrdinal()
             return entry.owner
         }
-        return ThreadMessageLongPressGestureOwner(key, tapDispatchScope)
+        return ThreadMessageLongPressGestureOwner(key, tapDispatchScope, pendingTapSlot)
             .also { owner ->
                 owners[key] =
                     Entry(
@@ -29447,15 +30645,22 @@ internal fun RaftThreadMessageItem.hasThreadFooterMeta(
         reactions.any { it.count > 0 }
 
 internal enum class ThreadMessageTrailingSection {
+    SourceTasks,
     MetaChips,
     InlineReplies,
 }
 
+/**
+ * Below the body, in web MessageItem's order: the task list (task v2), then the footer chips
+ * (reactions, saved), then the replies, which stay the message's own discussion.
+ */
 internal fun threadMessageTrailingSectionOrder(
     hasMetaChips: Boolean,
     hasInlineReplies: Boolean,
+    hasSourceTasks: Boolean = false,
 ): List<ThreadMessageTrailingSection> =
     buildList {
+        if (hasSourceTasks) add(ThreadMessageTrailingSection.SourceTasks)
         if (hasMetaChips) add(ThreadMessageTrailingSection.MetaChips)
         if (hasInlineReplies) add(ThreadMessageTrailingSection.InlineReplies)
     }
@@ -29733,6 +30938,33 @@ internal fun threadPanelFollowAction(message: RaftThreadMessageItem?): ThreadPan
     )
 }
 
+/**
+ * botiverse/slock #11687: the thread channel an open reply thread's Mark as Unread marks (its header
+ * ⋯ and its messages' menus), or null: not a reply thread, no thread channel yet, or a thread the
+ * person doesn't follow (its Activity row has no Mark as Unread either).
+ */
+internal fun threadPanelMarkUnreadChannelId(
+    replyThreadSurface: Boolean,
+    originReplyMetadata: ThreadReplyMetadata?,
+): String? {
+    if (!replyThreadSurface || originReplyMetadata?.isThreadFollowed != true) return null
+    return originReplyMetadata.threadChannelId?.trim()?.takeIf { it.isNotBlank() }
+}
+
+/**
+ * The thread facts of [this] message from the page's reply metadata. The timeline slice keeps them
+ * out of its rows ([withoutThreadReplyMetadata]); the header's panel actions read them back here.
+ */
+internal fun RaftThreadMessageItem.withThreadReplyFacts(metadata: ThreadReplyMetadata): RaftThreadMessageItem =
+    copy(
+        threadChannelId = metadata.threadChannelId,
+        replyCount = metadata.replyCount,
+        unreadReplyCount = metadata.unreadReplyCount,
+        firstUnreadReplyMessageId = metadata.firstUnreadReplyMessageId,
+        isThreadFollowed = metadata.isThreadFollowed
+    )
+
+internal const val MARK_THREAD_UNREAD_ACTION = "markThreadUnread"
 internal const val FOLLOW_THREAD_ACTION = "followMessageThread"
 internal const val UNFOLLOW_THREAD_ACTION = "unfollowMessageThread"
 
@@ -29763,7 +30995,14 @@ internal data class ThreadMessageMenuCapabilities(
     val taskStatus: Boolean,
     val convertToTask: Boolean,
     val cancelLocalSend: Boolean,
-    val deleteLocalSend: Boolean
+    val deleteLocalSend: Boolean,
+    /** Task v2: [convertToTask] is "Create Task from Message" (web CreateTaskDialog), not the legacy convert. */
+    val createTaskFromMessage: Boolean = false,
+    /**
+     * botiverse/slock #11687: "Mark Thread as Unread" on every message of a followed reply thread
+     * (web MessageItem in a thread panel, right after Save); the thread channel it marks, else null.
+     */
+    val markThreadUnreadChannelId: String? = null
 )
 
 internal fun threadMessageMenuCapabilities(
@@ -29772,12 +31011,21 @@ internal fun threadMessageMenuCapabilities(
     slice: ThreadTimelineSlice,
     writeActionsEnabled: Boolean,
     translate: ThreadMessageMenuTranslateState = ThreadMessageMenuTranslateState.Hidden,
-    taskConvertPending: Boolean = false
+    taskConvertPending: Boolean = false,
+    /**
+     * `task_v2_conversations_v0` (web MessageItem menu): a message's tasks are its list, never a
+     * single linked task, so there is no Mark as Done / Reopen here, and "Create Task from Message"
+     * replaces "Convert to Task" — offered on a message that already has tasks too.
+     */
+    taskV2Enabled: Boolean = false,
+    /** The open reply thread's origin reply facts (its thread channel, followed), for Mark Thread as Unread. */
+    originReplyMetadata: ThreadReplyMetadata? = null
 ): ThreadMessageMenuCapabilities {
     val localSend = message.hasLocalSendState()
     val system = message.isSystemMessage()
     val external = message.externalAuthor != null
-    val canReact = writeActionsEnabled && slice.showReactionActions && !localSend && !system
+    // The same gate decides whether a row's double tap shows the quick reaction bar.
+    val canReact = threadMessageCanQuickReact(message, slice, writeActionsEnabled)
     // Web hides thread actions on rows inside the thread panel but still offers Follow on the
     // panel's parent (`showThreadFollowAction`); mobile's origin message is that parent.
     val threadFollowSurface =
@@ -29803,7 +31051,8 @@ internal fun threadMessageMenuCapabilities(
                 threadFollowSurface &&
                 shouldShowThreadFollowAction(message, replyMetadata),
         taskStatus =
-            slice.showTaskStatusActions &&
+            !taskV2Enabled &&
+                slice.showTaskStatusActions &&
                 !localSend &&
                 !external &&
                 !message.taskId.isNullOrBlank(),
@@ -29811,9 +31060,12 @@ internal fun threadMessageMenuCapabilities(
             slice.canConvertMessagesToTasks &&
                 !taskConvertPending &&
                 !external &&
-                message.canConvertToTask(),
+                if (taskV2Enabled) message.canCreateTaskFromMessage() else message.canConvertToTask(),
         cancelLocalSend = writeActionsEnabled && message.isSendingLocalSend(),
-        deleteLocalSend = writeActionsEnabled && message.isFailedLocalSend()
+        deleteLocalSend = writeActionsEnabled && message.isFailedLocalSend(),
+        createTaskFromMessage = taskV2Enabled,
+        markThreadUnreadChannelId =
+            if (localSend) null else threadPanelMarkUnreadChannelId(slice.replyThreadSurface, originReplyMetadata)
     )
 }
 
@@ -29836,6 +31088,10 @@ internal fun threadMessageMenuActions(
     translatePending: Boolean = false,
     showForwardAction: Boolean = false,
     showAddReactionAction: Boolean = false,
+    /** Task v2: the task item is "Create Task from Message". */
+    createTaskFromMessage: Boolean = false,
+    /** botiverse/slock #11687: "Mark Thread as Unread", right after Save. */
+    showMarkThreadUnreadAction: Boolean = false,
     onReply: () -> Unit,
     onCopyLink: () -> Unit,
     onCopy: () -> Unit,
@@ -29850,7 +31106,8 @@ internal fun threadMessageMenuActions(
     onDelete: () -> Unit,
     onTranslate: () -> Unit = {},
     onForward: () -> Unit = {},
-    onAddReaction: () -> Unit = {}
+    onAddReaction: () -> Unit = {},
+    onMarkThreadUnread: () -> Unit = {}
 ): List<ThreadMessageMenuAction> =
     buildList {
         if (showAddReactionAction) {
@@ -29923,6 +31180,16 @@ internal fun threadMessageMenuActions(
                 )
             )
         }
+        if (showMarkThreadUnreadAction) {
+            add(
+                ThreadMessageMenuAction(
+                    label = Res.string.thread_action_mark_thread_unread.desc(),
+                    icon = RaftLucideIconName.MessageSquareDot,
+                    group = "message",
+                    onClick = onMarkThreadUnread
+                )
+            )
+        }
         val followThreadChannelId = replyMetadata.threadChannelId?.takeIf { it.isNotBlank() }
         if (showFollowAction && shouldShowThreadFollowAction(message, replyMetadata)) {
             add(
@@ -29981,10 +31248,15 @@ internal fun threadMessageMenuActions(
                 )
             )
         }
-        if (showConvertToTaskAction && message.canConvertToTask()) {
+        if (showConvertToTaskAction && (createTaskFromMessage || message.canConvertToTask())) {
             add(
                 ThreadMessageMenuAction(
-                    label = Res.string.thread_action_convert_to_task.desc(),
+                    label =
+                        if (createTaskFromMessage) {
+                            Res.string.thread_action_create_task_from_message.desc()
+                        } else {
+                            Res.string.thread_action_convert_to_task.desc()
+                        },
                     icon = RaftLucideIconName.ClipboardCheck,
                     group = "task",
                     onClick = onConvertToTask
@@ -30003,6 +31275,7 @@ private fun ThreadMessageActionMenu(
     showFollowAction: Boolean,
     showTaskStatusAction: Boolean,
     showConvertToTaskAction: Boolean,
+    createTaskFromMessage: Boolean = false,
     showReactionActions: Boolean,
     showCopyLinkAction: Boolean,
     showShareMessagesAction: Boolean,
@@ -30012,6 +31285,7 @@ private fun ThreadMessageActionMenu(
     translatePending: Boolean = false,
     showForwardAction: Boolean = false,
     showAddReactionAction: Boolean = false,
+    showMarkThreadUnreadAction: Boolean = false,
     onDismiss: () -> Unit,
     onReply: () -> Unit,
     onCopyLink: () -> Unit,
@@ -30029,6 +31303,7 @@ private fun ThreadMessageActionMenu(
     onTranslate: () -> Unit = {},
     onForward: () -> Unit = {},
     onAddReaction: () -> Unit = {},
+    onMarkThreadUnread: () -> Unit = {},
     diagnosticsLogger: (String) -> Unit = {}
 ) {
     val reactionAtlasImage = LocalThreadReactionAtlasImage.current
@@ -30041,6 +31316,7 @@ private fun ThreadMessageActionMenu(
             showFollowAction,
             showTaskStatusAction,
             showConvertToTaskAction,
+            createTaskFromMessage,
             showCopyLinkAction,
             showShareMessagesAction,
             showCancelAction,
@@ -30049,6 +31325,7 @@ private fun ThreadMessageActionMenu(
             translatePending,
             showForwardAction,
             showAddReactionAction,
+            showMarkThreadUnreadAction,
             onReply,
             onCopyLink,
             onCopy,
@@ -30063,7 +31340,8 @@ private fun ThreadMessageActionMenu(
             onDelete,
             onTranslate,
             onForward,
-            onAddReaction
+            onAddReaction,
+            onMarkThreadUnread
         ) {
             threadMessageMenuActions(
                 message = message,
@@ -30073,6 +31351,7 @@ private fun ThreadMessageActionMenu(
                 showFollowAction = showFollowAction,
                 showTaskStatusAction = showTaskStatusAction,
                 showConvertToTaskAction = showConvertToTaskAction,
+                createTaskFromMessage = createTaskFromMessage,
                 showCopyLinkAction = showCopyLinkAction,
                 showShareMessagesAction = showShareMessagesAction,
                 showCancelAction = showCancelAction,
@@ -30081,6 +31360,7 @@ private fun ThreadMessageActionMenu(
                 translatePending = translatePending,
                 showForwardAction = showForwardAction,
                 showAddReactionAction = showAddReactionAction,
+                showMarkThreadUnreadAction = showMarkThreadUnreadAction,
                 onReply = onReply,
                 onCopyLink = onCopyLink,
                 onCopy = onCopy,
@@ -30095,7 +31375,8 @@ private fun ThreadMessageActionMenu(
                 onDelete = onDelete,
                 onTranslate = onTranslate,
                 onForward = onForward,
-                onAddReaction = onAddReaction
+                onAddReaction = onAddReaction,
+                onMarkThreadUnread = onMarkThreadUnread
             )
         }
     val density = LocalDensity.current
@@ -30112,6 +31393,99 @@ private fun ThreadMessageActionMenu(
         width = menuWidth,
         height = menuHeight
     )
+    val shellItems =
+        actions.mapIndexed { index, action ->
+            RaftShellOverlayItem(
+                id = index.toString(),
+                label = action.label.localized(),
+                iconName = action.icon.name,
+                enabled = action.enabled
+            )
+        }
+    ThreadShellAwareAnchoredPopover(
+        anchor = anchor,
+        contentSize = contentSize,
+        viewportGapPx = viewportGapPx,
+        onDismiss = onDismiss,
+        shellRequestId = { pageRootAnchor ->
+            "thread-message-${message.id}-${pageRootAnchor?.hashCode() ?: 0}-${actions.size}"
+        },
+        shellItems = shellItems,
+        shellContentKey = showReactionActions,
+        shellContent = { onSelected ->
+            // The shell host composes this in its own page. Decode the reaction atlas
+            // there instead of capturing this page's `reactionAtlasImage`: the atlas
+            // loads asynchronously, so a lambda registered before it was ready kept
+            // the first-frame null forever and every reaction rendered as an empty
+            // box (HuaTuo device check of 6de03d9a, all layouts).
+            ThreadReactionAtlasProvider {
+                ThreadMessageMenuChrome(
+                    actions = actions.mapIndexed { index, action ->
+                        action.copy(onClick = { onSelected(index.toString()) })
+                    },
+                    showReactionActions = showReactionActions,
+                    reactionAtlasImage = LocalThreadReactionAtlasImage.current,
+                    onReact = { emoji ->
+                        onReact(emoji)
+                    },
+                    modifier = Modifier
+                )
+            }
+        },
+        onShellSelected = { id ->
+            actions.getOrNull(id.toIntOrNull() ?: -1)
+                ?.takeIf { it.enabled }
+                ?.onClick
+                ?.invoke()
+        },
+        onShellRequested = { requestId, pageWindowAnchor ->
+            diagnosticsLogger(
+                "thread_message_menu_shell_request messageId=${message.id} requestId=$requestId " +
+                    "anchor=$pageWindowAnchor menuW=$menuWidth menuH=$menuHeight"
+            )
+        },
+        inPageContent = { inShellFallback ->
+            if (!inShellFallback) {
+                LaunchedEffect(message.id, anchor) {
+                    diagnosticsLogger(
+                        "thread_message_menu_positioned messageId=${message.id} menuW=$menuWidth menuH=$menuHeight"
+                    )
+                }
+            }
+            ThreadMessageMenuChrome(
+                actions = actions,
+                showReactionActions = showReactionActions,
+                reactionAtlasImage = reactionAtlasImage,
+                onReact = onReact,
+                modifier = Modifier
+            )
+        }
+    )
+}
+
+/**
+ * A popover opened from a thread message, at [anchor] with web's context menu placement. A thread
+ * is often rendered in a 400dp child page, and a Modal created there receives that page's native
+ * surface and clips whatever overflows it; on such a page the popover goes through the app-shell
+ * host instead ([RaftShellOverlayContentRegistry]), which owns a window-sized surface while the
+ * callbacks stay in this page. [shellContent] is composed in the shell's page, so it must not read
+ * this page's composition locals; [inPageContent] gets whether it is the shell path's fallback.
+ */
+@Composable
+private fun ThreadShellAwareAnchoredPopover(
+    anchor: RaftPopoverAnchor,
+    contentSize: Size,
+    viewportGapPx: Float,
+    onDismiss: () -> Unit,
+    shellRequestId: (pageRootAnchor: Offset?) -> String,
+    // The shell's contract wants at least one row; it draws them only when no content was registered.
+    shellItems: List<RaftShellOverlayItem>,
+    shellContentKey: Any?,
+    shellContent: @Composable (onSelected: (String) -> Unit) -> Unit,
+    onShellSelected: (String) -> Unit,
+    onShellRequested: (requestId: String, pageWindowAnchor: Offset) -> Unit,
+    inPageContent: @Composable (inShellFallback: Boolean) -> Unit
+) {
     // Task #185 (narrowed for 1.14.2): only an adaptive split-pane detail page clips a Modal to
     // its 400dp child surface. Everywhere else (single-pane phones, full-width pages) keep the
     // original in-page Modal path unchanged; only the clipping case goes through the shell host.
@@ -30147,18 +31521,7 @@ private fun ThreadMessageActionMenu(
             verticalPlacement = RaftFloatingVerticalPlacement.ContextMenu,
             horizontalPlacement = RaftFloatingHorizontalPlacement.ContextMenu
         ) {
-            LaunchedEffect(message.id, anchor) {
-                diagnosticsLogger(
-                    "thread_message_menu_positioned messageId=${message.id} menuW=$menuWidth menuH=$menuHeight"
-                )
-            }
-            ThreadMessageMenuChrome(
-                actions = actions,
-                showReactionActions = showReactionActions,
-                reactionAtlasImage = reactionAtlasImage,
-                onReact = onReact,
-                modifier = Modifier
-            )
+            inPageContent(false)
         }
         return
     }
@@ -30167,9 +31530,10 @@ private fun ThreadMessageActionMenu(
     // composable with the app-shell host instead; the shell owns a window-sized surface while the
     // action callbacks and reaction bitmap remain in this page's process-local state.
     val localPager = LocalActivity.current.getPager() as Pager
+    val eventBusOverride = LocalThreadHeaderMenuEventBus.current
     val pageEventBus: build.raft.app.data.RaftEventBus =
-        remember(localPager.pagerId) {
-            RaftSharedStoreRegistry.get(Utils.bridgeModule(localPager.pagerId)).eventBus
+        remember(localPager.pagerId, eventBusOverride) {
+            eventBusOverride ?: RaftSharedStoreRegistry.get(Utils.bridgeModule(localPager.pagerId)).eventBus
         }
     val pageOriginKey = raftChildPageOriginKey(THREAD_PAGE, LocalActivity.current.pageData.params)
     val pageKey =
@@ -30180,17 +31544,7 @@ private fun ThreadMessageActionMenu(
     val pageRootAnchor = anchor.rootOffsetOrNull()
     val pageWindowAnchor =
         pageRootAnchor?.plus(RaftChildPageOriginRegistry.stateFor(pageOriginKey).windowOrigin)
-    val requestId =
-        "thread-message-${message.id}-${pageRootAnchor?.hashCode() ?: 0}-${actions.size}"
-    val shellItems =
-        actions.mapIndexed { index, action ->
-            RaftShellOverlayItem(
-                id = index.toString(),
-                label = action.label.localized(),
-                iconName = action.icon.name,
-                enabled = action.enabled
-            )
-        }
+    val requestId = shellRequestId(pageRootAnchor)
     DisposableEffect(pageEventBus, requestId) {
         val subscription =
             pageEventBus.observe(RAFT_SHELL_OVERLAY_RESULT_EVENT) { eventData ->
@@ -30221,16 +31575,10 @@ private fun ThreadMessageActionMenu(
             verticalPlacement = RaftFloatingVerticalPlacement.ContextMenu,
             horizontalPlacement = RaftFloatingHorizontalPlacement.ContextMenu
         ) {
-            ThreadMessageMenuChrome(
-                actions = actions,
-                showReactionActions = showReactionActions,
-                reactionAtlasImage = reactionAtlasImage,
-                onReact = onReact,
-                modifier = Modifier
-            )
+            inPageContent(true)
         }
     } else {
-        LaunchedEffect(requestId, pageWindowAnchor, showReactionActions, shellItems) {
+        LaunchedEffect(requestId, pageWindowAnchor, shellContentKey, shellItems) {
             RaftShellOverlayContentRegistry.register(
                 RaftShellOverlayContentEntry(
                     requestId = requestId,
@@ -30238,32 +31586,8 @@ private fun ThreadMessageActionMenu(
                     viewportGap = viewportGapPx,
                     horizontalOffset = 0f,
                     verticalOffset = 0f,
-                    content = { onSelected ->
-                        // The shell host composes this in its own page. Decode the reaction atlas
-                        // there instead of capturing this page's `reactionAtlasImage`: the atlas
-                        // loads asynchronously, so a lambda registered before it was ready kept
-                        // the first-frame null forever and every reaction rendered as an empty
-                        // box (HuaTuo device check of 6de03d9a, all layouts).
-                        ThreadReactionAtlasProvider {
-                            ThreadMessageMenuChrome(
-                                actions = actions.mapIndexed { index, action ->
-                                    action.copy(onClick = { onSelected(index.toString()) })
-                                },
-                                showReactionActions = showReactionActions,
-                                reactionAtlasImage = LocalThreadReactionAtlasImage.current,
-                                onReact = { emoji ->
-                                    onReact(emoji)
-                                },
-                                modifier = Modifier
-                            )
-                        }
-                    },
-                    onSelected = { id ->
-                        actions.getOrNull(id.toIntOrNull() ?: -1)
-                            ?.takeIf { it.enabled }
-                            ?.onClick
-                            ?.invoke()
-                    },
+                    content = shellContent,
+                    onSelected = onShellSelected,
                 )
             )
             pageEventBus.post(
@@ -30275,9 +31599,137 @@ private fun ThreadMessageActionMenu(
                     items = shellItems
                 ).toJson()
             )
-            diagnosticsLogger(
-                "thread_message_menu_shell_request messageId=${message.id} requestId=$requestId " +
-                    "anchor=$pageWindowAnchor menuW=$menuWidth menuH=$menuHeight"
+            onShellRequested(requestId, pageWindowAnchor)
+        }
+    }
+}
+
+/**
+ * Add Reaction's picker on a wide screen: web's floating panel, opened where the message menu was
+ * and kept inside the window; through the app-shell host on a split-pane page, like the menu.
+ */
+@Composable
+private fun ThreadMessageEmojiPickerPopover(
+    messageId: String,
+    anchor: RaftPopoverAnchor,
+    preferences: RaftEmojiPickerPreferences,
+    onDismiss: () -> Unit,
+    onSelect: (String) -> Unit,
+    diagnosticsLogger: (String) -> Unit = {}
+) {
+    val density = LocalDensity.current
+    val shellItemLabel = stringResource(Res.string.thread_action_add_reaction)
+    ThreadShellAwareAnchoredPopover(
+        anchor = anchor,
+        contentSize = raftEmojiPickerPopoverSize(density),
+        viewportGapPx = with(density) { RaftEmojiPickerPopoverViewportGap.toPx() },
+        onDismiss = onDismiss,
+        shellRequestId = { pageRootAnchor -> "thread-emoji-picker-$messageId-${pageRootAnchor?.hashCode() ?: 0}" },
+        // Never drawn: the panel below is registered with the request.
+        shellItems = listOf(RaftShellOverlayItem(id = "emoji-picker", label = shellItemLabel)),
+        shellContentKey = preferences,
+        shellContent = { onSelected ->
+            RaftEmojiPickerPopoverSurface(
+                preferences = preferences,
+                catalog = RaftEmojiCatalog.Default,
+                onSelect = onSelected
+            )
+        },
+        // The panel reports the picked emoji as the selected id.
+        onShellSelected = onSelect,
+        onShellRequested = { requestId, pageWindowAnchor ->
+            diagnosticsLogger("thread_emoji_picker_shell_request messageId=$messageId requestId=$requestId anchor=$pageWindowAnchor")
+        },
+        inPageContent = {
+            RaftEmojiPickerPopoverSurface(
+                preferences = preferences,
+                catalog = RaftEmojiCatalog.Default,
+                onSelect = onSelect
+            )
+        }
+    )
+}
+
+/** A double tap's quick reaction bar: which message, anchored where the second tap landed. */
+internal data class ThreadQuickReactionBarRequest(
+    val messageId: String,
+    val anchor: RaftPopoverAnchor
+)
+
+/** The quick reaction bar's distance from the finger that double tapped (web: 24px). */
+internal val ThreadMessageQuickReactionBarFingerGap = 24.dp
+
+internal fun threadMessageQuickReactionBarHeightDp(): Float =
+    ThreadMessageMenuReactionRowHeight.value + RaftMetrics.PopupPadding.value * 2
+
+/**
+ * The quick reaction bar a double tap shows (stdrc, 2026-10-29, #proj-raft-ui:911ccc08): the
+ * long-press menu's popup and quick reaction row ([ThreadMessageReactionRow], same emojis and
+ * glyphs) without its action rows, above the second tap (below when there is no room). The
+ * Classic menu has no "Add reaction" entry ([ThreadMessageMenuCapabilities.addReaction] is off),
+ * so neither has the bar. Picking an emoji toggles that reaction and closes the bar; a tap
+ * outside closes it.
+ */
+@Composable
+private fun ThreadMessageQuickReactionBar(
+    messageId: String,
+    anchor: RaftPopoverAnchor,
+    onDismiss: () -> Unit,
+    onReact: (String) -> Unit,
+    diagnosticsLogger: (String) -> Unit = {}
+) {
+    Modal(onWillDismiss = { onDismiss() }) {
+        ThreadMessageQuickReactionBarPopover(messageId, anchor, onDismiss, onReact, diagnosticsLogger)
+    }
+}
+
+/**
+ * [ThreadMessageQuickReactionBar] without its window: the popover over the page (screenshot
+ * tests draw it in the page, as a window can't be captured with the page under it).
+ */
+@Composable
+internal fun ThreadMessageQuickReactionBarPopover(
+    messageId: String,
+    anchor: RaftPopoverAnchor,
+    onDismiss: () -> Unit,
+    onReact: (String) -> Unit,
+    diagnosticsLogger: (String) -> Unit = {}
+) {
+    val density = LocalDensity.current
+    val barWidthDp = threadMessageMenuWidthDp(showReactionActions = true)
+    val contentSize =
+        with(density) {
+            Size(
+                width = barWidthDp.dp.toPx(),
+                height = threadMessageQuickReactionBarHeightDp().dp.toPx()
+            )
+        }
+    val viewportGapPx = with(density) { ThreadMessageMenuViewportGap.toPx() }
+    val fingerGapPx = with(density) { ThreadMessageQuickReactionBarFingerGap.toPx() }
+    // Like the mobile web (slock #11851): above the second tap, 24dp clear of the finger, so it
+    // covers neither the line that was tapped nor the finger; below only when there is no room
+    // above. Centred on the finger and kept on screen.
+    RaftAnchoredPopover(
+        anchor = anchor,
+        contentSize = contentSize,
+        onDismiss = onDismiss,
+        viewportGap = viewportGapPx,
+        horizontalOffset = -contentSize.width / 2f,
+        verticalOffset = fingerGapPx,
+        verticalOffsetAbove = fingerGapPx,
+        verticalPlacement = RaftFloatingVerticalPlacement.AbovePreferred,
+        horizontalPlacement = RaftFloatingHorizontalPlacement.Anchor
+    ) {
+        LaunchedEffect(messageId, anchor) {
+            diagnosticsLogger("thread_message_quick_reaction_bar_positioned messageId=$messageId")
+        }
+        RaftMenuSurface(
+            modifier = Modifier.raftFloatingContentClickTarget(),
+            width = raftMenuWidth(barWidthDp.dp)
+        ) {
+            ThreadMessageReactionRow(
+                reactionAtlasImage = LocalThreadReactionAtlasImage.current,
+                onReact = onReact
             )
         }
     }
@@ -30546,6 +31998,8 @@ private fun ThreadOriginCard(
     onExternalAuthor: (RaftThreadMessageItem) -> Unit = {},
     onShowActions: (RaftThreadMessageItem, RaftPopoverAnchor) -> Unit,
     onLongPressMenuOpened: (RaftThreadMessageItem) -> Unit = {},
+    writeActionsEnabled: Boolean = false,
+    onShowQuickReactions: (RaftThreadMessageItem, RaftPopoverAnchor) -> Unit = { _, _ -> },
     onOpenTaskStatusMenu: (RaftThreadMessageItem, RaftPopoverAnchor) -> Unit,
     onShowReactionDetails: ((RaftThreadReactionItem, RaftPopoverAnchor) -> Unit)? = null,
     onShowAuthorDescription: ((String, RaftPopoverAnchor) -> Unit)? = null,
@@ -30602,7 +32056,11 @@ private fun ThreadOriginCard(
             else -> {
                 timelineSlice.originMessage?.let { origin ->
                     val linkedTask = linkedTasksProjection.lookup.threadLinkedTaskForMessage(origin)
-                    val displayOrigin = origin.withLinkedTaskProjection(linkedTasksProjection)
+                    // Task v2 (web ThreadPanel `parentSourceTasks`): the parent's tasks list under it here too.
+                    val originSourceTasks = linkedTasksProjection.sourceTasksFor(origin)
+                    val displayOrigin =
+                        origin.withLinkedTaskProjection(linkedTasksProjection)
+                            .let { if (originSourceTasks.isEmpty()) it else it.withoutLinkedTask() }
                     val linkedTaskAssigneeName = linkedTask?.threadLinkedTaskAssigneeDisplayName()
                     val originActionCard = if (contentExtrasVisible) origin.threadActionCard() else null
                     if (displayOrigin.isSystemMessage() && originActionCard == null) {
@@ -30617,6 +32075,8 @@ private fun ThreadOriginCard(
                                 message = displayOrigin,
                                 messageBodyTextStyle = messageBodyTextStyle,
                                 hasReplyDraft = false,
+                                sourceTasks = originSourceTasks,
+                                onOpenSourceTask = { onThreadEvent("openSourceTask", it, null, null) },
                                 actionCard = originActionCard,
                                 highlightedMentions = highlightedMentions,
                                 agentStatusResolver = agentStatusResolver,
@@ -30641,6 +32101,9 @@ private fun ThreadOriginCard(
                                 isMarkdownTagValid = isMarkdownTagValid,
                                 onShowActions = { anchor -> onShowActions(origin, anchor) },
                                 onLongPressMenuOpened = { onLongPressMenuOpened(origin) },
+                                // The thread's parent takes a double tap too: its reaction bar.
+                                quickReactionsEnabled = threadMessageCanQuickReact(origin, timelineSlice, writeActionsEnabled),
+                                onShowQuickReactions = { anchor -> onShowQuickReactions(origin, anchor) },
                                 onOpenMember = onOpenMember,
                                 onExternalAuthor = onExternalAuthor,
                                 onOpenThread = { onThreadEvent("openMessageThread", it, null, null) },
@@ -32130,19 +33593,32 @@ private fun ThreadFilesTab(
         return
     }
     val vm = filesViewModel
+    // Workspace Artifacts (web #11580): the conversation's own lead its files, behind the
+    // server's workspace_artifacts_v0, latched while the tab is composed.
+    val appLinkHost = LocalThreadAppLinkPreviewHost.current
+    val artifactsServerId = appLinkHost?.serverId?.takeIf { appLinkHost.artifacts != null }
+    val artifactsEnabled =
+        rememberServerFeatureLatched(
+            appLinkHost?.artifacts?.featureFlags,
+            artifactsServerId?.let(::ServerId),
+            WORKSPACE_ARTIFACTS_FEATURE_FLAG_KEY
+        )
+    val artifactsScope = artifactsServerId?.takeIf { artifactsEnabled }?.let(::ThreadFilesArtifactsScope)
     LaunchedEffect(
         threadInstanceKey,
         filesStartKey,
         basePayload.sourceThreadId,
         basePayload.streamChannelId,
         basePayload.instanceId,
-        active
+        active,
+        artifactsScope
     ) {
         if (!active) return@LaunchedEffect
         if (filesStartKey == null) return@LaunchedEffect
         vm.dispatch(
             SharedThreadFilesIntent.Start(
-                basePayload = basePayload
+                basePayload = basePayload,
+                artifacts = artifactsScope
             )
         )
         if (vm.state.value.payload.shouldFetchInitialFiles()) {
@@ -32156,13 +33632,26 @@ private fun ThreadFilesTab(
             onAuthRequired(payload.errorCode)
         }
     }
+    val uriHandler = LocalUriHandler.current
+    val artifactWebBaseUrl = appLinkHost?.artifacts?.webBaseUrl.orEmpty()
+    // The in-app viewer; the browser only when no page can open from here.
+    val artifactOpener = rememberRaftArtifactOpener { uriHandler.openUri(artifactWebUrl(artifactWebBaseUrl, it)) }
+    RaftArtifactViewerPrewarm(enabled = active && filesState.artifacts.items.isNotEmpty())
     ThreadFilesContent(
         payload = payload,
         attachmentOpenStates = attachmentOpenStates,
         autoLoadRouteListKey = threadInstanceKey,
-        refreshing = filesState.refreshing
+        refreshing = filesState.refreshing,
+        artifacts = filesState.artifacts
     ) { action, attachmentId ->
         when (action) {
+            "openArtifact" -> {
+                val artifact = filesState.artifacts.items.firstOrNull { it.summary.id == attachmentId } ?: return@ThreadFilesContent
+                // The row opens the latest version, as the web's (`version: null`).
+                val target = ArtifactLinkTarget(artifact.summary.id)
+                artifactOpener.open(target, RaftArtifactViewerHeader.of(artifact.summary, target), "files_tab")
+            }
+            "loadMoreArtifacts" -> vm.dispatch(SharedThreadFilesIntent.LoadMoreArtifacts)
             "open" -> {
                 val cleanAttachmentId = attachmentId?.takeIf { it.isNotBlank() } ?: return@ThreadFilesContent
                 val attachment = payload.findThreadAttachment(cleanAttachmentId) ?: return@ThreadFilesContent
@@ -32235,7 +33724,7 @@ private fun String.threadTaskAssigneeKey(): String =
         .ifBlank { "unknown" }
 
 @Composable
-private fun ThreadJoinFooter(label: String, onJoin: () -> Unit) {
+internal fun ThreadJoinFooter(label: String, onJoin: () -> Unit) {
     // task #176: last element of the page, like the composer it replaces, so it
     // keeps clear of the system navigation bar.
     val bottomSafeArea = raftBottomSafeAreaPadding()
@@ -34209,8 +35698,15 @@ private fun threadMembersProjection(
         channelMembersSlice.members
             .distinctBy { it.threadMemberKey }
             .map { it.toRaftThreadMemberItem(serverId) }
+    // The stored (offline) participants stand in while nothing else is known; read-only (no add).
+    val usesStoredStandIn =
+        channelMembersSlice.storedStandIn &&
+            channelMembersSlice.status != SharedServerMembersLoadStatus.Loaded &&
+            loadedMembers.isNotEmpty() &&
+            basePayload.members.isEmpty()
+    val usesSlice = channelMembersSlice.status == SharedServerMembersLoadStatus.Loaded || usesStoredStandIn
     val members =
-        if (channelMembersSlice.status == SharedServerMembersLoadStatus.Loaded) {
+        if (usesSlice) {
             loadedMembers
         } else {
             basePayload.members
@@ -34230,15 +35726,16 @@ private fun threadMembersProjection(
     return ThreadMembersProjection(
         membersCount =
             when {
-                channelMembersSlice.status == SharedServerMembersLoadStatus.Loaded -> members.size
+                usesSlice -> members.size
                 basePayload.membersCount > 0 -> basePayload.membersCount
                 else -> members.size
             },
         members = members,
         memberCandidates = candidates,
         canAddMembers =
-            if (channelMembersSlice.status == SharedServerMembersLoadStatus.Loaded) {
-                channelMembersSlice.canAddMembers
+            if (usesSlice) {
+                // False on a stand-in: management waits for a fresh answer.
+                channelMembersSlice.canAddMembers && !channelMembersSlice.storedStandIn
             } else {
                 basePayload.canAddMembers
             }
@@ -34985,15 +36482,19 @@ private fun ThreadStateMessage(title: String, detail: String?) {
     }
 }
 
+/**
+ * The receipt after a single forward: the web's forward toast (slock `ForwardComposerDialog` +
+ * `ForwardToastProvider`): raft-ui Toast on the opaque HUD surface, title only (no intent icon),
+ * one "View in chat" text action, top centre. It floats over the channel header, so it must be
+ * the HUD toast, not the translucent soft-fill Banner (cindyz 10-29: unreadable in dark mode).
+ */
 @Composable
-private fun ThreadForwardSuccessBannerView(
+internal fun ThreadForwardSuccessToastView(
     banner: ThreadForwardSuccessBanner,
     onViewInChat: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val targetLabel = banner.target.forwardSuccessDisplayTitle()
-    val successLabel = stringResource(Res.string.thread_forward_success_banner, targetLabel)
-    val viewInChatLabel = stringResource(Res.string.thread_forward_view_in_chat)
     LaunchedEffect(banner) {
         delay(5_000)
         onDismiss()
@@ -35003,14 +36504,14 @@ private fun ThreadForwardSuccessBannerView(
             Modifier
                 .fillMaxSize()
                 .zIndex(RaftFloatingOverlayHostZIndex + 20f)
-                .padding(start = 12.dp, top = raftTopSafeAreaPadding() + 8.dp, end = 12.dp),
+                // Web viewport: top-center, at most calc(100vw - 1rem) wide.
+                .padding(start = 8.dp, top = raftTopSafeAreaPadding() + 8.dp, end = 8.dp),
         contentAlignment = Alignment.TopCenter
     ) {
-        RaftUiSuccessBanner(
-            description = successLabel,
-            actionLabel = viewInChatLabel,
+        RaftToast(
+            title = stringResource(Res.string.thread_forward_success_banner, targetLabel),
+            actionLabel = stringResource(Res.string.thread_forward_view_in_chat),
             onAction = onViewInChat,
-            modifier = Modifier.widthIn(max = 760.dp)
         )
     }
 }

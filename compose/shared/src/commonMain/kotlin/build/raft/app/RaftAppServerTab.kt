@@ -141,8 +141,11 @@ internal enum class RaftServerMenuAnchor {
      */
     TopBar,
 
-    /** Beside the iPhone Duo side dock's server button: [RaftSideDock]'s inner edge, at the top. */
-    SideDock,
+    /**
+     * Next to the rail header's workspace tile (iPhone Duo's inner screen, no top bar): at the
+     * top, past the rail's seam, its top on the tile's, 256dp wide.
+     */
+    RailHeader,
 }
 
 /**
@@ -165,8 +168,6 @@ internal fun RaftAppServerMenuOverlay(
     onInviteHumanClick: (() -> Unit)?,
     bottomInset: Dp = 0.dp,
     topInset: Dp = 0.dp,
-    /** Room kept free at the end edge (the side dock). */
-    endInset: Dp = 0.dp,
     screenHeight: Dp? = null,
     /** The pages in the bottom row ([raftServerMenuEntriesFor]); none draws no row. */
     entries: List<RaftServerMenuEntry> = model.entries,
@@ -215,14 +216,13 @@ internal fun RaftAppServerMenuOverlay(
         RaftDesignSystemTheme {
             RaftMobileNavServerPopover(
                 state = state,
-                modifier = Modifier.padding(end = endInset),
+                modifier = if (anchor == RaftServerMenuAnchor.RailHeader) Modifier.padding(start = RaftAppRailOuterWidth) else Modifier,
                 bottomInset = bottomInset,
                 topInset = topInset,
                 screenHeight = screenHeight,
                 alignment =
                     when (anchor) {
-                        RaftServerMenuAnchor.TopBar -> Alignment.TopStart
-                        RaftServerMenuAnchor.SideDock -> Alignment.TopEnd
+                        RaftServerMenuAnchor.TopBar, RaftServerMenuAnchor.RailHeader -> Alignment.TopStart
                         RaftServerMenuAnchor.BottomBar -> Alignment.BottomCenter
                     },
             ) {

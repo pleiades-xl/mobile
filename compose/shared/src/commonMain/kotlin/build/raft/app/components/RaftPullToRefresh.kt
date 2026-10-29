@@ -56,13 +56,17 @@ internal fun RaftPullToRefreshBox(
     enabled: Boolean = true,
     contentAlignment: Alignment = Alignment.TopStart,
     style: RaftPullToRefreshStyle = raftPlatformPullToRefreshStyle(),
+    /** See [RaftPullToRefreshController.onPullIgnored] (Cupertino; Material reports nothing). */
+    onPullIgnored: (reason: String) -> Unit = {},
     content: @Composable BoxScope.() -> Unit,
 ) {
     when (style) {
         RaftPullToRefreshStyle.Material ->
             RaftMaterialPullToRefreshBox(isRefreshing, onRefresh, modifier, enabled, contentAlignment, content)
         RaftPullToRefreshStyle.Cupertino ->
-            RaftCupertinoPullToRefreshBox(isRefreshing, onRefresh, modifier, enabled, contentAlignment, content)
+            RaftCupertinoPullToRefreshBox(isRefreshing, onRefresh, modifier, enabled, contentAlignment, onPullIgnored, content)
+        // Desktop: no gesture, no indicator; refresh state is the page header's spinner.
+        RaftPullToRefreshStyle.None -> Box(modifier, contentAlignment = contentAlignment, content = content)
     }
 }
 
@@ -172,6 +176,7 @@ private fun RaftCupertinoPullToRefreshBox(
     modifier: Modifier,
     enabled: Boolean,
     contentAlignment: Alignment,
+    onPullIgnored: (reason: String) -> Unit,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val style = RaftPullToRefreshStyle.Cupertino
@@ -180,9 +185,11 @@ private fun RaftCupertinoPullToRefreshBox(
     val geometry = remember(density) { raftPullToRefreshGeometry(style, density) }
     val controller = remember(scope) { RaftPullToRefreshController(style, scope, geometry) }
     val latestOnRefresh by rememberUpdatedState(onRefresh)
+    val latestOnPullIgnored by rememberUpdatedState(onPullIgnored)
     SideEffect {
         controller.geometry = geometry
         controller.onRefresh = { latestOnRefresh() }
+        controller.onPullIgnored = { reason -> latestOnPullIgnored(reason) }
     }
     LaunchedEffect(controller, isRefreshing) { controller.onStoreRefreshingChanged(isRefreshing) }
     LaunchedEffect(controller, enabled) { controller.onEnabledChanged(enabled) }
@@ -222,7 +229,8 @@ internal fun raftPullToRefreshGeometry(style: RaftPullToRefreshStyle, density: D
                     indicatorHoldPx = PullToRefreshDefaults.PositionalThreshold.toPx(),
                     coefficient = RaftMaterialRubberBandCoefficient,
                 )
-            RaftPullToRefreshStyle.Cupertino ->
+            RaftPullToRefreshStyle.Cupertino,
+            RaftPullToRefreshStyle.None ->
                 RaftPullToRefreshGeometry(
                     triggerPx = RaftCupertinoTrigger.toPx(),
                     indicatorHoldPx = RaftCupertinoHold.toPx(),

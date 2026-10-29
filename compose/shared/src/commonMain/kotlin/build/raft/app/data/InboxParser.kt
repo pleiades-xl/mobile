@@ -73,6 +73,11 @@ private data class WireInboxItem(
     val parentMessageSenderId: String? = null,
     // Followed-thread rows (channelService.ts FollowedThread): when the parent message was posted.
     val parentMessageCreatedAt: String? = null,
+    // Followed-thread rows (botiverse/slock #11517, routes/channels.ts GET /threads/followed):
+    // whether the parent message / a reply is inside the plan's history window, by the paywall's
+    // own cutoff. Absent from older servers.
+    val parentInHistory: Boolean? = null,
+    val repliesInHistory: Boolean? = null,
     val latestActivityPreview: String? = null,
     val latestActivitySenderType: String? = null,
     val latestActivitySenderId: String? = null,
@@ -123,6 +128,24 @@ private fun JsonElement.latestActivitySeqOrNull(): String? {
     if (pair.stringFieldOrNull("messageId").isNullOrBlank()) return null
     return pair.stringFieldOrNull("seq")?.takeIf(::isCanonicalActivitySeq)
 }
+
+/**
+ * The mark of an `InboxScopeReadFrontier` (botiverse/slock #11795,
+ * `packages/shared/src/inboxScopeReadFrontier.ts`): `{kind: "present", ..., markedUnread?: true}`.
+ * Read on its own so a malformed `latestActivity` never hides the mark, and a malformed mark never
+ * drops the row.
+ */
+@Serializable
+private data class WireInboxReadStateMark(
+    val kind: String? = null,
+    val markedUnread: Boolean? = null,
+)
+
+/** `readState.markedUnread`: only a present frontier that says `true` is marked. */
+private fun JsonElement.isMarkedUnreadFrontier(): Boolean =
+    runCatching { inboxJson.decodeFromJsonElement(WireInboxReadStateMark.serializer(), this) }
+        .getOrNull()
+        ?.let { it.kind == "present" && it.markedUnread == true } == true
 
 /** A JSON string value only: numbers, booleans, null and containers yield null. */
 private fun JsonObject.stringFieldOrNull(name: String): String? =
@@ -379,6 +402,7 @@ private fun WireInboxItem.toChannelOrDmDomain(diagnostics: (String) -> Unit): In
                 contract = MemberKindWireContract.InboxActor,
             ),
         readStateLatestActivitySeq = readState?.latestActivitySeqOrNull(),
+        markedUnread = readState?.isMarkedUnreadFrontier() == true,
         latestActivitySeq = latestActivitySeq?.takeIf(::isCanonicalActivitySeq),
         doneFrontierSeq = doneFrontierSeq,
         firstMentionMessageId = firstMentionMessageId?.takeIf { it.isNotBlank() }?.let(::MessageId),
@@ -406,6 +430,8 @@ private fun WireInboxItem.toThreadDomain(diagnostics: (String) -> Unit): InboxIt
         parentMessagePreview = parentMessagePreview,
         parentMessageSenderId = parentMessageSenderId,
         parentMessageCreatedAt = parentMessageCreatedAt?.takeIf { it.isNotBlank() },
+        parentInHistory = parentInHistory,
+        repliesInHistory = repliesInHistory,
         parentMessageSenderKind =
             parentMessageSenderType.toSenderKind(
                 source = "inbox_parent_message_sender",
@@ -437,6 +463,7 @@ private fun WireInboxItem.toThreadDomain(diagnostics: (String) -> Unit): InboxIt
         taskClaimedByName = taskClaimedByName,
         isFollowing = isFollowing,
         readStateLatestActivitySeq = readState?.latestActivitySeqOrNull(),
+        markedUnread = readState?.isMarkedUnreadFrontier() == true,
         latestActivitySeq = latestActivitySeq?.takeIf(::isCanonicalActivitySeq),
         doneFrontierSeq = doneFrontierSeq,
         firstMentionMessageId = firstMentionMessageId?.takeIf { it.isNotBlank() }?.let(::MessageId),

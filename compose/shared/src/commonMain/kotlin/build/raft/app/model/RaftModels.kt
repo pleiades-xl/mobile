@@ -386,6 +386,17 @@ data class MemberProfile(
     val presence: Presence = Presence.Offline,
     val agentStatus: AgentStatus? = null,
     /**
+     * The agent row's raw lifecycle `status` (`active` / `inactive` / `stopped` ...), trimmed and
+     * lowercased; null on humans and identity seeds. [agentStatus] deliberately reads `active` as
+     * unknown (it is lifecycle, not liveness), and the roster presence projection never turns it
+     * into a presence fact (it only logs it in its `skipped=` samples). Its one display use is
+     * the "Likely online" fallback (artin, #triage:#97; web botiverse/slock #11642): when the
+     * member status read finds no presence fact at all for a managed agent and this is `active`,
+     * it shows a green "Likely online" guess that any real fact replaces
+     * (`likelyOnlineMemberStatusOrNull` in SharedServerMembersStore).
+     */
+    val agentLifecycleStatus: String? = null,
+    /**
      * External agents (runtime `external`) have no managed liveness. Web keeps
      * `agent.external === true || runtime === "external"` as parallel sources
      * (agentStore.ts resolveAgentDisplayState); producers fold both via
@@ -753,6 +764,17 @@ data class TaskSummary(
     val channelType: String? = null,
     /** Task v2: the pre-v2 host message (its thread is the earlier discussion); null for a v2 task. */
     val hostMessageId: MessageId? = null,
+    /**
+     * Task v2: the message the task hangs under (slock `taskService.ts` `sourceMessageId`: the
+     * message it was created from, or a pre-v2 task's host message). Null: none (a channel-only
+     * task, or [sourceMessageReported] false: an older server or frame).
+     */
+    val sourceMessageId: MessageId? = null,
+    /**
+     * The DTO carried `sourceMessageId` (even as null). Web reads an explicit null as "hangs under no
+     * message" and only a missing field as "fall back to the host message".
+     */
+    val sourceMessageReported: Boolean = false,
     /** Task v2: the task's CANONICAL conversation channel (`channels.type = 'task'`), when it exists. */
     val conversationChannelId: ChannelId? = null,
     /** Task v2: the discussion is the task's own conversation (exists, or is created on first use). */
@@ -766,6 +788,8 @@ data class TaskSummary(
      * per-reader task lists carry it; `task:*` realtime frames do not, so null = unknown.
      */
     val conversationFollowed: Boolean? = null,
+    /** The task DTO's `createdAt` (ISO), as the server sent it; null from a source without it. */
+    val createdAt: String? = null,
 )
 
 // Inbox Models
@@ -935,7 +959,23 @@ data class MemberPresenceUpdated(
      * The agent is stuck on one tool call (the `toolStuck` carrier of `agent:activity`). The daemon
      * attaches it to every frame while that is true, so a frame without it means "not stuck".
      */
-    val toolStuck: AgentToolStuck? = null
+    val toolStuck: AgentToolStuck? = null,
+    /**
+     * From `agent:activity_state` (botiverse/slock 968d102d): the coarse state of the detailed frame with
+     * the same [serverSeq], without its label or entries. It never replaces that frame or a newer one
+     * (see `shouldReplaceRegisteredPresenceFact`).
+     */
+    val coarseState: Boolean = false
+) : RealtimeEvent
+
+/**
+ * `agent:activity:subscribed` (botiverse/slock 968d102d `socket/index.ts` `subscribeSocketToAgentActivity`): the
+ * answer to one `agent:activity:subscribe`, naming the ids this socket now gets detailed `agent:activity` for
+ * (ids it may not see are left out).
+ */
+@Serializable
+data class AgentActivitySubscribed(
+    val agentIds: List<String>
 ) : RealtimeEvent
 
 /**
@@ -1089,6 +1129,18 @@ data class SyncResumeResponse(
     val horizon: String? = null,
     /** More late messages qualified than the server sends: the client re-fetches its visible scope. */
     val horizonReset: Boolean = false,
+    /**
+     * Message storage Phase 3b: the raw-wire canonical decode of each message the response carries (in order; a
+     * row the decoder refuses is absent). The server's resume rows carry neither `conversationContext` nor
+     * `randomId` (slock `syncMessagesWithHorizon`), so these carries have no context and a null randomId: the
+     * durable writer supplies the context from the stored scope header. In-process only, never serialized.
+     */
+    @Transient val decodedCanonical: List<CanonicalMessageCarry> = emptyList(),
+    /**
+     * Phase 3b: one entry per row the canonical decode refused — its channel id when the row names one, else
+     * `null`. Those rows can never be stored, so the durable writer reports them as continuity holes.
+     */
+    @Transient val canonicalDecodeMisses: List<String?> = emptyList(),
 ) : RealtimeEvent
 
 @Serializable
@@ -1109,7 +1161,12 @@ data class PerReceiverReadStateScope(
     val scopeId: ChannelId,
     val maxReadSeq: Long?,
     val readStateVersion: Long,
-    val unreadCount: Int? = null
+    val unreadCount: Int? = null,
+    /**
+     * botiverse/slock #11795 (`emitReadStateUpdated[Bulk]`): the scope is marked unread with nothing
+     * countable ("unread, no number"). Sent only when true; a newer version without it clears the mark.
+     */
+    val markedUnread: Boolean = false
 )
 
 @Serializable

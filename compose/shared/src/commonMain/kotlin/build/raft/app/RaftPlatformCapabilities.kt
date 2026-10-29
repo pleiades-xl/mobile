@@ -1,10 +1,17 @@
 package build.raft.app
 
+import androidx.lifecycle.Lifecycle
 import build.raft.app.components.RaftPullToRefreshStyle
 import build.raft.app.data.PlatformFile
 
-/** The platform's own pull-to-refresh feel: Android = Material 3, iOS = UIRefreshControl-style. */
+/** The platform's own pull-to-refresh feel: Android = Material 3, iOS = UIRefreshControl-style, desktop = none. */
 internal expect fun raftPlatformPullToRefreshStyle(): RaftPullToRefreshStyle
+
+/**
+ * The host lifecycle state from which a page counts as shown (`RaftPagerHost`). Phones: RESUMED.
+ * Desktop: STARTED, since an unfocused but visible window is STARTED there.
+ */
+internal expect fun raftPlatformPageVisibleLifecycleState(): Lifecycle.State
 
 internal expect fun raftPlatformUsesNativeLucideIconRotation(): Boolean
 
@@ -206,3 +213,10 @@ internal expect fun raftPlatformTabPagerStartEdgeInsetDp(): Float
  * the whole Chat tab was left shifted sideways with its messages running off the screen edge.
  */
 internal expect fun raftPlatformTabPagerOverscrollEnabled(): Boolean
+
+/**
+ * Whether switching the phone bottom tabs plays Material's fade through
+ * ([build.raft.designsystem.motion.RaftMotion.fadeThrough]). Android only (artin 2026-10-29):
+ * iOS switches at once like its system tab bar, and desktop keeps its instant switch.
+ */
+internal expect fun raftPlatformAppShellTabFadeThrough(): Boolean

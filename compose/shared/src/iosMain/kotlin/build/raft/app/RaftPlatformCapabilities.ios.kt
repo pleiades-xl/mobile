@@ -9,11 +9,14 @@ import platform.CoreFoundation.kCFAllocatorDefault
 import platform.CoreFoundation.kCFStringEncodingUTF8
 import platform.Foundation.NSProcessInfo
 import platform.UIKit.UIApplication
+import androidx.lifecycle.Lifecycle
 import build.raft.app.components.RaftPullToRefreshStyle
 import build.raft.app.data.PlatformFile
 
 internal actual fun raftPlatformPullToRefreshStyle(): RaftPullToRefreshStyle =
     RaftPullToRefreshStyle.Cupertino
+
+internal actual fun raftPlatformPageVisibleLifecycleState(): Lifecycle.State = Lifecycle.State.RESUMED
 
 internal actual fun raftPlatformUsesNativeLucideIconRotation(): Boolean = false
 
@@ -131,3 +134,6 @@ internal actual fun raftPlatformTabPagerStartEdgeInsetDp(): Float = 0f
 
 /** Cupertino rubber band can stick at an offset when its spring is cancelled; see expect. */
 internal actual fun raftPlatformTabPagerOverscrollEnabled(): Boolean = false
+
+/** The system tab bar switches at once; see expect. */
+internal actual fun raftPlatformAppShellTabFadeThrough(): Boolean = false

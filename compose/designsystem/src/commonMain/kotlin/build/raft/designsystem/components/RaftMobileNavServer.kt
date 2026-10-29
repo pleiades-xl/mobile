@@ -26,7 +26,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import build.raft.designsystem.theme.LocalRaftContentColor
@@ -112,6 +114,12 @@ object RaftMobileNavDefaults {
     val LabelGap: Dp = 4.dp
     val LabelFontSize = 11.5.sp
     val LabelLineHeight = 14.sp
+
+    /**
+     * The smallest a label shrinks to before it truncates: a long one (ja 「アクティビティ」)
+     * steps down from [LabelFontSize] to fit its cell, as raft-ui's 10px label fits it on the web.
+     */
+    val LabelMinFontSize = 9.sp
 
     /**
      * The attention dot on the pill's top-right corner, from the slot's top-left: raft-ui `Status
@@ -274,7 +282,7 @@ fun RaftMobileNavItem(
             }
         }
         Spacer(Modifier.height(RaftMobileNavDefaults.LabelGap))
-        RaftMobileNavLabel(label, selected, enabled = enabled, readable = true)
+        RaftMobileNavLabel(label, selected, enabled = enabled, readable = true, shrinkToFit = true)
     }
 }
 
@@ -564,7 +572,8 @@ fun RaftMobileNavServerPopoverSeparator() {
  * an optional [leading] (a 20dp avatar or a 16dp icon), the [label] (one line, cut), an
  * optional [description] under it (the server's `/slug`, small muted mono; artin / Kirby
  * 10-22; raft-ui `MobileNavServerPopoverRowDescription` — the second line adds its height), then [trailing] (a check, a count). [current] sets the label bold and marks the row selected.
- * `brand-soft` while pressed, or while a held long press from the tab is over it ([key]).
+ * `brand-soft` while pressed or hovered by a mouse / trackpad, or while a held long press from
+ * the tab is over it ([key]).
  */
 @Composable
 fun RaftMobileNavServerPopoverRow(
@@ -582,14 +591,16 @@ fun RaftMobileNavServerPopoverRow(
     val colors = RaftTheme.colors
     val source = remember { MutableInteractionSource() }
     val held = enabled && state != null && key != null && state.highlightedKey == key
-    val highlighted = raftIsPressed(source) || held
+    // `hover:bg-brand-soft`, and while pressed or held over.
+    val overlay = rememberRaftStateOverlay(source, RaftHoverTier.Highlight, enabled = enabled, highlighted = held)
     val style = RaftTheme.typography.callout.copy(fontWeight = if (current) FontWeight.Bold else FontWeight.Medium)
     Row(
         modifier
             .fillMaxWidth()
             .heightIn(min = RaftOptionHeight)
             .then(if (state != null && key != null) Modifier.raftMobileNavServerPopoverTarget(state, key) else Modifier)
-            .background(if (highlighted) colors.brandSoft else Color.Transparent, RoundedCornerShape(RaftRadius.Chip))
+            .raftStateOverlay(overlay, RaftRadius.Chip)
+            .raftPointerHover(source)
             .clickable(source, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
             .semantics { if (current) this.selected = true }
             // raft-ui `py-option-inset`: a second line adds its own height and nothing else.
@@ -660,12 +671,14 @@ fun RowScope.RaftMobileNavServerPopoverDestination(
     val colors = RaftTheme.colors
     val source = remember { MutableInteractionSource() }
     val held = state != null && key != null && state.highlightedKey == key
-    val highlighted = raftIsPressed(source) || held
+    // `hover:bg-brand-soft`, and while pressed or held over.
+    val overlay = rememberRaftStateOverlay(source, RaftHoverTier.Highlight, highlighted = held)
     Box(
         modifier
             .weight(1f)
             .then(if (state != null && key != null) Modifier.raftMobileNavServerPopoverTarget(state, key) else Modifier)
-            .background(if (highlighted) colors.brandSoft else Color.Transparent, RoundedCornerShape(RaftRadius.Chip))
+            .raftStateOverlay(overlay, RaftRadius.Chip)
+            .raftPointerHover(source)
             .clickable(source, indication = null, role = Role.Button, onClick = onClick)
             .semantics(mergeDescendants = true) {
                 contentDescription = if (attention && attentionDescription != null) "$label, $attentionDescription" else label
@@ -746,16 +759,37 @@ private fun raftMobileNavServerWash(pressed: Boolean, open: Boolean): Color =
         else -> Color.Transparent
     }
 
-/** A tab label: `text-label` at 11.5/14, bold when selected, truncated; it keeps its size at any font scale. */
+/**
+ * A tab label: `text-label` at 11.5/14, bold when selected; it keeps its size at any font scale.
+ * With [shrinkToFit] (a tab's own name, not a server's) a label too long for its cell shrinks
+ * in 0.5sp steps down to 9sp, then truncates; without it, it truncates.
+ */
 @Composable
-private fun RaftMobileNavLabel(text: String, selected: Boolean, enabled: Boolean = true, readable: Boolean = false) {
+private fun RaftMobileNavLabel(
+    text: String,
+    selected: Boolean,
+    enabled: Boolean = true,
+    readable: Boolean = false,
+    shrinkToFit: Boolean = false,
+) {
     // Sized to the bar's fixed 58dp geometry: like a native tab bar it does not grow with the
     // system font size (it would run out of the bar).
-    val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+    val density = LocalDensity.current
+    val fontScale = density.fontScale.coerceAtLeast(1f)
+    val lineBox = with(density) { (RaftMobileNavDefaults.LabelLineHeight / fontScale).toDp() }
     RaftText(
         text = text,
         // The server tab names itself (its contentDescription); a plain tab is read by its label.
-        modifier = (if (readable) Modifier else Modifier.clearAndSetSemantics { }).padding(horizontal = 2.dp),
+        // The label takes the spec's 14dp line in the bar and centres its own text box on it,
+        // overflowing it like a CSS line box (artin 10-29). A CJK label's line is taller than
+        // 14sp whatever lineHeight says: Android sizes it from the CJK fallback font's
+        // ascent/descent (~1.45em, 16.7dp at 11.5sp). Squeezed into 14dp the text node clips to
+        // its bounds and cut the strokes under the baseline (主页 动态 任务 搜索).
+        modifier =
+            (if (readable) Modifier else Modifier.clearAndSetSemantics { })
+                .height(lineBox)
+                .wrapContentHeight(Alignment.CenterVertically, unbounded = true)
+                .padding(horizontal = 2.dp),
         style =
             RaftTheme.typography.label.copy(
                 fontSize = RaftMobileNavDefaults.LabelFontSize / fontScale,
@@ -771,6 +805,16 @@ private fun RaftMobileNavLabel(text: String, selected: Boolean, enabled: Boolean
         maxLines = 1,
         softWrap = false,
         overflow = TextOverflow.Ellipsis,
+        autoSize =
+            if (!shrinkToFit) {
+                null
+            } else {
+                TextAutoSize.StepBased(
+                    minFontSize = RaftMobileNavDefaults.LabelMinFontSize / fontScale,
+                    maxFontSize = RaftMobileNavDefaults.LabelFontSize / fontScale,
+                    stepSize = 0.5.sp / fontScale,
+                )
+            },
     )
 }
 

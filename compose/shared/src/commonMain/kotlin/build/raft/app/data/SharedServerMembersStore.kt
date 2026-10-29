@@ -25,6 +25,7 @@ import build.raft.app.raftAvatarDiagnosticsHash
 import build.raft.app.raftAvatarDiagnosticsSource
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -39,6 +40,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlinx.coroutines.sync.Mutex
@@ -130,7 +132,18 @@ data class SharedServerChannelMembersSlice(
     val status: SharedServerMembersLoadStatus = SharedServerMembersLoadStatus.Idle,
     val errorCode: String? = null,
     /** [ChannelMemberSnapshot.liveActivityAgentIds] of the response this slice holds. */
-    val liveActivityAgentIds: Set<String> = emptySet()
+    val liveActivityAgentIds: Set<String> = emptySet(),
+    /**
+     * The rows are the stored (offline) copy, not yet confirmed by the network: shown read-only (the
+     * permission flags stay false, so no add / remove / role action) until a fresh answer replaces them.
+     */
+    val storedStandIn: Boolean = false,
+    /**
+     * When the request this slice answers started (the offline cache's clock; 0 = unknown): its stored copy
+     * is written under this instant, so an older answer (another store's, or a late one) never replaces a
+     * newer one on disk.
+     */
+    val offlineAnswerStamp: Long = 0L
 ) {
     fun snapshotOrNull(): ChannelMemberSnapshot? =
         channelId.takeIf { it.isNotBlank() }?.let {
@@ -347,7 +360,15 @@ data class SharedServerMemberStatus(
      * `now - lastSeenAt < 120s` (web `EXTERNAL_AGENT_ONLINE_WINDOW_MS`).
      * Null on managed members.
      */
-    val lastSeenAt: String? = null
+    val lastSeenAt: String? = null,
+    /**
+     * No presence fact at all for this agent (realtime, roster, detail, historical, or one
+     * carried over a transport advance), only its lifecycle `status: "active"`: a display-only
+     * guess, shown green as "Likely online" so it reads apart from a server-sent Online
+     * (artin, #triage:#97; web botiverse/slock #11642 `AgentDisplayState.likelyOnline`).
+     * Produced only by [likelyOnlineMemberStatusOrNull]; never written into the registry.
+     */
+    val likelyOnline: Boolean = false
 )
 
 /**
@@ -355,6 +376,37 @@ data class SharedServerMemberStatus(
  * member's pre-connect status. It exists because [Presence] cannot express Unknown.
  */
 internal const val NeutralAgentStatusLabel = "—"
+
+/** Raw label of [SharedServerMemberStatus.likelyOnline]; UI localizes it (`member_row_status_likely_online`). */
+internal const val LikelyOnlineAgentStatusLabel = "Likely online"
+
+/**
+ * The display-only "Likely online" guess (artin, #triage:#97; web botiverse/slock #11642
+ * `resolveAgentDisplayState`), or null when it does not apply. Call it only when the member
+ * has no presence fact. It applies to a managed agent whose authoritative profile has
+ * lifecycle `active` and no runtime status of its own. Lifecycle is not liveness (an
+ * `active` agent can be not running), so this never feeds [normalizedAgentRuntimeStatus],
+ * the roster projection, or the registry; any real fact replaces it. `stopped` stays
+ * Offline through [MemberProfile.agentStatus]; an unknown or missing lifecycle keeps the
+ * neutral "—"; external agents keep their `lastSeenAt` tiers; App Bots and deleted agents
+ * get no guess.
+ */
+internal fun MemberProfile?.likelyOnlineMemberStatusOrNull(): SharedServerMemberStatus? {
+    val member = this ?: return null
+    if (member.kind != MemberKind.Agent || member.isExternal) return null
+    if (!member.managedByAppInstallId.isNullOrBlank()) return null
+    if (!member.agentDeletedAt.isNullOrBlank() || member.membershipStatus == "deleted") return null
+    if (member.agentStatus != null) return null
+    if (member.agentLifecycleStatus != "active") return null
+    return SharedServerMemberStatus(
+        status = null,
+        presence = Presence.Active,
+        statusLabel = LikelyOnlineAgentStatusLabel,
+        runtime = member.agentRuntimeOrNull(),
+        external = false,
+        likelyOnline = true
+    )
+}
 
 /** A scoped profile plus whether it came from an authoritative record or a message-author seed. */
 private data class ScopedMemberProfileResolution(
@@ -562,6 +614,12 @@ class SharedServerMembersStore internal constructor(
     /** Where [jointActors] runs its batches; required with [actorResolve]. */
     actorResolveScope: CoroutineScope? = null,
     /**
+     * Offline-first channel members (artin: everything fetched is stored locally): loaded channel slices
+     * are mirrored to disk (rows only, never permission flags) and read back as a read-only stand-in. Null
+     * keeps channel members memory-only (tests, fixtures).
+     */
+    private val channelMembersOffline: SharedChannelMembersOffline? = null,
+    /**
      * Incremental sync (`mobile_sync_changes_v0`) keeps this server's roster current: humans and
      * machines through the change log, agents through the (re)connect / foreground `/agents` read.
      * The provider answers with the same decision a (re)connect takes; tests and fixtures keep it off.
@@ -623,6 +681,145 @@ class SharedServerMembersStore internal constructor(
     private val deletedAgentIdsByServerId = MutableStateFlow<Map<String, Set<String>>>(emptyMap())
     private val _state = MutableStateFlow(SharedServerMembersState())
     val state: StateFlow<SharedServerMembersState> = _state.asStateFlow()
+
+    private val channelMembersMirror =
+        channelMembersOffline?.follow(
+            changes = _state.map { it.channelMemberSlices }.distinctUntilChanged(),
+            current = { _state.value.channelMemberSlices },
+        )
+
+    /** This store is gone (its shell closed): its offline mirror stops. */
+    internal fun dispose() {
+        channelMembersMirror?.cancel()
+    }
+
+    /**
+     * This store holds [channelId]'s list for its current owner (and for [expectedOwner], when given): loaded
+     * (never a stored stand-in that is not loading), or loading — a reload, a first load, or a cold open that
+     * shows the stored stand-in while its request runs. A loading list counts as held so that a
+     * `channel:members-updated` arriving meanwhile schedules a reload after it (the answer in flight may
+     * predate the change) instead of dropping the stored copy with nobody reloading.
+     */
+    internal fun holdsLoadedChannel(
+        serverId: ServerId,
+        channelId: ChannelId,
+        expectedOwner: AuthenticatedRouteOwner? = null,
+    ): Boolean {
+        val scope = currentChannelScope(serverId, channelId, expectedOwner) ?: return false
+        val binding = currentChannelMembersOwner(ServerId(scope.serverId)) ?: return false
+        val slice = _state.value.channelMemberSlices[scope]?.takeIf { it.ownerWriteGeneration == binding.writeGeneration }
+        return slice != null && slice.isHeldForMembersUpdated()
+    }
+
+    /** The channels of [serverId] this store holds (see [holdsLoadedChannel]) for its current owner. */
+    internal fun heldChannelIds(serverId: ServerId, expectedOwner: AuthenticatedRouteOwner? = null): Set<String> {
+        val binding = currentChannelMembersOwner(serverId) ?: return emptySet()
+        if (expectedOwner != null && !binding.matches(expectedOwner)) return emptySet()
+        return _state.value.channelMemberSlices
+            .asSequence()
+            .filter { (scope, slice) ->
+                scope.matches(binding) && slice.ownerWriteGeneration == binding.writeGeneration && slice.isHeldForMembersUpdated()
+            }
+            .map { (scope, _) -> scope.channelId }
+            .toSet()
+    }
+
+    /**
+     * The channels of [serverId] with a stored list for this store's current owner; null when this store has
+     * no owner for the server (or no offline mirror): another store must answer.
+     */
+    internal suspend fun storedChannelIds(serverId: ServerId, expectedOwner: AuthenticatedRouteOwner? = null): Set<String>? {
+        val offline = channelMembersOffline ?: return null
+        val binding = currentChannelMembersOwner(serverId) ?: return null
+        if (expectedOwner != null && !binding.matches(expectedOwner)) return null
+        return offline.storedChannelIds(binding.environmentId, binding.accountId, binding.serverId).toSet()
+    }
+
+    // Channel reloads asked by realtime `channel:members-updated`: scope -> "another one asked meanwhile".
+    private val channelReloadLock = SynchronizedObject()
+    private val channelReloads = mutableMapOf<SharedServerChannelMembersScope, Boolean>()
+
+    /**
+     * Reloads [channelId]'s list (realtime `channel:members-updated`). A burst coalesces: an event that
+     * arrives while a reload runs schedules exactly one more after it, so the last change is never missed.
+     * Every reload is pinned to the owner (account) the list was held for: after an account switch it is
+     * refused, never sent for the new account.
+     */
+    internal suspend fun reloadLoadedChannel(
+        serverId: ServerId,
+        channelId: ChannelId,
+        expectedOwner: AuthenticatedRouteOwner? = null,
+    ) {
+        if (!holdsLoadedChannel(serverId, channelId, expectedOwner)) return
+        val scope = currentChannelScope(serverId, channelId, expectedOwner) ?: return
+        val owner = AuthenticatedRouteOwner(environmentId = scope.environmentId, accountId = scope.accountId, serverId = scope.serverId)
+        val starts =
+            synchronized(channelReloadLock) {
+                if (scope in channelReloads) {
+                    channelReloads[scope] = true
+                    false
+                } else {
+                    channelReloads[scope] = false
+                    true
+                }
+            }
+        if (!starts) return
+        try {
+            while (true) {
+                loadChannelMembers(owner, ChannelId(scope.channelId), DataRequestPriority.Background, force = true)
+                val again =
+                    synchronized(channelReloadLock) {
+                        (channelReloads[scope] == true).also { again ->
+                            if (again) channelReloads[scope] = false else channelReloads.remove(scope)
+                        }
+                    }
+                if (!again) break
+                // The queued reload only while the list is still held: a lost channel (403 / 404 dropped it), a
+                // failure, or an account switch meanwhile ends it (no second request, no re-created slice).
+                if (!holdsLoadedChannel(ServerId(scope.serverId), ChannelId(scope.channelId), owner)) {
+                    synchronized(channelReloadLock) { channelReloads.remove(scope) }
+                    break
+                }
+            }
+        } catch (error: Throwable) {
+            // Failed / cancelled: the next event starts afresh.
+            synchronized(channelReloadLock) { channelReloads.remove(scope) }
+            throw error
+        }
+    }
+
+    /**
+     * Drops [channelId]'s stored list (no store holds it; the viewer may no longer belong to it). False when
+     * this store has no owner for the server, or not [expectedOwner] (another store must do it).
+     */
+    internal suspend fun forgetStoredChannel(
+        serverId: ServerId,
+        channelId: ChannelId,
+        expectedOwner: AuthenticatedRouteOwner? = null,
+    ): Boolean {
+        val scope = currentChannelScope(serverId, channelId, expectedOwner) ?: return false
+        val offline = channelMembersOffline ?: return false
+        offline.forget(scope)
+        return true
+    }
+
+    private fun currentChannelScope(
+        serverId: ServerId,
+        channelId: ChannelId,
+        expectedOwner: AuthenticatedRouteOwner?,
+    ): SharedServerChannelMembersScope? =
+        currentChannelScope(serverId, channelId)?.takeIf { scope ->
+            expectedOwner == null ||
+                (scope.environmentId == expectedOwner.environmentId &&
+                    scope.accountId == expectedOwner.accountId &&
+                    scope.serverId == expectedOwner.serverId)
+        }
+
+    private fun currentChannelScope(serverId: ServerId, channelId: ChannelId): SharedServerChannelMembersScope? {
+        val serverKey = serverId.value.normalizedServerMembersId() ?: return null
+        val channelKey = channelId.value.normalizedServerMembersId() ?: return null
+        return currentChannelMembersOwner(ServerId(serverKey))?.scope(ChannelId(channelKey))
+    }
 
     // task #136 read edges: state carries wire-truth rosters ONLY; presence
     // is baked in AT READ TIME from the process registry's owner partition —
@@ -808,6 +1005,8 @@ class SharedServerMembersStore internal constructor(
         val channelMember =
             currentOwnerChannelMemberSlices(serverId)
                 .asSequence()
+                // A stored stand-in's rows are no authority (presence / liveness are not stored).
+                .filterNot { it.storedStandIn }
                 .flatMap { it.members.asSequence() }
                 .firstOrNull { it.id.value.trim() == memberId }
         if (channelMember != null) return ScopedMemberProfileResolution(channelMember, authoritative = true)
@@ -1038,9 +1237,15 @@ class SharedServerMembersStore internal constructor(
     ): SharedServerMemberStatus? {
         val member = resolution.profile
         val presenceFact = presenceOwnerSnapshot.facts[memberId]
+        if (presenceFact == null && resolution.authoritative) {
+            // No fact at all (a carried-over fact is still a fact): an `active` managed agent
+            // reads "Likely online" rather than neutral or Offline (artin, #triage:#97).
+            member.likelyOnlineMemberStatusOrNull()?.let { return it }
+        }
         return if (presenceOwnerSnapshot.transport != null && presenceFact == null) {
-            // A native reconnect retired the profile's pre-connect status.
-            // Publish an explicit neutral resolution (rather than null,
+            // A native transport is live and this member has no fact at all
+            // (a reconnect carries known facts over, so this is a member never
+            // observed in the registry). Publish an explicit neutral resolution (rather than null,
             // which UI consumers interpret as permission to fall back to
             // the stale profile) until the request-fenced forced roster
             // refresh, current detail, or realtime repopulates this member.
@@ -1400,6 +1605,8 @@ class SharedServerMembersStore internal constructor(
         }
         // Tenny rule 2: the durable roster forgets the member too, so a cold start cannot bring it back.
         channelOwner?.let { owner -> durableStore?.removeMemberAsync(owner.durableKey(), memberKey) }
+        // ... and so do the stored channel member lists of this server, loaded in this process or not.
+        channelOwner?.let { owner -> channelMembersOffline?.removeMemberEverywhere(owner.accountId, serverKey, memberKey, memberKind) }
         if (!changed) return false
         _state.value =
             current.copy(
@@ -1549,7 +1756,8 @@ class SharedServerMembersStore internal constructor(
                     request = presenceRequest,
                     serverId = key,
                     profiles = fetched,
-                    completesRosterRefill = true
+                    completesRosterRefill = true,
+                    filteredOut = agents.rosterPresenceFilteredOut(fetched)
                 )
                 var current = false
                 val snapshot =
@@ -2264,7 +2472,13 @@ class SharedServerMembersStore internal constructor(
                                 unchanged.data.members
                                     .filterServerRosterMembers(normalizedKey)
                                     .filterDeletedAgents(normalizedKey),
-                            completesRosterRefill = true
+                            completesRosterRefill = true,
+                            filteredOut =
+                                unchanged.data.members.rosterPresenceFilteredOut(
+                                    unchanged.data.members
+                                        .filterServerRosterMembers(normalizedKey)
+                                        .filterDeletedAgents(normalizedKey)
+                                )
                         )
                     }
                     processResult.result.map { Unit }
@@ -2291,7 +2505,8 @@ class SharedServerMembersStore internal constructor(
                                 request = rosterPresenceRequestForResult,
                                 serverId = normalizedKey,
                                 profiles = snapshot.members,
-                                completesRosterRefill = true
+                                completesRosterRefill = true,
+                                filteredOut = result.data.members.rosterPresenceFilteredOut(snapshot.members)
                             )
                             cacheProfiles(normalizedKey, snapshot.members)
                             // task #344 evidence lane: if this roster refresh replaced a member's
@@ -2571,30 +2786,57 @@ class SharedServerMembersStore internal constructor(
         request: ProcessPresenceRosterProjectionRequest?,
         serverId: String,
         profiles: List<MemberProfile>,
-        completesRosterRefill: Boolean = false
+        completesRosterRefill: Boolean = false,
+        filteredOut: List<MemberProfile> = emptyList()
     ) {
         if (request == null || request.owner.serverId != serverId) return
         if (completesRosterRefill) presenceRegistry.completeRosterRefill(request)
+        val diagnostics = if (completesRosterRefill) RosterPresenceProjectionDiagnostics() else null
         profiles.forEach { profile ->
+            if (profile.kind != MemberKind.Agent) return@forEach
+            val memberId = profile.id.value.trim()
+            if (!profile.agentDeletedAt.isNullOrBlank()) {
+                diagnostics?.deleted?.add(memberId)
+                return@forEach
+            }
+            // No usable roster status (e.g. lifecycle `active` with no runtime activity, which is
+            // not liveness — Tenny, PR #3856): write nothing. The registry keeps the member's
+            // fact carried over the transport advance, if any; with none it stays unknown.
             val status =
-                profile.agentStatus
-                    ?.takeIf {
-                        profile.kind == MemberKind.Agent &&
-                            profile.agentDeletedAt.isNullOrBlank()
-                    }
-                    ?: return@forEach
+                profile.agentStatus ?: run {
+                    diagnostics?.skipped?.add("$memberId:${profile.agentLifecycleStatus ?: "none"}")
+                    return@forEach
+                }
             val memberRequest = request.memberRequest(profile.id.value) ?: return@forEach
+            if (status.presence == Presence.Offline) diagnostics?.offline?.add(memberId)
+            diagnostics?.let { it.projected += 1 }
             presenceRegistry.applyProjection(
                 request = memberRequest,
                 event =
                     MemberPresenceUpdated(
                         memberId = profile.id,
-                        presence = profile.presence,
+                        presence = status.presence,
                         kind = MemberKind.Agent,
                         agentStatus = status,
                         statusLabel = status.label,
                         serverSeq = null
                     )
+            )
+        }
+        if (diagnostics != null) {
+            val filteredAgents = filteredOut.filter { it.kind == MemberKind.Agent }
+            val retained = presenceRegistry.carriedOverMemberIds(request.owner).sorted()
+            logger(
+                "roster_presence_projection serverId=$serverId agents=${profiles.count { it.kind == MemberKind.Agent }} " +
+                    "projected=${diagnostics.projected} " +
+                    "offline=${diagnostics.offline.size}${diagnostics.offline.rosterPresenceSample()} " +
+                    "retained=${retained.size}${retained.rosterPresenceSample()} " +
+                    "skipped=${diagnostics.skipped.size}${diagnostics.skipped.rosterPresenceSample()} " +
+                    "deleted=${diagnostics.deleted.size}${diagnostics.deleted.rosterPresenceSample()} " +
+                    "filtered=${filteredAgents.size}" +
+                    filteredAgents
+                        .map { "${it.id.value.trim()}:${it.serverId?.value?.trim().orEmpty().ifBlank { "none" }}" }
+                        .rosterPresenceSample()
             )
         }
     }
@@ -2653,9 +2895,27 @@ class SharedServerMembersStore internal constructor(
                 return@withLock DataResult.Content(it)
             }
             val previous = _state.value.channelMemberSlices[scope]
-            val previousForBinding = previous?.takeIf {
+            val previousInMemory = previous?.takeIf {
                 it.ownerWriteGeneration == admittedBinding.writeGeneration
             }
+            // Offline-first: nothing in memory for this channel yet: the stored rows stand in, read-only.
+            val previousForBinding =
+                if (previousInMemory == null || (previousInMemory.members.isEmpty() && previousInMemory.status != SharedServerMembersLoadStatus.Loaded)) {
+                    channelMembersOffline?.read(scope)?.let { stored ->
+                        SharedServerChannelMembersSlice(
+                            environmentId = scope.environmentId,
+                            accountId = scope.accountId,
+                            serverId = scope.serverId,
+                            channelId = scope.channelId,
+                            ownerWriteGeneration = admittedBinding.writeGeneration,
+                            members = authoritativeProfilesForPublication(key = serverKey, profiles = stored.members.filterDeletedAgents(serverKey)),
+                            externalMembers = stored.externalMembers,
+                            storedStandIn = true,
+                        )
+                    } ?: previousInMemory
+                } else {
+                    previousInMemory
+                }
             putChannelSlice(
                 scope,
                 (previousForBinding ?: SharedServerChannelMembersSlice(
@@ -2686,6 +2946,7 @@ class SharedServerMembersStore internal constructor(
                             writeGeneration = write.writeGeneration
                         )
                     }
+            val answerStamp = channelMembersOffline?.now() ?: 0L
             val result =
                 try {
                     memberRepository.getChannelMembers(priority, ChannelId(channelKey))
@@ -2723,6 +2984,8 @@ class SharedServerMembersStore internal constructor(
                                     .distinctBy { "${it.kind.name}:${it.id.value.trim()}" }
                                     .filterDeletedAgents(serverKey)
                         )
+                    // A fresh answer: the offline mirror may store this channel again (after a lost-access drop).
+                    channelMembersOffline?.reopen(normalizedScope)
                     putChannelSlice(
                         normalizedScope,
                         SharedServerChannelMembersSlice(
@@ -2738,7 +3001,8 @@ class SharedServerMembersStore internal constructor(
                             canAddMembersKnown = true,
                             status = SharedServerMembersLoadStatus.Loaded,
                             errorCode = null,
-                            liveActivityAgentIds = result.data.liveActivityAgentIds
+                            liveActivityAgentIds = result.data.liveActivityAgentIds,
+                            offlineAnswerStamp = answerStamp
                         )
                     )
                     if (normalizedScope != scope) removeChannelSlice(scope)
@@ -2782,20 +3046,29 @@ class SharedServerMembersStore internal constructor(
                                     ?: false,
                             canAddMembersKnown = previousForBinding?.canAddMembersKnown == true,
                             status = SharedServerMembersLoadStatus.Loaded,
-                            errorCode = null
+                            errorCode = null,
+                            offlineAnswerStamp = answerStamp
                         )
                     )
                     logger("shared_server_channel_members_load_result serverId=$serverKey channelId=$channelKey result=empty")
                 }
                 is DataResult.Error -> {
-                    markChannelFailure(scope, previousForBinding, result.error.code)
+                    if (result.isConversationAccessLost()) {
+                        dropLostChannel(scope, result.error.code)
+                    } else {
+                        markChannelFailure(scope, previousForBinding, result.error.code)
+                    }
                     logger(
                         "shared_server_channel_members_load_result serverId=$serverKey " +
                             "channelId=$channelKey result=error code=${result.error.code}"
                     )
                 }
                 is DataResult.NoPermission -> {
-                    markChannelFailure(scope, previousForBinding, result.blocker.code)
+                    if (result.isConversationAccessLost()) {
+                        dropLostChannel(scope, result.blocker.code)
+                    } else {
+                        markChannelFailure(scope, previousForBinding, result.blocker.code)
+                    }
                     logger(
                         "shared_server_channel_members_load_result serverId=$serverKey " +
                             "channelId=$channelKey result=no_permission code=${result.blocker.code}"
@@ -2965,6 +3238,8 @@ class SharedServerMembersStore internal constructor(
         val slice = _state.value.channelMemberSlices[scope] ?: return null
         if (slice.ownerWriteGeneration != ownerWriteGeneration) return null
         if (slice.status != SharedServerMembersLoadStatus.Loaded) return null
+        // The stored stand-in (even when a realtime patch touched it) is no answer: load.
+        if (slice.storedStandIn) return null
         if (
             slice.hasPeerServerPresenceAgents(scope.serverId) &&
             channelPeerPresenceTransports[scope] != currentPresenceTransport(ServerId(scope.serverId))
@@ -3356,6 +3631,27 @@ class SharedServerMembersStore internal constructor(
         )
     }
 
+    /**
+     * Lost access to the channel (non-auth 403 / 404): its rows leave memory and disk, so neither the
+     * page nor a cold start shows them again. Caller holds [mutex].
+     */
+    private suspend fun dropLostChannel(scope: SharedServerChannelMembersScope, code: String) {
+        val current = _state.value.channelMemberSlices[scope]
+        putChannelSlice(
+            scope,
+            SharedServerChannelMembersSlice(
+                environmentId = scope.environmentId,
+                accountId = scope.accountId,
+                serverId = scope.serverId,
+                channelId = scope.channelId,
+                ownerWriteGeneration = current?.ownerWriteGeneration ?: 0L,
+                status = SharedServerMembersLoadStatus.Error,
+                errorCode = code,
+            )
+        )
+        channelMembersOffline?.forget(scope)
+    }
+
     private fun markChannelFailure(
         scope: SharedServerChannelMembersScope,
         previous: SharedServerChannelMembersSlice?,
@@ -3506,6 +3802,9 @@ class SharedServerMembersStore internal constructor(
         }
         durableStore?.evictServer(key, binding?.accountId)
         avatarRefStore?.forgetServer(key)
+        // The offline mirror forgets what it stored there (the rows go with the server's offline wipe), so a
+        // regained server's unchanged lists are stored again.
+        channelMembersOffline?.forgetServer(key)
         logger("shared_server_members_drop_server serverId=$key")
     }
 
@@ -3649,8 +3948,9 @@ class SharedServerMembersStore internal constructor(
             scope,
             current.copy(
                 members = nextMembers,
-                status = SharedServerMembersLoadStatus.Loaded,
-                errorCode = null
+                // A stand-in stays a stand-in (not a loaded answer) until its load answers.
+                status = if (current.storedStandIn) current.status else SharedServerMembersLoadStatus.Loaded,
+                errorCode = if (current.storedStandIn) current.errorCode else null
             )
         )
     }
@@ -3670,8 +3970,8 @@ class SharedServerMembersStore internal constructor(
             scope,
             current.copy(
                 members = current.members.removeServerMember(memberId, memberKind),
-                status = SharedServerMembersLoadStatus.Loaded,
-                errorCode = null
+                status = if (current.storedStandIn) current.status else SharedServerMembersLoadStatus.Loaded,
+                errorCode = if (current.storedStandIn) current.errorCode else null
             )
         )
     }
@@ -3867,6 +4167,24 @@ private fun MemberProfile.mergeSeedProfile(seed: MemberProfile): MemberProfile {
     )
 }
 
+/** Agents of a roster read that its server/deleted filters kept out of [kept] (diagnostics only). */
+private fun List<MemberProfile>.rosterPresenceFilteredOut(kept: List<MemberProfile>): List<MemberProfile> {
+    val keptIds = kept.mapTo(HashSet()) { it.id.value.trim() }
+    return filter { it.kind == MemberKind.Agent && it.id.value.trim() !in keptIds }
+}
+
+private class RosterPresenceProjectionDiagnostics {
+    var projected: Int = 0
+    val offline = mutableListOf<String>()
+    val skipped = mutableListOf<String>()
+    val deleted = mutableListOf<String>()
+}
+
+private const val RosterPresenceDiagnosticSampleLimit = 20
+
+private fun List<String>.rosterPresenceSample(): String =
+    if (isEmpty()) "" else take(RosterPresenceDiagnosticSampleLimit).joinToString(",", prefix = "[", postfix = "]")
+
 private fun MemberProfile.withoutVolatileStatus(): MemberProfile =
     if (kind == MemberKind.Agent) {
         copy(presence = Presence.Offline, agentStatus = null)
@@ -3896,9 +4214,15 @@ private fun MemberProfile.mergeAuthoritativeProfile(incoming: MemberProfile): Me
         return statusMerged
     }
     // A pixel/fallback avatar is a render candidate, not authoritative identity. It may
-    // populate an empty slot, but it must never erase a concrete URL learned earlier.
+    // populate an empty slot, but it must never erase a concrete URL learned earlier. A cached
+    // pixel avatar is not a concrete URL: the agent's new pixel avatar replaces it (an agent set
+    // from `pixel:antenna` to `pixel:pencil` on the web kept the antenna, even across restarts,
+    // as the durable roster re-seeded it — Edgar, artin 10-29).
     if (incomingAvatar !is AvatarReference.Url &&
-        ((this.avatar as? AvatarReference.Url) != null || !this.avatarUrl.isNullOrBlank())
+        (
+            (this.avatar as? AvatarReference.Url) != null ||
+                (!this.avatarUrl.isNullOrBlank() && !this.avatarUrl.trim().startsWith("pixel:"))
+            )
     ) {
         return statusMerged.copy(
             avatarUrl = this.avatarUrl,
@@ -4121,3 +4445,62 @@ internal const val SharedServerMembersSupersededFlightRetries = 2
 
 /** Wait before the one retry of a failed reconnect roster refill (Hands 81ad5dae). */
 internal val SharedServerMembersPresenceRefillRetryDelay: Duration = 3.seconds
+
+/**
+ * Realtime `channel:members-updated` for [channelId] across every members store of the process: each store
+ * holding the list (loaded, or loading) reloads it (a viewer removed from the channel then gets the
+ * lost-access drop); only when NO store holds it is the stored copy dropped (the viewer may no longer belong
+ * to the channel; its next open loads afresh). Decided over all stores so the order they are visited in never
+ * matters.
+ *
+ * [channelId] null (an event without a channel, as ThreadPage reads it: every channel): the same, for every
+ * list of the server any store holds or has stored. [expectedOwner]: the account + server the event arrived
+ * for (captured before it left the realtime delivery path); a store whose owner is no longer it does nothing.
+ */
+internal suspend fun applyChannelMembersUpdated(
+    stores: List<SharedServerMembersStore>,
+    serverId: ServerId,
+    channelId: ChannelId?,
+    expectedOwner: AuthenticatedRouteOwner? = null,
+) {
+    if (channelId != null) {
+        applyChannelMembersUpdatedTo(stores, serverId, channelId, expectedOwner)
+        return
+    }
+    val channels =
+        buildSet {
+            stores.forEach { addAll(it.heldChannelIds(serverId, expectedOwner)) }
+            for (store in stores) {
+                val stored = store.storedChannelIds(serverId, expectedOwner) ?: continue
+                addAll(stored)
+                break
+            }
+        }
+    coroutineScope {
+        channels.forEach { channel ->
+            launch { applyChannelMembersUpdatedTo(stores, serverId, ChannelId(channel), expectedOwner) }
+        }
+    }
+}
+
+private suspend fun applyChannelMembersUpdatedTo(
+    stores: List<SharedServerMembersStore>,
+    serverId: ServerId,
+    channelId: ChannelId,
+    expectedOwner: AuthenticatedRouteOwner?,
+) {
+    val held = stores.filter { it.holdsLoadedChannel(serverId, channelId, expectedOwner) }
+    if (held.isEmpty()) {
+        // Through the first store that has an owner for the server (and the offline mirror).
+        for (store in stores) {
+            if (store.forgetStoredChannel(serverId, channelId, expectedOwner)) break
+        }
+    } else {
+        held.forEach { it.reloadLoadedChannel(serverId, channelId, expectedOwner) }
+    }
+}
+
+/** Loaded (not a stand-in), or loading (stand-in or not): a `channel:members-updated` reloads it. */
+private fun SharedServerChannelMembersSlice.isHeldForMembersUpdated(): Boolean =
+    status == SharedServerMembersLoadStatus.InFlight ||
+        (status == SharedServerMembersLoadStatus.Loaded && !storedStandIn)

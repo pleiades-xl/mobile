@@ -2,10 +2,10 @@
 // Regenerate: python3 tools/design-tokens/gen_tokens.py
 // Sources (tools/design-tokens/manifest.json):
 //   npm:tailwindcss@4.3.3/theme.css sha256=443d7af364200f8e
-//   npm:@botiverse/raft-ui@0.37.0/dist/styles.css sha256=48f3861f4a9c26d5
-//   npm:@botiverse/raft-ui@0.37.0/dist/foundation.css sha256=a82f6e5ffffc2bf8
-//   npm:@botiverse/raft-ui@0.37.0/dist/themes.css sha256=d676bb4b3ad783cf
-//   botiverse/slock@6924ec3a016ebfc956d58863f81046d59d07c05c:packages/web/src/index.css sha256=c8226ab77a793855
+//   npm:@botiverse/raft-ui@0.50.0/dist/styles.css sha256=1dfba2b73642ba49
+//   npm:@botiverse/raft-ui@0.50.0/dist/foundation.css sha256=b298725e92892e88
+//   npm:@botiverse/raft-ui@0.50.0/dist/themes.css sha256=d676bb4b3ad783cf
+//   botiverse/slock@871828d991815c2a8689edcc90f3743b108bb347:packages/web/src/index.css sha256=c9b192deb9f391fb
 
 package build.raft.app.designtokens
 
@@ -1177,6 +1177,8 @@ internal object RaftUiPalette {
     val selected = Color(0xFFFFD440)
     /** `--sticker-ink` */
     val stickerInk = Color(0xFF141111)
+    /** `--sticker-ink-medium` */
+    val stickerInkMedium = Color(0x0FFFFFFF)
     /** `--sticker-medium` */
     val stickerMedium = Color(0x1A141111)
     /** `--sticker-paper` */
@@ -1273,6 +1275,12 @@ internal sealed class RaftUiThemeColors {
     abstract val dangerSoft: Color
     /** `--danger-strong` */
     abstract val dangerStrong: Color
+    /** `--fill-cell-hover` */
+    abstract val fillCellHover: Color
+    /** `--fill-cell-press` */
+    abstract val fillCellPress: Color
+    /** `--fill-cell-selected` */
+    abstract val fillCellSelected: Color
     /** `--fill-frame-medium` */
     abstract val fillFrameMedium: Color
     /** `--fill-frame-pressed` */
@@ -1399,6 +1407,8 @@ internal sealed class RaftUiThemeColors {
     abstract val lineSeam: Color
     /** `--line-strong` */
     abstract val lineStrong: Color
+    /** `--presence-busy-soft` */
+    abstract val presenceBusySoft: Color
     /** `--primary-400` */
     abstract val primary400: Color
     /** `--primary-active` */
@@ -1453,6 +1463,8 @@ internal sealed class RaftUiThemeColors {
     abstract val taskStatusTodoSoft: Color
     /** `--task-status-todo-strong` */
     abstract val taskStatusTodoStrong: Color
+    /** `--warning-graphic` */
+    abstract val warningGraphic: Color
     /** `--warning-muted` */
     abstract val warningMuted: Color
     /** `--warning-soft` */
@@ -1480,6 +1492,9 @@ internal sealed class RaftUiThemeColors {
         override val dangerMuted = Color(0xFFFBBDB9)
         override val dangerSoft = Color(0xFFFDDEDD)
         override val dangerStrong = Color(0xFFB5321A)
+        override val fillCellHover = Color(0x0A141111)
+        override val fillCellPress = Color(0x14141111)
+        override val fillCellSelected = Color(0xFFD7F2FE)
         override val fillFrameMedium = Color(0x1A141111)
         override val fillFramePressed = Color(0x1A141111)
         override val fillMedium = Color(0x14141111)
@@ -1543,6 +1558,7 @@ internal sealed class RaftUiThemeColors {
         override val lineMuted = Color(0x26141111)
         override val lineSeam = Color(0x73141111)
         override val lineStrong = Color(0xFF141111)
+        override val presenceBusySoft = Color(0xFFFFF0BD)
         override val primary400 = Color(0xFFFFD440)
         override val primaryActive = Color(0xFFE8C13B)
         override val primaryEdge = Color(0xFF141111)
@@ -1570,6 +1586,7 @@ internal sealed class RaftUiThemeColors {
         override val taskStatusTodo = Color(0xFFF8A16F)
         override val taskStatusTodoSoft = Color(0xFFFDE6DE)
         override val taskStatusTodoStrong = Color(0xFF5B310F)
+        override val warningGraphic = Color(0xFFD66919)
         override val warningMuted = Color(0xFFFBD1C0)
         override val warningSoft = Color(0xFFFDE6DE)
         override val warningStrong = Color(0xFF5B310F)
@@ -1595,6 +1612,9 @@ internal sealed class RaftUiThemeColors {
         override val dangerMuted = Color(0x4CD33C30)
         override val dangerSoft = Color(0x2EC93126)
         override val dangerStrong = Color(0xFFF8A49D)
+        override val fillCellHover = Color(0x13FAFAF7)
+        override val fillCellPress = Color(0x1FFAFAF7)
+        override val fillCellSelected = Color(0x61005F7A)
         override val fillFrameMedium = Color(0x0FFAFAF7)
         override val fillFramePressed = Color(0x0FFAFAF7)
         override val fillMedium = Color(0x11FAFAF7)
@@ -1658,6 +1678,7 @@ internal sealed class RaftUiThemeColors {
         override val lineMuted = Color(0x1AFAFAF7)
         override val lineSeam = Color(0x42FAFAF7)
         override val lineStrong = Color(0xFFE5E5E2)
+        override val presenceBusySoft = Color(0x33876F1F)
         override val primary400 = Color(0xFFFFD440)
         override val primaryActive = Color(0xFFE8C13B)
         override val primaryEdge = Color(0xFF141111)
@@ -1685,6 +1706,7 @@ internal sealed class RaftUiThemeColors {
         override val taskStatusTodo = Color(0xFFFF6900)
         override val taskStatusTodoSoft = Color(0x2E9E511E)
         override val taskStatusTodoStrong = Color(0xFFFFAF76)
+        override val warningGraphic = Color(0xFFF89961)
         override val warningMuted = Color(0x47AC571D)
         override val warningSoft = Color(0x2E9E511E)
         override val warningStrong = Color(0xFFFFAF76)

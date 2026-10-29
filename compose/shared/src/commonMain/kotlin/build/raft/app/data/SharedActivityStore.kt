@@ -44,14 +44,18 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.Serializable
+import kotlin.time.Clock
 import kotlin.time.TimeSource
 
 private const val SharedActivityPageSize = 30
@@ -71,6 +75,29 @@ private data class ActivityRealtimeHighWater(
 )
 
 private data class ActivityRealtimeCatchUpTarget(val channelId: ChannelId, val seq: String)
+
+/**
+ * A canonical refresh read ([SharedActivityStore.loadCanonicalDepth]). [partialFailureCode] is set
+ * when a page after the first failed: [result] then holds the rows fetched before it.
+ */
+private data class ActivityCanonicalDepthResult(
+    val result: DataResult<InboxSnapshot>,
+    val partialFailureCode: String? = null
+)
+
+/**
+ * How long a pull joins a foreground refresh already in flight instead of restarting it. Older
+ * loads may have hung across a background (see [ActivityRefreshCoalesceWindowMillis]); the pull
+ * then supersedes them.
+ */
+internal const val ActivityPullJoinsInFlightRefreshWindowMillis: Long = 10_000L
+
+/**
+ * Ticket 67609860 (artin): a visible-route Refresh shows the Activity header indicator only when
+ * the rows shown were last read at least this long ago (wall clock), like the app shell's
+ * [build.raft.app.AppShellResumeStaleRefreshMillis] resume backstop.
+ */
+internal const val ActivityHeaderRefreshStaleAfterMillis: Long = 60_000L
 
 private data class ActivityRealtimeReconcileResult(
     val items: List<InboxItem>,
@@ -129,6 +156,11 @@ class SharedActivityStore internal constructor(
     /** Workspace Artifacts: Done / Undo / Read / Unfollow on object rows. Null: those writes refresh instead. */
     private val activityObjectsRepository: ActivityObjectsRepository? = null,
     onUnreadCountsChanged: () -> Unit = {},
+    /**
+     * Web #11687: how a thread's Unfollow from Activity ends, for Home's followed-thread unread
+     * (the panel clears it when the person unfollows; this confirms or restores it).
+     */
+    onThreadUnfollowProjection: (SharedHomeIntent.ProjectThreadUnfollow) -> Unit = {},
     onSummaryFact: (ActivityUnreadSummaryFact) -> Unit = {},
     onSummaryInvalidated: (ActivityUnreadSummaryInvalidation) -> Unit = {},
     private val scope: CoroutineScope,
@@ -137,6 +169,11 @@ class SharedActivityStore internal constructor(
     private val realtimeBackgroundRefreshIntervalMillis: Long = ActivityRealtimeBackgroundRefreshIntervalMillis,
     /** Monotonic clock for the throttle window and the local Done/read hold; injectable for virtual time. */
     private val nowMillis: () -> Long = activityMonotonicClock(),
+    /**
+     * Wall clock for [ActivityHeaderRefreshStaleAfterMillis]: the monotonic clock does not advance
+     * while an iOS device sleeps, and the resume after a suspension is the refresh that must show.
+     */
+    private val nowEpochMillis: () -> Long = { Clock.System.now().toEpochMilliseconds() },
     /** See [ActivityRefreshCoalesceWindowMillis]. */
     private val refreshCoalesceWindowMillis: Long = ActivityRefreshCoalesceWindowMillis,
     /** Task #164: the backoff of the stale-Activity recovery read; injectable for virtual time. */
@@ -149,6 +186,10 @@ class SharedActivityStore internal constructor(
 ) {
     private val _state = raftStoreState(SharedActivityState(), "SharedActivityStore")
     val state: StateFlow<SharedActivityState> = _state.asStateFlow()
+    private val _readToggleNotices = MutableSharedFlow<RaftReadToggleNotice>(extraBufferCapacity = 4)
+
+    /** One-shot notices of the row read toggles (the page shows them as a toast). */
+    val readToggleNotices: SharedFlow<RaftReadToggleNotice> = _readToggleNotices.asSharedFlow()
     internal val presentationStore = SharedActivityPresentationStore()
 
     private var loadJob: Job? = null
@@ -164,6 +205,7 @@ class SharedActivityStore internal constructor(
     /** Between [SharedActivityIntent.SurfaceHidden] and the next load the surface asks for. */
     private var activitySurfaceHidden = false
     private var onUnreadCountsChanged: () -> Unit = onUnreadCountsChanged
+    private var onThreadUnfollowProjection: (SharedHomeIntent.ProjectThreadUnfollow) -> Unit = onThreadUnfollowProjection
     private var onSummaryFact: (ActivityUnreadSummaryFact) -> Unit = onSummaryFact
     private var onSummaryInvalidated: (ActivityUnreadSummaryInvalidation) -> Unit = onSummaryInvalidated
     // Local read / Done overlays: keep a confirmed mutation applied while the
@@ -171,8 +213,18 @@ class SharedActivityStore internal constructor(
     private val readOverlay = ActivityLocalMutationOverlay(nowMillis, localMutationHoldMillis)
     private val doneOverlay = ActivityLocalMutationOverlay(nowMillis, localMutationHoldMillis)
     private var lastResetLoadStartedAtMillis: Long? = null
+    /** Wall time the shown rows were last read from the server (any refresh, background too). */
+    private var lastRowsReadAtEpochMillis: Long? = null
     /** Start time of [loadJob] when it is a foreground reset load (not LoadMore / background). */
     private var foregroundResetLoadStartedAtMillis: Long? = null
+    /**
+     * The generation of the refresh whose first page is already shown while its later pages are
+     * still being read (Hands f6c3f3a6). A LoadMore then waits for those pages instead of
+     * cancelling them, and a pull restarts the read instead of joining it.
+     */
+    private var progressiveTailGeneration: Long? = null
+    /** The generation of a non-pull refresh a pull joined: it shows the pull spinner until it lands. */
+    private var pullJoinedGeneration: Long? = null
     /**
      * Local duplicate-request fence for Activity Follow/Unfollow actions.
      * The server remains the authority for the eventual boolean; this set only
@@ -257,6 +309,7 @@ class SharedActivityStore internal constructor(
         readReceiptOwnerFactory: ((String, String) -> ReadReceiptOwner)? = this.readReceiptOwnerFactory,
         readStateV1Canary: ReadStateV1ProductionCanary? = this.readStateV1Canary,
         onUnreadCountsChanged: (() -> Unit)? = null,
+        onThreadUnfollowProjection: ((SharedHomeIntent.ProjectThreadUnfollow) -> Unit)? = null,
         onSummaryFact: ((ActivityUnreadSummaryFact) -> Unit)? = null,
         onSummaryInvalidated: ((ActivityUnreadSummaryInvalidation) -> Unit)? = null,
         diagnosticsLogger: ((String) -> Unit)? = null
@@ -288,6 +341,9 @@ class SharedActivityStore internal constructor(
         if (onUnreadCountsChanged != null) {
             this.onUnreadCountsChanged = onUnreadCountsChanged
         }
+        if (onThreadUnfollowProjection != null) {
+            this.onThreadUnfollowProjection = onThreadUnfollowProjection
+        }
         if (onSummaryFact != null) {
             this.onSummaryFact = onSummaryFact
         }
@@ -305,11 +361,11 @@ class SharedActivityStore internal constructor(
             is SharedActivityIntent.ServerSelected -> scope.launch { selectServer(intent) }
             SharedActivityIntent.LoadInitial -> {
                 activitySurfaceHidden = false
-                load(refresh = true, intent = intent)
+                load(refresh = true, headerIndicator = true, intent = intent)
             }
             SharedActivityIntent.Refresh -> {
                 activitySurfaceHidden = false
-                load(refresh = true, pullRefresh = false, intent = intent)
+                load(refresh = true, pullRefresh = false, headerIndicator = shownRowsAreOld(), intent = intent)
             }
             SharedActivityIntent.PullRefresh -> {
                 activitySurfaceHidden = false
@@ -322,7 +378,7 @@ class SharedActivityStore internal constructor(
             is SharedActivityIntent.SetFilter -> setFilter(intent.filter)
             is SharedActivityIntent.MarkDone ->
                 if (intent.item.kind == InboxItemKind.Object) markObjectDone(intent.item) else markDone(intent.item)
-            is SharedActivityIntent.UnfollowThread -> unfollowThread(intent.item)
+            is SharedActivityIntent.UnfollowThread -> unfollowThread(intent)
             is SharedActivityIntent.FollowThread -> followThread(intent.item)
             is SharedActivityIntent.MarkRead ->
                 if (intent.item.kind == InboxItemKind.Object) markObjectRead(intent.item) else markRead(intent.item)
@@ -330,6 +386,10 @@ class SharedActivityStore internal constructor(
             is SharedActivityIntent.MarkUnread -> if (intent.item.kind != InboxItemKind.Object) markUnread(intent.item)
             is SharedActivityIntent.UndoObjectDone -> undoObjectDone(intent.item)
             is SharedActivityIntent.UnfollowObject -> unfollowObject(intent.item)
+            is SharedActivityIntent.ProjectThreadUnfollow ->
+                intent.item.threadChannelId?.value?.let { threadId ->
+                    onThreadUnfollowProjection(SharedHomeIntent.ProjectThreadUnfollow(threadId, intent.phase))
+                }
             is SharedActivityIntent.ApplyReadReceiptPrediction -> applyReadReceiptPrediction(intent.prediction)
             is SharedActivityIntent.ApplyReadReceiptFailure -> handleReadReceiptFailure(intent.request)
             is SharedActivityIntent.ApplyReadReceiptResult ->
@@ -498,7 +558,7 @@ class SharedActivityStore internal constructor(
      */
     private fun retainReadRowLocked(intent: SharedActivityIntent, item: InboxItem) {
         val current = _state.value
-        if (current.selectedFilter.keepsReadActivityRows() || item.unreadCount <= 0) return
+        if (current.selectedFilter.keepsReadActivityRows() || !item.showsUnread) return
         if (item.key in current.retainedReadRowKeys) return
         reduceState(intent, current.copy(retainedReadRowKeys = current.retainedReadRowKeys + item.key))
     }
@@ -534,6 +594,7 @@ class SharedActivityStore internal constructor(
             readOverlay.clear()
             doneOverlay.clear()
             lastResetLoadStartedAtMillis = null
+            lastRowsReadAtEpochMillis = null
             readPredictionRevisions = emptyMap()
             readPredictionItemKeys = emptyMap()
             readPredictionHolds = emptyMap()
@@ -986,7 +1047,7 @@ class SharedActivityStore internal constructor(
                 true
             }
         if (!changed) return
-        load(refresh = true, intent = SharedActivityIntent.SetFilter(filter))
+        load(refresh = true, headerIndicator = true, intent = SharedActivityIntent.SetFilter(filter))
     }
 
     /**
@@ -1012,6 +1073,7 @@ class SharedActivityStore internal constructor(
                 realtimeHighWater.clear()
                 resetRealtimeCatchUpLocked()
                 presentationStore.clear()
+                lastRowsReadAtEpochMillis = null
                 // Web registerServerReset (slock #11383) starts the new server on its last
                 // Activity filter (All when none); the persist slice hydrates that server's
                 // cached rows for it.
@@ -1031,7 +1093,7 @@ class SharedActivityStore internal constructor(
             "store_load domain=activity phase=server_selected serverId=$serverId " +
                 "cached=${_state.value.snapshot != null}"
         )
-        load(refresh = true, intent = SharedActivityIntent.LoadInitial)
+        load(refresh = true, headerIndicator = true, intent = SharedActivityIntent.LoadInitial)
     }
 
     private suspend fun applyRealtimeEvent(intent: SharedActivityIntent.ApplyRealtimeEvent) {
@@ -1492,6 +1554,15 @@ class SharedActivityStore internal constructor(
                         intent = SharedActivityIntent.ApplyRealtimeEvent(event)
                     )?.let(reconcileJobs::add)
                 }
+                // botiverse/slock #11795: the fact's "marked unread" flag, also at the version already
+                // held (Home shares these checkpoints and may have taken the fact first).
+                if (result == PerReceiverReadStateFactResult.Accepted || result == PerReceiverReadStateFactResult.Current) {
+                    projectRemoteMarkedUnreadLocked(
+                        channelId = readScope.scopeId.value,
+                        markedUnread = readScope.markedUnread,
+                        intent = SharedActivityIntent.ApplyRealtimeEvent(event)
+                    )?.let(reconcileJobs::add)
+                }
             }
         }
         reconcileJobs.forEach(Job::start)
@@ -1558,6 +1629,54 @@ class SharedActivityStore internal constructor(
         return if (uncovered.isNotEmpty()) scheduleRealtimeBackgroundReconcileLocked() else null
     }
 
+    /**
+     * botiverse/slock #11795: an accepted read state's "marked unread" flag on this scope's rows. A mark
+     * shows the dot on a row with no count; a newer read state without it clears the dot, and in a
+     * filter that drops read rows a row left with nothing unread leaves (unless retained this visit).
+     * A mark for a scope Unread does not list yet asks for a background reconcile.
+     */
+    private fun projectRemoteMarkedUnreadLocked(
+        channelId: String,
+        markedUnread: Boolean,
+        intent: SharedActivityIntent
+    ): Job? {
+        val current = _state.value
+        val snapshot = current.snapshot ?: return null
+        val matching = snapshot.items.filter { item -> item.readReceiptChannelId()?.value == channelId }
+        if (matching.isEmpty()) {
+            return if (markedUnread && current.selectedFilter == InboxFilter.Unread) {
+                scheduleRealtimeBackgroundReconcileLocked()
+            } else {
+                null
+            }
+        }
+        if (matching.all { it.markedUnread == markedUnread }) return null
+        var removed = 0
+        val items =
+            snapshot.items.mapNotNull { item ->
+                when {
+                    item.readReceiptChannelId()?.value != channelId || item.markedUnread == markedUnread -> item
+                    !markedUnread && item.unreadCount <= 0 && !current.keepsReadRow(item.key) -> {
+                        removed += 1
+                        null
+                    }
+                    else -> item.copy(markedUnread = markedUnread)
+                }
+            }
+        diagnosticsLogger("activity_marked_unread_patch scopeId=$channelId marked=$markedUnread removed=$removed")
+        reduceState(
+            intent,
+            current.copy(
+                snapshot =
+                    snapshot.copy(
+                        items = items,
+                        totalCount = (snapshot.totalCount - removed).coerceAtLeast(0)
+                    )
+            )
+        )
+        return null
+    }
+
     internal fun applyReadStateV1Projection(owner: ReadStateV1ProductionOwner, fact: ReadStateV1Fact) {
         var reconcileJob: Job? = null
         val accepted = synchronized(realtimeOwnerLock) {
@@ -1616,10 +1735,27 @@ class SharedActivityStore internal constructor(
         if (accepted) onUnreadCountsChanged()
     }
 
+    /**
+     * Ticket 67609860: a visible-route Refresh (resume, re-entry, page did appear) shows the header
+     * indicator only when the rows shown were last read [ActivityHeaderRefreshStaleAfterMillis]
+     * ago or never; a re-entry right after a load or realtime refresh revalidates silently.
+     */
+    private fun shownRowsAreOld(): Boolean {
+        val lastReadAt = synchronized(realtimeOwnerLock) { lastRowsReadAtEpochMillis } ?: return true
+        return nowEpochMillis() - lastReadAt >= ActivityHeaderRefreshStaleAfterMillis
+    }
+
+    /**
+     * [headerIndicator]: this refresh may show the header's top-right indicator
+     * ([SharedActivityState.headerRefreshing]). Only the open / server or filter switch / visible
+     * Refresh over old rows pass it; background loads (realtime, sync, stale recovery) and the
+     * store's own corrective refreshes never show it, and a pull shows only the pull spinner.
+     */
     private fun load(
         refresh: Boolean,
         pullRefresh: Boolean = false,
         backgroundRefresh: Boolean = false,
+        headerIndicator: Boolean = false,
         intent: SharedActivityIntent
     ) {
         val job =
@@ -1627,6 +1763,37 @@ class SharedActivityStore internal constructor(
                 val current = _state.value
                 val inFlightLoad = loadJob?.takeUnless { job -> job.isCompleted }
                 if (backgroundRefresh && inFlightLoad != null) return@synchronized null
+                if (pullRefresh && inFlightLoad != null) {
+                    // Hands f6c3f3a6: a pull over a visible refresh still in flight joins it and
+                    // shows the pull spinner, instead of throwing the pages it already read away.
+                    val inFlightAgeMillis = foregroundResetLoadStartedAtMillis?.let { startedAt -> nowMillis() - startedAt }
+                    val supersedeReason =
+                        when {
+                            inFlightAgeMillis == null -> "not_visible_refresh"
+                            progressiveTailGeneration == loadGeneration -> "first_page_shown"
+                            current.snapshot == null -> "no_rows"
+                            inFlightAgeMillis >= ActivityPullJoinsInFlightRefreshWindowMillis -> "stale_in_flight"
+                            else -> null
+                        }
+                    if (supersedeReason == null) {
+                        pullJoinedGeneration = loadGeneration
+                        reduceState(intent, current.copy(refreshing = true, pullRefreshing = true))
+                        diagnosticsLogger(
+                            "store_load domain=activity phase=pull_joined generation=$loadGeneration " +
+                                "inFlightAgeMs=$inFlightAgeMillis"
+                        )
+                        return@synchronized null
+                    }
+                    diagnosticsLogger(
+                        "store_load domain=activity phase=pull_supersedes reason=$supersedeReason " +
+                            "generation=$loadGeneration inFlightAgeMs=${inFlightAgeMillis ?: -1}"
+                    )
+                }
+                if (!refresh && inFlightLoad != null && progressiveTailGeneration == loadGeneration) {
+                    // The refresh is still reading the pages below the first: they are the rows a
+                    // LoadMore would ask for, and a LoadMore would cancel that read.
+                    return@synchronized null
+                }
                 if (refresh && !pullRefresh && intent == SharedActivityIntent.Refresh && inFlightLoad != null) {
                     // Keyed on the job, not on loading/refreshing: those flags are only set once
                     // the launched load has read the session, so a same-frame second Refresh used
@@ -1660,6 +1827,7 @@ class SharedActivityStore internal constructor(
                 if (_state.value.backgroundRefreshing != backgroundRefreshing) {
                     _state.update { state -> state.copy(backgroundRefreshing = backgroundRefreshing) }
                 }
+                val showsHeaderIndicator = refresh && headerIndicator && !pullRefresh && !backgroundRefresh
                 scope.launch(start = CoroutineStart.LAZY) {
                     val startedAt = TimeSource.Monotonic.markNow()
                     val previous = _state.value
@@ -1670,6 +1838,7 @@ class SharedActivityStore internal constructor(
                             refresh = refresh,
                             pullRefresh = pullRefresh,
                             backgroundRefresh = backgroundRefresh,
+                            headerIndicator = showsHeaderIndicator,
                             filter = filter,
                             generation = generation
                         )
@@ -1789,7 +1958,11 @@ class SharedActivityStore internal constructor(
                                     stateWithLocalProfiles.copy(
                                         loading = refresh && stateWithLocalProfiles.snapshot == null,
                                         refreshing = refresh && stateWithLocalProfiles.snapshot != null,
-                                        pullRefreshing = refresh && pullRefresh && stateWithLocalProfiles.snapshot != null,
+                                        headerRefreshAllowed = showsHeaderIndicator,
+                                        pullRefreshing =
+                                            refresh &&
+                                                (pullRefresh || pullJoinedGeneration == generation) &&
+                                                stateWithLocalProfiles.snapshot != null,
                                         loadingMore = !refresh,
                                         errorCode = null,
                                         loadMoreErrorCode = null
@@ -1802,9 +1975,26 @@ class SharedActivityStore internal constructor(
                         // shared members flight); on a server switch it took 11s and held the new
                         // server's rows behind the old server's cached ones.
                         val senderProfilesLoad = scope.async { loadSenderProfiles(serverId) }
+                        var partialFailureCode: String? = null
                         val result =
                             if (refresh) {
-                                loadCanonicalDepth(serverId, filter, refreshLimit)
+                                val depth =
+                                    loadCanonicalDepth(serverId, filter, refreshLimit) { fetched ->
+                                        publishRefreshPage(
+                                            fetched = fetched,
+                                            generation = generation,
+                                            serverId = serverId,
+                                            userId = userId,
+                                            server = server,
+                                            senderProfilesLoad = senderProfilesLoad,
+                                            intent = intent,
+                                            backgroundRefresh = backgroundRefresh,
+                                            pullRefresh = pullRefresh,
+                                            durationMs = startedAt.elapsedNow().inWholeMilliseconds
+                                        )
+                                    }
+                                partialFailureCode = depth.partialFailureCode
+                                depth.result
                             } else {
                                 inboxRepository.loadMore(
                                     serverId,
@@ -1868,8 +2058,14 @@ class SharedActivityStore internal constructor(
                                         append = !refresh,
                                         senderProfiles = senderProfiles,
                                         intent = intent,
-                                        backgroundRefresh = backgroundRefresh
+                                        backgroundRefresh = backgroundRefresh,
+                                        // A later page failed: the rows below the fetched ones stay
+                                        // (the list does not shrink), the refresh is not an error.
+                                        keepUnfetchedTail = partialFailureCode != null
                                     )
+                                    if (refresh && result is DataResult.Content && result.data.staleReason == null) {
+                                        lastRowsReadAtEpochMillis = nowEpochMillis()
+                                    }
                                     true
                                 }
                             }
@@ -1888,8 +2084,8 @@ class SharedActivityStore internal constructor(
                         }
                         ensureDmPeerNames()
                         logActivityLoad(
-                            result = result.activityDiagnosticsResult(),
-                            code = null,
+                            result = if (partialFailureCode != null) "content_partial" else result.activityDiagnosticsResult(),
+                            code = partialFailureCode,
                             refresh = refresh,
                             append = !refresh,
                             filter = filter,
@@ -1941,11 +2137,11 @@ class SharedActivityStore internal constructor(
                             pullRefresh = pullRefresh
                         )
                     } finally {
-                        if (backgroundRefresh) {
-                            synchronized(realtimeOwnerLock) {
-                                if (generation == loadGeneration && _state.value.backgroundRefreshing) {
-                                    _state.update { state -> state.copy(backgroundRefreshing = false) }
-                                }
+                        synchronized(realtimeOwnerLock) {
+                            if (progressiveTailGeneration == generation) progressiveTailGeneration = null
+                            if (pullJoinedGeneration == generation) pullJoinedGeneration = null
+                            if (backgroundRefresh && generation == loadGeneration && _state.value.backgroundRefreshing) {
+                                _state.update { state -> state.copy(backgroundRefreshing = false) }
                             }
                         }
                     }
@@ -1954,38 +2150,114 @@ class SharedActivityStore internal constructor(
         job?.start()
     }
 
+    /**
+     * Shows the rows a refresh has read so far while it reads the next page (Hands f6c3f3a6): the
+     * first page (totals, unread counts, the head of the list) lands at once and ends the
+     * refresh / pull spinner; the rows below it stay as they were until their page arrives
+     * ([applyCanonicalLoadResult] keepUnfetchedTail). The last page replaces the whole list with
+     * the full served order, so rows that moved out of the first page resolve there. A remembered
+     * (`X-Raft-Stale`) first page is not shown early: the final answer decides as before.
+     */
+    private suspend fun publishRefreshPage(
+        fetched: InboxSnapshot,
+        generation: Long,
+        serverId: ServerId,
+        userId: String,
+        server: ServerSummary,
+        senderProfilesLoad: Deferred<Map<String, SharedActivitySenderProfile>>,
+        intent: SharedActivityIntent,
+        backgroundRefresh: Boolean,
+        pullRefresh: Boolean,
+        durationMs: Long
+    ) {
+        if (fetched.staleReason != null) return
+        val session = authStore.readSession()
+        if (session == null || session.user.id != userId || session.currentServerId != serverId.value) return
+        val readySenderProfiles = if (senderProfilesLoad.isCompleted) senderProfilesLoad.await() else null
+        val published =
+            synchronized(realtimeOwnerLock) {
+                if (generation != loadGeneration) return@synchronized false
+                val senderProfiles =
+                    readySenderProfiles ?: (_state.value.senderProfiles + currentSenderProfiles(serverId))
+                applyLoadResult(
+                    result = DataResult.Content(fetched),
+                    server = server,
+                    append = false,
+                    senderProfiles = senderProfiles,
+                    intent = intent,
+                    backgroundRefresh = backgroundRefresh,
+                    keepUnfetchedTail = true,
+                    settle = false
+                )
+                progressiveTailGeneration = generation
+                lastRowsReadAtEpochMillis = nowEpochMillis()
+                true
+            }
+        if (!published) return
+        diagnosticsLogger(
+            "store_load domain=activity phase=page_published fetched=${fetched.items.size} " +
+                "shown=${_state.value.items.size} unread=${_state.value.totalUnreadCount} durationMs=$durationMs " +
+                "generation=$generation background=$backgroundRefresh pullRefresh=$pullRefresh " +
+                "pullRefreshingAfter=${_state.value.pullRefreshing}"
+        )
+    }
+
+    /**
+     * Hands f6c3f3a6 (iOS 1.17.0): a refresh re-reads as many rows as are loaded (270 rows = three
+     * sequential 100-row pages, ~1.2-1.9 s each) and used to publish only after the last one, so
+     * the pull spinner and the list looked stuck for 5-6 s, and a later page cancelled by the app
+     * leaving the foreground (`http_0`) threw the pages already fetched away.
+     *
+     * [onPageMerged] receives the rows fetched so far after every page that is not the last
+     * (offset 0 first: it carries the totals and unread counts), so the caller can publish them
+     * at once. A later page that fails, stalls or throws ends the read with what was fetched:
+     * [ActivityCanonicalDepthResult.partialFailureCode] names it and the result stays Content.
+     * Only the first page's failure fails the read.
+     */
     private suspend fun loadCanonicalDepth(
         serverId: ServerId,
         filter: InboxFilter,
-        depth: Int
-    ): DataResult<InboxSnapshot> {
+        depth: Int,
+        onPageMerged: suspend (InboxSnapshot) -> Unit = {}
+    ): ActivityCanonicalDepthResult {
         val targetDepth = depth.coerceAtLeast(SharedActivityPageSize)
         val initial = inboxRepository.loadInitial(serverId, filter, minOf(targetDepth, SharedActivityRefreshPageLimit))
-        if (initial !is DataResult.Content) return initial
+        if (initial !is DataResult.Content) return ActivityCanonicalDepthResult(initial)
 
         var combined = initial.data.copy(items = initial.data.items.dedupeActivityItems())
         val seenOffsets = mutableSetOf<Int>()
         val maxContinuationRequests = targetDepth.toLong() + SharedActivityRefreshContinuationSlack
         var continuationRequests = 0
         var consecutiveNoProgressPages = 0
+        fun partial(code: String) = ActivityCanonicalDepthResult(DataResult.Content(combined), partialFailureCode = code)
         while (combined.items.size < targetDepth && combined.hasMore) {
             val offset = combined.nextOffset ?: combined.items.size
             if (!seenOffsets.add(offset) || continuationRequests.toLong() >= maxContinuationRequests) {
-                return DataResult.Error(ScreenError("activity_pagination_stalled"))
+                return partial("activity_pagination_stalled")
             }
+            onPageMerged(combined)
             continuationRequests += 1
             val remaining = targetDepth - combined.items.size
-            when (
-                val page = inboxRepository.loadMore(
-                    serverId,
-                    filter,
-                    offset,
-                    minOf(remaining, SharedActivityRefreshPageLimit)
-                )
-            ) {
+            val page =
+                try {
+                    inboxRepository.loadMore(
+                        serverId,
+                        filter,
+                        offset,
+                        minOf(remaining, SharedActivityRefreshPageLimit)
+                    )
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (_: Throwable) {
+                    return partial("activity_network")
+                }
+            when (page) {
                 is DataResult.Content -> {
                     val inferredNextOffset = offset.toLong() + page.data.items.size.toLong()
                     val nextOffset = page.data.nextOffset ?: inferredNextOffset.takeIf { it <= Int.MAX_VALUE }?.toInt()
+                    // Offset pages are read one after another, so a row that moved up between two
+                    // reads comes again on the later page: the first (newer) position wins, the
+                    // same key merge as an append (dedupeActivityItems).
                     val mergedItems = (combined.items + page.data.items).dedupeActivityItems()
                     // A page can be empty after the repository projects an
                     // unfollowed row out of an attention filter.  The raw
@@ -2008,7 +2280,7 @@ class SharedActivityStore internal constructor(
                             mergedItems.size < targetDepth &&
                             consecutiveNoProgressPages > SharedActivityRefreshMaxNoProgressPages
                     if (invalidNonTerminalPage || exhaustedNoProgressBudget) {
-                        return DataResult.Error(ScreenError("activity_pagination_stalled"))
+                        return partial("activity_pagination_stalled")
                     }
                     combined =
                         page.data.copy(
@@ -2020,11 +2292,11 @@ class SharedActivityStore internal constructor(
                     combined = combined.copy(hasMore = false, nextOffset = null)
                     break
                 }
-                is DataResult.Error -> return page
-                is DataResult.NoPermission -> return page
+                is DataResult.Error -> return partial(page.error.code)
+                is DataResult.NoPermission -> return partial(page.blocker.code)
             }
         }
-        return DataResult.Content(combined)
+        return ActivityCanonicalDepthResult(DataResult.Content(combined))
     }
 
     private fun logActivityLoad(
@@ -2062,12 +2334,13 @@ class SharedActivityStore internal constructor(
         refresh: Boolean,
         pullRefresh: Boolean,
         backgroundRefresh: Boolean,
+        headerIndicator: Boolean,
         filter: InboxFilter,
         generation: Long
     ) {
         diagnosticsLogger(
             "store_load domain=activity phase=start refresh=$refresh background=$backgroundRefresh " +
-                "pullRefresh=$pullRefresh filter=${filter.name} generation=$generation " +
+                "pullRefresh=$pullRefresh headerIndicator=$headerIndicator filter=${filter.name} generation=$generation " +
                 "pullRefreshingBefore=${_state.value.pullRefreshing}"
         )
     }
@@ -2092,7 +2365,9 @@ class SharedActivityStore internal constructor(
         append: Boolean,
         senderProfiles: Map<String, SharedActivitySenderProfile>,
         intent: SharedActivityIntent,
-        backgroundRefresh: Boolean = false
+        backgroundRefresh: Boolean = false,
+        keepUnfetchedTail: Boolean = false,
+        settle: Boolean = true
     ) {
         val current = _state.value
         // Task #164: the server's remembered page (at most 5 minutes old) never replaces rows this
@@ -2123,7 +2398,8 @@ class SharedActivityStore internal constructor(
                     server = server,
                     append = append,
                     senderProfiles = senderProfiles,
-                    backgroundRefresh = backgroundRefresh
+                    backgroundRefresh = backgroundRefresh,
+                    keepUnfetchedTail = keepUnfetchedTail
                 )
             }
         acceptCanonicalReplyThreadFacts(nextState)
@@ -2152,7 +2428,7 @@ class SharedActivityStore internal constructor(
                 },
             summarySource = "activity_canonical:${current.selectedFilter.wireValue}"
         )
-        if (!append) {
+        if (!append && settle) {
             settleStaleRecovery(nextState, result)
             settleRealtimeCatchUpLocked(nextState, result)
         }
@@ -2271,7 +2547,8 @@ class SharedActivityStore internal constructor(
         server: ServerSummary,
         append: Boolean,
         senderProfiles: Map<String, SharedActivitySenderProfile>,
-        backgroundRefresh: Boolean
+        backgroundRefresh: Boolean,
+        keepUnfetchedTail: Boolean = false
     ): SharedActivityState =
             when (result) {
                 is DataResult.Content -> {
@@ -2287,14 +2564,29 @@ class SharedActivityStore internal constructor(
                         reconcileRealtimeHighWater(
                             canonicalItems = pageItems.items,
                             append = append,
-                            preservePendingRealtimeUnread = backgroundRefresh
+                            preservePendingRealtimeUnread = backgroundRefresh,
+                            // Rows below the fetched pages were not answered yet: their realtime
+                            // high-water waits for the page that serves them.
+                            pruneUnlisted = !keepUnfetchedTail
                         )
-                    val items =
+                    val fetchedItems =
                         if (append) {
                             (current.items + realtimeReconcile.items).dedupeActivityItems()
                         } else {
                             realtimeReconcile.items.withRetainedReadRows(current).dedupeActivityItems()
                         }
+                    // Hands f6c3f3a6: a refresh shown page by page keeps the rows it has not read
+                    // yet below the fetched ones, in their shown order; a fetched row is listed
+                    // once, at its served position.
+                    val unfetchedTail =
+                        if (append || !keepUnfetchedTail) {
+                            emptyList()
+                        } else {
+                            val fetchedKeys = fetchedItems.mapTo(mutableSetOf(), InboxItem::key)
+                            current.items.filterNot { item -> item.key in fetchedKeys }
+                        }
+                    val items =
+                        (if (unfetchedTail.isEmpty()) fetchedItems else (fetchedItems + unfetchedTail).dedupeActivityItems())
                             // RFC 077: a re-fetched row of the same latest message without
                             // `latestDelegatedBy` keeps the known label.
                             .withKnownLatestDelegatedLabelsFrom(current.items)
@@ -2324,8 +2616,16 @@ class SharedActivityStore internal constructor(
                                         },
                                     totalUnreadCount =
                                         canonicalUnreadCount,
-                                    hasMore = result.data.hasMore,
-                                    nextOffset = result.data.nextOffset
+                                    hasMore =
+                                        result.data.hasMore || (unfetchedTail.isNotEmpty() && current.hasMore),
+                                    // The kept rows below were read up to the shown offset; a
+                                    // LoadMore continues after them (an overlap dedupes by key).
+                                    nextOffset =
+                                        if (unfetchedTail.isEmpty()) {
+                                            result.data.nextOffset
+                                        } else {
+                                            listOfNotNull(result.data.nextOffset, current.nextOffset).maxOrNull()
+                                        }
                                 ),
                             senderProfiles = if (append) current.senderProfiles + senderProfiles else senderProfiles,
                             loaded = true,
@@ -2444,7 +2744,8 @@ class SharedActivityStore internal constructor(
     private fun reconcileRealtimeHighWater(
         canonicalItems: List<InboxItem>,
         append: Boolean,
-        preservePendingRealtimeUnread: Boolean
+        preservePendingRealtimeUnread: Boolean,
+        pruneUnlisted: Boolean = true
     ): ActivityRealtimeReconcileResult {
         if (append || realtimeHighWater.isEmpty()) {
             return ActivityRealtimeReconcileResult(items = canonicalItems)
@@ -2503,6 +2804,7 @@ class SharedActivityStore internal constructor(
         if (missingCurrent.isNotEmpty()) preserveTotalUnreadFloor = true
         realtimeHighWater.keys.toList().forEach { key ->
             if (
+                pruneUnlisted &&
                 key !in canonicalKeys &&
                 (!preservePendingRealtimeUnread || key !in currentThreads)
             ) {
@@ -2593,13 +2895,17 @@ class SharedActivityStore internal constructor(
     private fun markAllRead() {
         val previous = _state.value
         val snapshot = previous.snapshot ?: return
-        if (snapshot.totalUnreadCount <= 0) return
+        // A row marked unread with no count (botiverse/slock #11795) is read by it too.
+        if (snapshot.totalUnreadCount <= 0 && snapshot.items.none(InboxItem::markedUnread)) return
         val keepsRows = previous.selectedFilter.keepsReadActivityRows()
         val updatedSnapshot =
             snapshot.copy(
                 // The list does not change: every listed row stays, shown read, until the user
                 // moves on. In Unread they all join the rows retained for this visit (stdrc 10-23).
-                items = snapshot.items.map { it.copy(unreadCount = 0, firstUnreadMessageId = null, hasMention = false) },
+                items =
+                    snapshot.items.map {
+                        it.copy(unreadCount = 0, firstUnreadMessageId = null, hasMention = false, markedUnread = false)
+                    },
                 totalCount = if (keepsRows) snapshot.totalCount else 0,
                 totalUnreadCount = 0
             )
@@ -2874,13 +3180,29 @@ class SharedActivityStore internal constructor(
      * to the server-owned boolean and attention clearing; it never invents
      * unread/mention state when a row is followed again.
      */
-    private fun unfollowThread(item: InboxItem) {
+    private fun unfollowThread(intent: SharedActivityIntent.UnfollowThread) {
+        val item = intent.item
         if (!item.isThreadActivityItem() || item.isUnfollowedActivityThread) return
-        val currentItem = _state.value.items.firstOrNull { it.key == item.key } ?: return
-        if (currentItem.isUnfollowedActivityThread) return
+        val state = _state.value
+        val heldItem = state.items.firstOrNull { it.key == item.key }
+        // A deferred Unfollow (Activity's Undo toast) can land after the list moved to another
+        // filter: still unfollow the swiped row, but only for the account and server it was listed for.
+        val sameListOwner =
+            intent.listOwnerUserId != null &&
+                intent.listOwnerServerId != null &&
+                intent.listOwnerUserId == state.ownerUserId &&
+                intent.listOwnerServerId == state.ownerServerId
+        val threadId = item.threadChannelId?.value
+        fun settleHome(phase: HomeThreadUnfollowPhase) {
+            threadId?.let { onThreadUnfollowProjection(SharedHomeIntent.ProjectThreadUnfollow(it, phase)) }
+        }
+        // Nothing is written for a row of another list: Home gets back the unread it cleared.
+        val currentItem = heldItem ?: item.takeIf { sameListOwner } ?: return settleHome(HomeThreadUnfollowPhase.Restored)
+        // Already unfollowed (the server counts no unread for it): the clear stands.
+        if (currentItem.isUnfollowedActivityThread) return settleHome(HomeThreadUnfollowPhase.Confirmed)
         if (!beginThreadFollowMutation(item.key)) return
         val previous = _state.value
-        updateThreadFollowProjection(item.key, following = false)
+        if (heldItem != null) updateThreadFollowProjection(item.key, following = false)
         scope.launch {
             val threadChannelId = currentItem.threadChannelId
             val result = try {
@@ -2898,6 +3220,9 @@ class SharedActivityStore internal constructor(
                 // next explicit action until the store is reset.
                 finishThreadFollowMutation(item.key)
             }
+            settleHome(
+                if (result.isAcceptedThreadFollowMutation()) HomeThreadUnfollowPhase.Confirmed else HomeThreadUnfollowPhase.Restored
+            )
             if (result.isAcceptedThreadFollowMutation()) {
                 onUnreadCountsChanged()
                 // The mutation response is the server acknowledgement for
@@ -3037,7 +3362,8 @@ class SharedActivityStore internal constructor(
     }
 
     private fun markRead(item: InboxItem) {
-        if (item.isUnfollowedActivityThread || item.unreadCount <= 0) return
+        // A row marked unread with no count is read like any unread row: the read clears the mark.
+        if (item.isUnfollowedActivityThread || !item.showsUnread) return
         val previous = _state.value
         if (previous.snapshot == null) return
         val targetChannelId = item.readReceiptChannelId()
@@ -3069,7 +3395,7 @@ class SharedActivityStore internal constructor(
             if (keepsRow) {
                 retainedSnapshot.items.map { existing ->
                     if (existing.key == key) {
-                        existing.copy(unreadCount = 0, firstUnreadMessageId = null, hasMention = false)
+                        existing.copy(unreadCount = 0, firstUnreadMessageId = null, hasMention = false, markedUnread = false)
                     } else {
                         existing
                     }
@@ -3121,7 +3447,7 @@ class SharedActivityStore internal constructor(
             val snapshot = current.snapshot ?: return@synchronized
             val matchingUnread =
                 snapshot.items.filter { item ->
-                    item.unreadCount > 0 && item.readReceiptChannelId() == prediction.channelId
+                    item.showsUnread && item.readReceiptChannelId() == prediction.channelId
                 }
             readPredictionRevisions = readPredictionRevisions + (prediction.channelId to prediction.revision)
             if (matchingUnread.isEmpty()) return@synchronized
@@ -3139,7 +3465,7 @@ class SharedActivityStore internal constructor(
                     when {
                         item.key !in matchingKeys -> item
                         current.keepsReadRow(item.key) ->
-                            item.copy(unreadCount = 0, firstUnreadMessageId = null, hasMention = false)
+                            item.copy(unreadCount = 0, firstUnreadMessageId = null, hasMention = false, markedUnread = false)
                         else -> null
                     }
                 }
@@ -3250,6 +3576,14 @@ class SharedActivityStore internal constructor(
         )
         scope.launch {
             val result = readReceiptRepository.markChannelUnread(targetChannelId)
+            if (result is DataResult.Content) {
+                // The read point moved back, or stayed and the conversation was marked unread: the next
+                // open must send its read again (that is what clears it), not reuse an acknowledgement.
+                readReceiptOwnerFactory
+                    ?.invoke(previous.ownerServerId.orEmpty(), currentUserId().orEmpty())
+                    ?.let { readOwner -> readReceiptCoordinator?.forgetAcknowledged(readOwner, targetChannelId) }
+                applyMarkUnreadOutcome(item, optimisticUnreadCount, targetChannelId, result.data)
+            }
             val owner =
                 readReceiptOwnerFactory
                     ?.invoke(previous.ownerServerId.orEmpty(), currentUserId().orEmpty())
@@ -3273,6 +3607,75 @@ class SharedActivityStore internal constructor(
                 onUnreadCountsChanged()
                 refreshAfterFailure(previous, "activity_mark_unread_failed")
             }
+        }
+    }
+
+    /**
+     * botiverse/slock #11792 / #11795: Mark as Unread's answer. A rewind keeps the row unread (the next
+     * load brings the exact count). A mark takes back the optimistic count and shows the dot, through
+     * the same version-ordered read state as its `read_state:updated` (an answer later than a newer
+     * read never brings the mark back). Nothing to mark takes the row back to read and says why.
+     */
+    private fun applyMarkUnreadOutcome(
+        item: InboxItem,
+        optimisticUnreadCount: Int,
+        targetChannelId: ChannelId,
+        result: ReadReceiptResult
+    ) {
+        val outcome = result.markUnreadOutcome()
+        diagnosticsLogger("activity_mark_unread_outcome key=${item.key} outcome=${outcome.name}")
+        // Pending (202): the optimistic count stays and the `read_state:updated` that follows corrects it.
+        if (outcome == MarkUnreadOutcome.Counted || outcome == MarkUnreadOutcome.Pending) return
+        val reconcileJob =
+            synchronized(realtimeOwnerLock) {
+                val current = _state.value
+                val snapshot = current.snapshot ?: return@synchronized null
+                var restored = 0
+                val items =
+                    snapshot.items.map { existing ->
+                        // Only the optimistic count goes back: a message that arrived meanwhile keeps its count.
+                        if (existing.key == item.key && item.unreadCount <= 0 && existing.unreadCount == optimisticUnreadCount) {
+                            restored += optimisticUnreadCount
+                            existing.copy(unreadCount = item.unreadCount, firstUnreadMessageId = item.firstUnreadMessageId)
+                        } else {
+                            existing
+                        }
+                    }
+                if (restored > 0) {
+                    reduceState(
+                        SharedActivityIntent.MarkUnread(item),
+                        current.copy(
+                            snapshot =
+                                snapshot.copy(
+                                    items = items,
+                                    totalUnreadCount = (snapshot.totalUnreadCount - restored).coerceAtLeast(0)
+                                )
+                        )
+                    )
+                }
+                if (outcome != MarkUnreadOutcome.Marked) return@synchronized null
+                val serverId = current.ownerServerId?.takeIf { it.isNotBlank() } ?: return@synchronized null
+                val userId = current.ownerUserId?.takeIf { it.isNotBlank() } ?: return@synchronized null
+                val version = result.readStateVersion ?: return@synchronized null
+                val maxReadSeq = result.maxReadSeq ?: return@synchronized null
+                val fact =
+                    perReceiverStateVersionStore.applyOrObserveReadStateFact(
+                        serverId = ServerId(serverId),
+                        memberId = MemberId(userId),
+                        scopeId = targetChannelId,
+                        incomingVersion = version,
+                        incomingMaxReadSeq = maxReadSeq
+                    )
+                if (fact == PerReceiverReadStateFactResult.Stale) return@synchronized null
+                projectRemoteMarkedUnreadLocked(
+                    channelId = targetChannelId.value,
+                    markedUnread = true,
+                    intent = SharedActivityIntent.MarkUnread(item)
+                )
+            }
+        reconcileJob?.start()
+        if (outcome == MarkUnreadOutcome.NothingToMark) {
+            _readToggleNotices.tryEmit(RaftReadToggleNotice.MarkUnreadNothing)
         }
     }
 
@@ -3753,9 +4156,15 @@ data class SharedActivityState(
     /**
      * A background load (realtime reconcile, sync-triggered or periodic refresh) is reading the
      * list behind rows already shown. It never sets [refreshing], so the page keeps its rows and
-     * error state; only the header's refresh indicator follows it ([silentRefreshing]).
+     * error state, and shows no refresh chrome at all (ticket 67609860).
      */
     val backgroundRefreshing: Boolean = false,
+    /**
+     * The current [refreshing] load may show the header indicator ([headerRefreshing]): it is the
+     * open, a server / filter switch, or a visible-route Refresh (resume, re-entry) over rows last
+     * read [ActivityHeaderRefreshStaleAfterMillis] ago. Each foreground load sets it afresh.
+     */
+    val headerRefreshAllowed: Boolean = false,
     val loadingMore: Boolean = false,
     val errorCode: String? = null,
     val loadMoreErrorCode: String? = null,
@@ -3787,13 +4196,14 @@ data class SharedActivityState(
         get() = snapshot?.nextOffset
 
     /**
-     * A refresh the user did not pull is reading behind the rows shown: open / re-entry / resume,
-     * server or filter switch over cached rows, realtime or sync reconcile (artin 10-27). The
-     * header shows its refresh indicator for it; a user pull owns the refresh chrome alone (the
-     * pull indicator, artin task #22), so this is false while [pullRefreshing].
+     * The Activity header shows its top-right refresh indicator (ticket 67609860, artin 10-28):
+     * only for a foreground refresh over shown rows that [headerRefreshAllowed] (open, server /
+     * filter switch, resume or re-entry after a while). Background loads (realtime, sync,
+     * periodic: [backgroundRefreshing]) show nothing, and a user pull owns the refresh chrome
+     * alone (the pull indicator, artin task #22), so this is false while [pullRefreshing].
      */
-    val silentRefreshing: Boolean
-        get() = !pullRefreshing && (refreshing || backgroundRefreshing)
+    val headerRefreshing: Boolean
+        get() = refreshing && headerRefreshAllowed && !pullRefreshing
 }
 
 /**
@@ -3899,7 +4309,16 @@ sealed interface SharedActivityIntent {
     data object MarkAllRead : SharedActivityIntent
     data class SetFilter(val filter: InboxFilter) : SharedActivityIntent
     data class MarkDone(val item: InboxItem) : SharedActivityIntent
-    data class UnfollowThread(val item: InboxItem) : SharedActivityIntent
+    /**
+     * Unfollow [item]'s thread. A row the store no longer lists (a deferred Unfollow sent after the
+     * filter changed) is still unfollowed when [listOwnerUserId] / [listOwnerServerId] name the
+     * account and server the store holds now; without them, a row not held writes nothing.
+     */
+    data class UnfollowThread(
+        val item: InboxItem,
+        val listOwnerUserId: String? = null,
+        val listOwnerServerId: String? = null,
+    ) : SharedActivityIntent
     data class FollowThread(val item: InboxItem) : SharedActivityIntent
     data class MarkRead(val item: InboxItem) : SharedActivityIntent
     data class MarkUnread(val item: InboxItem) : SharedActivityIntent
@@ -3937,6 +4356,13 @@ sealed interface SharedActivityIntent {
     data class UndoObjectDone(val item: InboxItem) : SharedActivityIntent
     /** Workspace Artifacts: stop following the row's object (sent after its Undo toast ends). */
     data class UnfollowObject(val item: InboxItem) : SharedActivityIntent
+
+    /**
+     * Web #11687: the person unfollowed [item]'s thread here (its request waits for the undo toast:
+     * [HomeThreadUnfollowPhase.Unfollowed]) or took it back with Undo
+     * ([HomeThreadUnfollowPhase.Restored]); Home's unread for the thread follows at once.
+     */
+    data class ProjectThreadUnfollow(val item: InboxItem, val phase: HomeThreadUnfollowPhase) : SharedActivityIntent
     data class ApplyRealtimeEvent(
         val event: RealtimeEvent,
         val allowLocalPatch: Boolean = true
@@ -3972,6 +4398,7 @@ private fun SharedActivityIntent.activitySummarySource(): String =
         is SharedActivityIntent.ChannelAccessLost -> "channel_access_lost"
         is SharedActivityIntent.UndoObjectDone -> "undo_object_done"
         is SharedActivityIntent.UnfollowObject -> "unfollow_object"
+        is SharedActivityIntent.ProjectThreadUnfollow -> "project_thread_unfollow"
         is SharedActivityIntent.ApplyRealtimeEvent -> "realtime"
         is SharedActivityIntent.ApplyRealtimeSummaryEvent -> "realtime_summary"
     }
@@ -3990,6 +4417,7 @@ private fun SharedActivityIntent.invalidatesGlobalActivitySummary(): Boolean =
         is SharedActivityIntent.UndoObjectDone,
         is SharedActivityIntent.ApplyRealtimeSummaryEvent -> true
         is SharedActivityIntent.UnfollowObject,
+        is SharedActivityIntent.ProjectThreadUnfollow,
         is SharedActivityIntent.ServerSelected,
         SharedActivityIntent.LoadInitial,
         SharedActivityIntent.Refresh,

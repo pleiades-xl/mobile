@@ -2,9 +2,11 @@ package build.raft.app.data
 
 import build.raft.app.model.MemberKind
 import build.raft.app.model.ThreadId
+import build.raft.app.network.sync.CanonicalMessageV2SegmentSource.Latest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 
 class MessageParserTest {
     @Test
@@ -49,6 +51,60 @@ class MessageParserTest {
                     "\"parent-1\": {\"threadChannelId\": \"\", \"replyCount\": 2}}",
             ).replySummariesAuthority,
         )
+    }
+
+    @Test
+    fun decodesTheChannelPageMessageWindowAndAMalformedOneNeverDropsTheRows() {
+        fun parse(windowField: String): SharedMessagesPayload =
+            parseSharedChannelMessages(
+                """
+                {
+                  "messages": [{
+                    "id": "m-7",
+                    "seq": 7,
+                    "channelId": "channel-1",
+                    "senderType": "user",
+                    "senderId": "u-1",
+                    "senderName": "Artin",
+                    "messageType": "chat",
+                    "content": "hi",
+                    "createdAt": "2026-07-25T14:00:00.000Z"
+                  }],
+                  "historyLimited": false$windowField
+                }
+                """.trimIndent(),
+                fallbackThreadId = ThreadId("channel-1"),
+            )
+
+        val window = assertNotNull(
+            parse(
+                ", \"messageWindow\": {\"schemaVersion\":1,\"domain\":\"receiver_visible_messages_v1\"," +
+                    "\"serverId\":\"server-1\",\"scopeId\":\"channel-1\",\"coveredAfterSeq\":0,\"coveredFromSeq\":7,\"coveredThroughSeq\":7," +
+                    "\"remoteHighWaterSeq\":7,\"hasGap\":false,\"hasNewer\":false,\"completeThroughLatest\":true}",
+            ).messageWindow,
+        )
+        assertEquals(0L, window.coveredAfterSeq)
+        assertEquals(7L, window.coveredThroughSeq)
+        assertEquals(
+            build.raft.app.network.sync.CanonicalMessageV2Coverage(
+                1, 7, reachesOldest = true, headAtVerify = true, build.raft.app.network.sync.CanonicalMessageV2SegmentSource.Latest,
+            ),
+            window.toCoverage("server-1", "channel-1", historyLimited = false, Latest),
+        )
+        // An unknown schema or domain proves nothing.
+        assertNull(window.copy(schemaVersion = 2).toCoverage("server-1", "channel-1", historyLimited = false, Latest))
+        assertNull(window.copy(domain = "other").toCoverage("server-1", "channel-1", historyLimited = false, Latest))
+        // A window naming another channel or server (or none) is not this scope's proof.
+        assertNull(window.toCoverage("server-1", "channel-2", historyLimited = false, Latest))
+        assertNull(window.toCoverage("server-2", "channel-1", historyLimited = false, Latest))
+        assertNull(window.copy(scopeId = null).toCoverage("server-1", "channel-1", historyLimited = false, Latest))
+        assertNull(window.copy(serverId = null).toCoverage("server-1", "channel-1", historyLimited = false, Latest))
+        // Absent or malformed: no window, same rows.
+        assertNull(parse("").messageWindow)
+        val malformed = parse(", \"messageWindow\": {\"coveredAfterSeq\": \"x\"}")
+        assertNull(malformed.messageWindow)
+        assertEquals(listOf("m-7"), malformed.messages.map { it.id.value })
+        assertEquals(listOf("m-7"), parse(", \"messageWindow\": 3").messages.map { it.id.value })
     }
 
     @Test

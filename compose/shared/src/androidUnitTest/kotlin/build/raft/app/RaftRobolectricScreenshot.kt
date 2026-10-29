@@ -11,6 +11,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.platform.ViewRootForTest
 import build.raft.designsystem.components.LocalRaftSpinnerStillStep
+import build.raft.designsystem.components.applyRaftSystemBarsAppearance
 import java.io.File
 import java.time.Duration
 import kotlin.math.abs
@@ -29,6 +30,12 @@ import org.robolectric.Shadows.shadowOf
  *
  * Text rasterises differently from a phone, so these guard layout and colours against
  * regressions; cross-platform parity stays the connected capture's job.
+ *
+ * CJK goldens (zh-CN / ja qualifiers) are CI's render. Robolectric bundles the fonts, so the
+ * layout and the glyph forms match on every machine, but some Noto CJK glyphs rasterise a pixel
+ * differently on another host: 0.1–0.25% of a page's pixels, over the tolerance. Take those
+ * goldens from the CI run's `shared-home-screenshots` artifact (`<name>.actual.png`), not from a
+ * local record (settings.storage.zh's golden is CI's render too).
  */
 internal object RaftRobolectricScreenshot {
     private const val GOLDEN_DIR = "src/androidUnitTest/screenshots"
@@ -47,12 +54,17 @@ internal object RaftRobolectricScreenshot {
         // The view drawn: the activity's compose root by default; a dialog test passes the
         // dialog window's decor view (a RaftDialog renders in its own window).
         root: (ComponentActivity) -> View? = { it.window.decorView },
+        // Runs on the settled compose root before the capture (a pointer hovering it), then settles again.
+        interact: ((View) -> Unit)? = null,
         content: @Composable (ComponentActivity) -> Unit,
     ) {
         val previousAppearance = RaftAppThemeState.appearance
         try {
             RaftAppThemeState.apply(appearance)
             val activity = activities.launch()
+            // The host's bar icons as the app sets them for this mode: a dialog window copies them
+            // (#3847), so leaving them to whatever ran before made dialog captures differ by a row.
+            activity.window.applyRaftSystemBarsAppearance(RaftAppThemeState.isDark)
             // Moko string resources read the app context through the shared SQLDelight holder.
             build.raft.app.data.RaftAndroidSqlDatabaseContext.init(activity)
             // Spinners hold still on their first step: a capture is one deterministic frame.
@@ -60,6 +72,10 @@ internal object RaftRobolectricScreenshot {
             settle()
             val composeView = root(activity)?.let(::findComposeRoot)
             assertNotNull(composeView, "no compose root")
+            if (interact != null) {
+                interact(composeView)
+                settle()
+            }
             val bitmap = Bitmap.createBitmap(composeView.width, composeView.height, Bitmap.Config.ARGB_8888)
             composeView.draw(android.graphics.Canvas(bitmap))
             verifyOrRecord(name, bitmap, File(reportDir))

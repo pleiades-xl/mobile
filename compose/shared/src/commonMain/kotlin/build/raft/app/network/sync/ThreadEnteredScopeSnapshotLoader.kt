@@ -1,50 +1,57 @@
 package build.raft.app.network.sync
 
+import build.raft.app.data.ChannelMessageWindow
+
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.serialization.json.JsonArray
 
 /**
- * Write entry of the offline cache (task #1124, Phase 2-2): when the thread screen enters one
- * channel / DM, fetch that one channel's current REST page and commit it as the V2 baseline of the
- * caller's durable partition, so the next entry can render it offline through
- * [ThreadDurableLastKnownReader].
+ * Write entry of the offline cache (task #1124; message storage Phase 2b): the page the thread screen itself
+ * fetched for the channel / DM / reply thread it shows is written through to the caller's durable partition, so the
+ * next entry can render it offline through [ThreadDurableLastKnownReader]. Before Phase 2b the loader fetched its own
+ * copy of the page (`channels/{id}`, `messages/channel?limit=200`, `channels/{id}/threads`).
  *
- * Scope is deliberately narrow: only the channel being entered, whole-page replacement, no
- * difference stitching. Reply threads have their own entry ([loadReplyThreadOnEnter], task #168).
- * The loader never selects or widens the production canary; a scope the canary currently owns is
- * left to the canary.
- *
- * `stillCurrent` is re-read after the network round trip and before the write, so an identity
- * change while the request was in flight cannot land identity A's page under identity B's key.
- * Implementations answer every non-positive case by writing nothing and logging.
+ * The thread store calls [beginEnter] BEFORE its page request (the realtime baseline, the partition generation, the
+ * write revision and the head epoch are taken then), then [persistEnteredPage] with the page it got, or [abandonEnter]
+ * when it got none. `stillCurrent` is re-read before the write, so an identity change while the request was in flight
+ * cannot land identity A's page under identity B's key. Implementations answer every non-positive case by writing
+ * nothing and logging.
  */
-internal fun interface ThreadEnteredScopeSnapshotLoader {
-    suspend fun loadOnEnter(
+internal interface ThreadEnteredScopeSnapshotLoader {
+    /**
+     * Phase 2b: [channelId] (a top-level channel / DM, or with [replyParent] the reply thread under it) is about to
+     * be fetched. Registers the realtime baseline (unless [registerBaseline] is `false`: the page was fetched
+     * already) and reads the partition generation, write revision and head epoch. `null` = this loader writes nothing
+     * for it.
+     */
+    suspend fun beginEnter(
         partition: DurablePartitionKey,
         channelId: SyncScopeId,
-        stillCurrent: () -> Boolean,
-    )
+        replyParent: ThreadDurableReplyParent?,
+        registerBaseline: Boolean = true,
+        /** The generation and revision read before the request, when the ticket is taken after it. */
+        stamp: ThreadDurableRequestStamp? = null,
+    ): ThreadDurableEnterTicket? = null
 
-    /**
-     * Task #168 step 3: the reply-thread twin of [loadOnEnter]. Same admission (flag, one in flight
-     * per scope, partition generation captured before the fetch, `stillCurrent` re-read under the
-     * scope writer), but the scope is the `thread` scope [threadChannelId] under [replyParent], and
-     * the server must confirm that parent before anything is written. Implementations that do not
-     * persist reply threads write nothing.
-     */
-    suspend fun loadReplyThreadOnEnter(
-        partition: DurablePartitionKey,
-        threadChannelId: SyncScopeId,
-        replyParent: ThreadDurableReplyParent,
+    /** Phase 2b: [partition]'s generation and write revision, read before a request that cannot name its scope yet. */
+    suspend fun requestStamp(partition: DurablePartitionKey): ThreadDurableRequestStamp? = null
+
+    /** Phase 2b: write [page] (the page the thread store fetched after [beginEnter]) under [ticket]. */
+    suspend fun persistEnteredPage(
+        ticket: ThreadDurableEnterTicket,
+        page: ThreadDurableEnteredPage,
         stillCurrent: () -> Boolean,
     ) = Unit
+
+    /** Phase 2b: [ticket]'s fetch produced no page to write (failed, reused, focused open). Idempotent. */
+    suspend fun abandonEnter(ticket: ThreadDurableEnterTicket) = Unit
 
     /**
      * Task #14b: the Activity reply-thread prewarm already fetched the thread's latest reply page
      * ([rawMessages], sent with `limit=`[requestedLimit]); persist THAT page as the `thread` scope's
      * window instead of discarding it with the in-memory prewarm. Same admission as
-     * [loadReplyThreadOnEnter] (flag, partition generation, server-confirmed parent, `stillCurrent`
+     * [beginEnter] + [persistEnteredPage] (flag, partition generation, server-confirmed parent, `stillCurrent`
      * re-read under the scope writer) but page-only: no realtime baseline is registered, a stored
      * window at least as new as the page is never replaced, and any write of the scope after
      * [expectedCommitGeneration] was read (e.g. an enter that saw a deletion) makes the page stale. Implementations that do not persist reply
@@ -68,8 +75,25 @@ internal fun interface ThreadEnteredScopeSnapshotLoader {
         requestedLimit: Int,
         /** [replyThreadCommitGeneration] read before the page was fetched; any later write of the scope wins. */
         expectedCommitGeneration: Long,
+        /** The page's server `messageWindow` and `historyLimited` (what range it proves; null = legacy claim). */
+        messageWindow: ChannelMessageWindow? = null,
+        historyLimited: Boolean = false,
+        /**
+         * Phase 3b: the partition's head epoch ([headEpoch]) read BEFORE the page's HTTP request (with the partition
+         * generation). A horizonReset between that read and this write voids the page's head claim, never its facts.
+         * `null` = not captured: the writer reads it now.
+         */
+        requestHeadEpoch: Long? = null,
+        /** Phase 2b: [currentLocalRev] read before the page's fetch (`null` = read at write time). */
+        revAtRequest: Long? = null,
         stillCurrent: () -> Boolean,
     ) = Unit
+
+    /** Phase 3b: the partition's head epoch, for a caller to read before its page request (`null` = not tracked). */
+    fun headEpoch(partition: DurablePartitionKey): Long? = null
+
+    /** Message storage Phase 2b: the partition's fact write revision, read before a page fetch (`revAtRequest`). */
+    suspend fun currentLocalRev(partition: DurablePartitionKey): Long? = null
 }
 
 /**
@@ -118,17 +142,24 @@ internal fun interface ThreadDurablePageExtender {
         rawMessages: JsonArray,
         requestedLimit: Int,
         replyParent: ThreadDurableReplyParent?,
+        /**
+         * Phase 3b: the partition's head epoch ([headEpoch]) read BEFORE the page's HTTP request (with the partition
+         * generation). A horizonReset between that read and this write voids the page's head claim, never its facts.
+         * `null` = not captured: the writer reads it now.
+         */
+        requestHeadEpoch: Long?,
         stillCurrent: () -> Boolean,
     )
 
+    /** Phase 3b: the partition's head epoch, for a caller to read before its page request (`null` = not tracked). */
+    fun headEpoch(partition: DurablePartitionKey): Long? = null
+
     /**
      * Gap catch-up entry (task #168 step 1, product decision "option A"): [rawMessages] is the
-     * channel's LATEST page (`messages/channel/{id}?limit=[requestedLimit]`, no cursor). Whether it
-     * joins the stored window is the explicit fact "a fact stored inside the window is on the page"
-     * (both blocks are contiguous, so sharing one message means page ∪ window is contiguous):
-     * - joined → the page is merged and the newest edge moves to the page (`extended`);
-     * - not joined → the stored window is REPLACED by the page as a snapshot (`window_replaced`,
-     *   logged with both windows' bounds); the dropped history comes back through older paging.
+     * channel's LATEST page (`messages/channel/{id}?limit=[requestedLimit]`, no cursor). Message storage
+     * Phase 2a: the page is stored with the seq range it proves ([messageWindow], else the legacy latest-page
+     * claim) unioned into the stored ranges — `window_extended` when it reaches the stored head, otherwise
+     * the old head stays as an older island (`island_kept`); nothing stored is dropped.
      * Same admission as [extendWithAdjacentPage]; never creates a window (no stored window ⇒
      * nothing). Implementations that do not persist pages write nothing.
      */
@@ -138,8 +169,26 @@ internal fun interface ThreadDurablePageExtender {
         rawMessages: JsonArray,
         requestedLimit: Int,
         replyParent: ThreadDurableReplyParent?,
+        /** The page's server `messageWindow` and `historyLimited` (what range it proves; null = legacy claim). */
+        messageWindow: ChannelMessageWindow? = null,
+        historyLimited: Boolean = false,
+        /**
+         * Phase 3b: the partition's head epoch ([headEpoch]) read BEFORE the page's HTTP request (with the partition
+         * generation). A horizonReset between that read and this write voids the page's head claim, never its facts.
+         * `null` = not captured: the writer reads it now.
+         */
+        requestHeadEpoch: Long? = null,
+        /** Phase 2b: [currentLocalRev] read before the page's fetch (`null` = read at write time). */
+        revAtRequest: Long? = null,
         stillCurrent: () -> Boolean,
     ) = Unit
+
+    /**
+     * Message storage Phase 2b: the partition's fact write revision, read by a caller BEFORE it fetches a page and
+     * handed back as that page's `revAtRequest` (a fact written after it is newer than the page and kept). `null` =
+     * this writer does not persist pages.
+     */
+    suspend fun currentLocalRev(partition: DurablePartitionKey): Long? = null
 
     /**
      * Task #168 step 3: called BEFORE the gap catch-up fetches its latest page, for a top-level channel /
@@ -170,8 +219,20 @@ internal fun interface ThreadDurablePageExtender {
         requestedLimit: Int,
         replyParent: ThreadDurableReplyParent?,
         baseline: CanonicalMessageV2EnterBaseline?,
+        messageWindow: ChannelMessageWindow? = null,
+        historyLimited: Boolean = false,
+        /**
+         * Phase 3b: the partition's head epoch ([headEpoch]) read BEFORE the page's HTTP request (with the partition
+         * generation). A horizonReset between that read and this write voids the page's head claim, never its facts.
+         * `null` = not captured: the writer reads it now.
+         */
+        requestHeadEpoch: Long? = null,
+        revAtRequest: Long? = null,
         stillCurrent: () -> Boolean,
-    ) = applyLatestPage(partition, channelId, rawMessages, requestedLimit, replyParent, stillCurrent)
+    ) = applyLatestPage(
+        partition, channelId, rawMessages, requestedLimit, replyParent, messageWindow, historyLimited, requestHeadEpoch, revAtRequest,
+        stillCurrent,
+    )
 
     /**
      * Task #14 part C: [rawMessages] is the `messages/context/{anchor}` page an anchored open (Activity row,
@@ -193,6 +254,58 @@ internal fun interface ThreadDurablePageExtender {
         hasOlder: Boolean,
         hasNewer: Boolean,
         replyParent: ThreadDurableReplyParent?,
+        /**
+         * Phase 3b: the partition's head epoch ([headEpoch]) read BEFORE the page's HTTP request (with the partition
+         * generation). A horizonReset between that read and this write voids the page's head claim, never its facts.
+         * `null` = not captured: the writer reads it now.
+         */
+        requestHeadEpoch: Long? = null,
         stillCurrent: () -> Boolean,
     ) = Unit
 }
+
+/**
+ * Message storage Phase 2b: what [ThreadEnteredScopeSnapshotLoader.beginEnter] took before the thread store's page
+ * request. Opaque to the thread store.
+ */
+internal class ThreadDurableEnterTicket(
+    val partition: DurablePartitionKey,
+    val channelId: SyncScopeId,
+    val replyParent: ThreadDurableReplyParent?,
+    val expectedPartitionGeneration: Long,
+    val revAtRequest: Long,
+    val baseline: CanonicalMessageV2EnterBaseline?,
+    /** Phase 3b: the partition's head epoch read before the request (`null` = not tracked). */
+    val expectedHeadEpoch: Long? = null,
+) {
+    val stamp: ThreadDurableRequestStamp
+        get() = ThreadDurableRequestStamp(partition, expectedPartitionGeneration, revAtRequest, expectedHeadEpoch)
+}
+
+/**
+ * Message storage Phase 2b: a partition's generation and write revision as read before a request; Phase 3b: with its
+ * head epoch (a horizonReset after that read voids the page's head claim, never its facts).
+ */
+internal data class ThreadDurableRequestStamp(
+    val partition: DurablePartitionKey,
+    val expectedPartitionGeneration: Long,
+    val revAtRequest: Long,
+    val expectedHeadEpoch: Long? = null,
+)
+
+/**
+ * Message storage Phase 2b: the page the thread store fetched for [channelId] (`messages/channel/{id}?limit=`), its raw
+ * rows and server window, plus what the same load already knew: [channelType] / [taskParentChannelId] from the
+ * channel detail (top-level only; `null` = unknown) and [replyCountByParentId] from the page's embedded summaries
+ * (`null` = the page carried none).
+ */
+internal data class ThreadDurableEnteredPage(
+    val channelId: SyncScopeId,
+    val rawMessages: JsonArray,
+    val requestedLimit: Int,
+    val messageWindow: ChannelMessageWindow?,
+    val historyLimited: Boolean,
+    val channelType: String? = null,
+    val taskParentChannelId: SyncScopeId? = null,
+    val replyCountByParentId: Map<String, Int>? = null,
+)

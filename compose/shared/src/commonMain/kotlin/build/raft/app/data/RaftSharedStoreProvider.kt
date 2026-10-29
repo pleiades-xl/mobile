@@ -9,6 +9,7 @@ import build.raft.app.SharedThreadComposerDraftPersistSlice
 import build.raft.app.SharedThreadComposerDraftPersistence
 import build.raft.app.CoroutineThreadComposerDraftPersistenceScheduler
 import build.raft.app.ChannelSettingsSnapshotCache
+import build.raft.app.ChannelSettingsResourceSpec
 import build.raft.app.KeyValuePixelAvatarStore
 import build.raft.app.ProcessAttachmentAuthScopes
 import build.raft.app.ReplyCacheProvenance
@@ -29,6 +30,7 @@ import build.raft.app.refreshPixelAvatarsFromWeb
 import build.raft.app.raftLogError
 import build.raft.app.raftLogInfo
 import build.raft.app.raftLogWarn
+import build.raft.app.model.AgentActivitySubscribed
 import build.raft.app.model.AgentCreated
 import build.raft.app.model.ChannelId
 import build.raft.app.model.DirectMessageCreated
@@ -116,6 +118,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
 import kotlin.coroutines.EmptyCoroutineContext
@@ -201,13 +204,62 @@ internal fun createSharedRealtimeAuthorityProvider(
         onAuthRevisionAdvanced = onAuthRevisionAdvanced,
     )
 
+/**
+ * The owner a realtime `channel:members-updated` acts for: the account of the grant it was admitted under
+ * ([admission]), and only while the current auth binding ([context]) is still that grant's account AND
+ * authority generation (the same check as the transport rebaseline). Otherwise null (a no-op): an account
+ * switch racing the delivery never acts on the next account's lists.
+ *
+ * A null [admission] is a no-op too. That is the canonical-final surface delivery, which carries no grant and
+ * so, like its presence and activity-unread writes, must not act; it only carries gateway-admitted message
+ * frames, and a `channel:members-updated` (no message fold input) always takes the grant-admitted path.
+ */
+internal fun channelMembersUpdatedOwnerOrNull(
+    context: ProcessPresenceAuthContext?,
+    admission: RealtimePresenceAdmission?,
+    serverId: String,
+): AuthenticatedRouteOwner? {
+    if (admission == null || context == null) return null
+    if (context.accountId != admission.principalId || context.authorityGeneration != admission.authGeneration) return null
+    val owner = context.ownerFor(serverId) ?: return null
+    return AuthenticatedRouteOwner(owner.environmentId, owner.accountId, owner.serverId).normalizedOrNull()
+}
+
+/**
+ * The provider's `channel:members-updated` apply: the owner is captured on the delivery path (see
+ * [channelMembersUpdatedOwnerOrNull]); the reloads run off it in [scope] (network requests; a burst coalesces
+ * per store), pinned to that owner, so an account switch before they run makes them a no-op.
+ */
+internal fun launchChannelMembersUpdated(
+    scope: CoroutineScope,
+    context: ProcessPresenceAuthContext?,
+    admission: RealtimePresenceAdmission?,
+    serverId: String,
+    channelId: String?,
+    stores: () -> List<SharedServerMembersStore>,
+) {
+    val owner = channelMembersUpdatedOwnerOrNull(context, admission, serverId) ?: return
+    scope.launch {
+        applyChannelMembersUpdated(
+            stores(),
+            ServerId(owner.serverId),
+            channelId?.let(::ChannelId),
+            expectedOwner = owner,
+        )
+    }
+}
+
 internal fun createSharedRealtimeDomainEventOwner(
     tasksDataStore: SharedTasksDataStore?,
     cursorStore: RealtimeAppliedSeqCursorStore?,
     authorityProvider: RealtimeAuthorityProvider,
+    onAgentDeleted: (suspend (serverId: String, agentId: String) -> Unit)? = null,
+    onChannelMembersUpdated: (suspend (serverId: String, channelId: String?, admission: RealtimePresenceAdmission?) -> Unit)? = null,
 ): SharedRealtimeDomainEventOwner =
     SharedRealtimeDomainEventOwner(
         tasksDataStore = tasksDataStore,
+        onAgentDeleted = onAgentDeleted,
+        onChannelMembersUpdated = onChannelMembersUpdated,
         cursorStore = cursorStore,
         runIfCurrentGrant = authorityProvider::runIfCurrentGrant,
         runWithCurrentMessageGrant = authorityProvider::runWithCurrentMessageGrant,
@@ -403,6 +455,8 @@ internal class RaftSharedStoreProvider private constructor(
      * auth-terminal cleanup and per server on lost access. New resources need no cleanup wiring.
      */
     internal val offlineResourceCache: RaftOfflineResourceCache,
+    /** Channel / thread member lists offline (rows only, never permission flags). */
+    private val channelMembersOffline: SharedChannelMembersOffline,
     private val homeIdentityPersistSlice: MviPersistSlice<SharedHomeState, SharedHomeIntent>,
     val apiEnvironmentStore: SharedApiEnvironmentStore,
     val eventBus: RaftEventBusRelay,
@@ -422,6 +476,8 @@ internal class RaftSharedStoreProvider private constructor(
     internal val threadDurableAccessEvictor: ThreadDurableAccessEvictor,
     internal val threadPendingSendJournal: ThreadPendingSendJournal,
     val channelSettingsSnapshotCache: ChannelSettingsSnapshotCache,
+    /** The header's `GET channels/{id}` detail as an offline resource (stand-in on a cold / offline open). */
+    internal val storedConversationDetails: StoredConversationDetails,
     val foregroundReconciler: SharedForegroundReconciler,
     private val homeStoreScope: CoroutineScope,
     private val homeActivityStoreScope: CoroutineScope,
@@ -527,8 +583,39 @@ internal class RaftSharedStoreProvider private constructor(
         )
     }
 
-    /** Agent detail pages (data-layer plan step 5): memory-only, per-server LRU. */
-    internal val agentDetailCache: RaftAgentDetailCache = RaftKeyedSnapshotCache()
+    /**
+     * Agent detail pages (data-layer plan step 5): per-server LRU in memory, a whitelisted record on disk
+     * (offline resource; never secrets) for a cold / offline open.
+     */
+    internal val agentDetailCache: RaftAgentDetailCache =
+        raftAgentDetailCache(offlineResourceCache.resource(AgentDetailResourceSpec))
+
+    /**
+     * Realtime `channel:members-updated`: every members store reloads its held list or drops a stored one
+     * ([channelId] null: every list of the server). [admission]: the grant the event was admitted under
+     * (see [channelMembersUpdatedOwnerOrNull]).
+     */
+    internal suspend fun applyChannelMembersUpdated(
+        serverId: String,
+        channelId: String?,
+        admission: RealtimePresenceAdmission?,
+    ) {
+        launchChannelMembersUpdated(
+            scope = threadSendScope,
+            context = replyCacheAuthContext.value,
+            admission = admission,
+            serverId = serverId,
+            channelId = channelId,
+            stores = ::allServerMembersStores,
+        )
+    }
+
+    /** Realtime `agent:deleted` for the current account: its cached detail page (memory and disk) goes. */
+    internal suspend fun evictAgentDetail(serverId: String, agentId: String) {
+        val (environmentId, accountId) = currentAccountBindingOrNull() ?: return
+        val owner = sharedAgentDetailOwner(environmentId, accountId, ServerId(serverId)) ?: return
+        agentDetailCache.evict(owner.agentDetailCacheKey(MemberId(agentId)))
+    }
 
     /** The account's local data on sign-out and on server-access loss (see the class). */
     private val accountLocalData =
@@ -548,6 +635,8 @@ internal class RaftSharedStoreProvider private constructor(
                 // App link previews and consent answers, and Artifact summaries: per viewer, session only.
                 if (appLinkPreviewStoreLazy.isInitialized()) appLinkPreviewStore.clearAll()
                 if (artifactSummaryStoreLazy.isInitialized()) artifactSummaryStore.clearAll()
+                // The Artifact viewer's headers and its kept WebView (Tenny's cache rule 1).
+                build.raft.app.RaftArtifactViewerMemory.clear()
             },
             logger = sharedInfoLogger("CanonicalMessageV2Store", "canonical_v2_access_evict"),
         )
@@ -643,6 +732,8 @@ internal class RaftSharedStoreProvider private constructor(
         // tail. Only a current grant may move the epoch, so a late signal from a retired identity is ignored.
         realtimeAuthorityProvider.runIfCurrentGrant(grant) {
             realtimeDomainEventOwner.noteTransportEpoch(grant, transportEpoch)
+            // A new socket has no agent activity subscriptions: ask for the open screens' agents again.
+            agentActivitySubscriptions.onConnected(grant.serverId)
         }
         var rebaselineResult: ProcessPresenceTransportRebaselineResult? = null
         var rebaselineOwner: ProcessServerMembersOwner? = null
@@ -1091,6 +1182,29 @@ internal class RaftSharedStoreProvider private constructor(
         )
     }
 
+    /** The agents whose detailed `agent:activity` the open screens want, per server socket. */
+    val agentActivitySubscriptions: AgentActivitySubscriptions by lazy {
+        AgentActivitySubscriptions(
+            scope = threadSendScope,
+            send = { serverId, subscribe, agentIds ->
+                RaftRealtimeEvents(eventBus).postAgentActivitySubscription(serverId, subscribe, agentIds)
+            },
+        )
+    }
+
+    /**
+     * Missed `appearance:updated` notices are not replayed: every socket (re)connect and every
+     * return to the foreground reads the server's appearance again ([ServerAppearanceCatchUp]).
+     */
+    private val serverAppearanceCatchUp: ServerAppearanceCatchUp by lazy {
+        val repository = NetworkServerAppearanceRepository(networkClient, authStore)
+        ServerAppearanceCatchUp(
+            scope = threadSendScope,
+            load = { serverId -> repository.load(serverId) },
+            logger = sharedInfoLogger("SlockServerTheme", "server_appearance_catch_up"),
+        )
+    }
+
     /** The current API environment's id: the feature-flag evaluation context. */
     private fun updateNetworkKmmRecoveryEnvironment(): String {
         val environment = apiEnvironmentStore.current()
@@ -1117,6 +1231,35 @@ internal class RaftSharedStoreProvider private constructor(
             featureFlags = serverFeatureFlags,
             diagnosticsLogger = sharedInfoLogger("SyncCoreShadow", "sync_core_shadow"),
         )
+
+    /**
+     * One ingest for every owner (message storage Phase 3a): its ordered worker and duplicate-delivery memory span
+     * the process and shell entries. Declared before `init`, which installs the gateway that reads it.
+     */
+    private val canonicalMessageV2ResumeIngest: CanonicalMessageV2ResumeIngest by lazy {
+        CanonicalMessageV2ResumeIngest(
+            tracker = canonicalMessageV2Canary,
+            generationEngine = canonicalMessageV2GenerationEngine,
+            isEnabledForServer = { serverId ->
+                serverFeatureFlags.isEnabled(ServerId(serverId), SYNC_CORE_MESSAGES_FEATURE_FLAG_KEY)
+            },
+            // Lines already start with `canonical_v2_resume`.
+            logger = canonicalMessageV2SelfTaggedLogger("CanonicalMessageV2Resume"),
+            dispatcher = RaftMessageDbDispatcher,
+        )
+    }
+
+    private val canonicalMessageV2RealtimeIngest: CanonicalMessageV2RealtimeIngest by lazy {
+        CanonicalMessageV2RealtimeIngest(
+            tracker = canonicalMessageV2Canary,
+            generationEngine = canonicalMessageV2GenerationEngine,
+            isEnabledForServer = { serverId ->
+                serverFeatureFlags.isEnabled(ServerId(serverId), SYNC_CORE_MESSAGES_FEATURE_FLAG_KEY)
+            },
+            // Lines already start with `canonical_v2_realtime`.
+            logger = canonicalMessageV2SelfTaggedLogger("CanonicalMessageV2Realtime"),
+        )
+    }
 
     init {
         // Message storage Phase 0a: the V1 shadow writers are gone and nothing ever read their rows, so drop
@@ -1168,6 +1311,10 @@ internal class RaftSharedStoreProvider private constructor(
             appForeground = RaftStaleReadRecoverySignals.foreground,
             coversServer = ::syncChangesPullAllowed,
         )
+        // A theme changed on another device while backgrounded: read the selected server's again.
+        serverAppearanceCatchUp.followAppLifecycle(RaftStaleReadRecoverySignals.foreground) {
+            authStore.readSession()?.currentServerId
+        }
         // App start: read this environment's client config (and again on each environment change).
         clientConfigStore.start()
         // Attach canonical/reaction shadow mutation to the dedicated process
@@ -1176,6 +1323,10 @@ internal class RaftSharedStoreProvider private constructor(
         realtimeDomainEventOwner.installReactionShadowLane(buildReactionShadowLane())
         realtimeDomainEventOwner.installCanonicalMessageV2OwnerGateway(
             buildCanonicalMessageV2OwnerGateway(),
+        )
+        // Phase 3b: only the process owner saves the realtime applied seq, so only it stores resume replays.
+        realtimeDomainEventOwner.installCanonicalMessageV2ResumeGateway(
+            RealtimeResumeCanonicalMessageV2Gateway(canonicalMessageV2ResumeIngest),
         )
         realtimeAuthorityProvider.start(threadSendScope)
         ProcessRealtimeIngressCoordinator(
@@ -1205,6 +1356,8 @@ internal class RaftSharedStoreProvider private constructor(
                 if (allComputersStores().isEmpty()) computersDurableStore.evictServer(grant.serverId, lostAccountId)
                 jointConnectionsCache.dropServer(grant.serverId, lostAccountId)
                 agentDetailCache.dropServer(grant.serverId, lostAccountId)
+                // Tasks lists leave memory before the offline wipe below, so the offline mirror cannot store them again.
+                tasksDataStore.dropServer(grant.serverId)
                 syncCursorStore.clearServer(grant.serverId, lostAccountId)
                 // #45: that server's recent searches and frequent people / channels.
                 searchPersonalizationRepository.dropServer(grant.serverId, lostAccountId, nowMillis = defaultNowMillis())
@@ -1231,6 +1384,8 @@ internal class RaftSharedStoreProvider private constructor(
                     RaftStaleReadRecoverySignals.onRealtimeRoomsJoined()
                     // Missed `server:features-changed` notices are not replayed: refetch on every (re)connect.
                     serverFeatureFlagChangeRefresher.onReconnected(ServerId(grant.serverId))
+                    // Nor are `appearance:updated` ones: a theme changed elsewhere while offline.
+                    serverAppearanceCatchUp.onReconnected(ServerId(grant.serverId))
                 }
             },
             onAccepted = { grant, event ->
@@ -1315,9 +1470,13 @@ internal class RaftSharedStoreProvider private constructor(
             logger = sharedInfoLogger("SyncCoreReactionShadow", "sync_core_reaction_shadow"),
         )
 
-    /** Task #168 step 3: the realtime path never requests the network; one gateway shape for every owner. */
+    /**
+     * Task #168 step 3: the realtime path never requests the network; one gateway shape for every owner. Message
+     * storage Phase 3a: every frame is stored (the canary only decides the head-segment claim).
+     */
     private fun buildCanonicalMessageV2OwnerGateway(): CanonicalMessageV2OwnerGateway =
-        ProviderBackedCanonicalMessageV2OwnerGateway(canary = canonicalMessageV2Canary)
+        RealtimeIngestCanonicalMessageV2OwnerGateway(ingest = canonicalMessageV2RealtimeIngest, canary = canonicalMessageV2Canary)
+
 
     /**
      * Task #168 step 3: whether the user is known NOT to be a member of (serverId, channelId), read from every
@@ -1371,17 +1530,52 @@ internal class RaftSharedStoreProvider private constructor(
         }
         val serverId = ServerId(provenance.serverId)
         val projection = detail.toCanonicalConversationDirectoryProjection(serverId) ?: return false
-        return conversationIdentityHub(scope).publishCanonical(
-            authority =
-                SharedConversationIdentityAuthority(
-                    environmentId = provenance.environmentId,
-                    accountId = provenance.principalId,
-                    serverId = provenance.serverId,
-                    authGeneration = provenance.authGeneration,
-                    selectionGeneration = provenance.selectionGeneration,
-                ),
-            projection = projection,
-        )
+        val published =
+            conversationIdentityHub(scope).publishCanonical(
+                authority =
+                    SharedConversationIdentityAuthority(
+                        environmentId = provenance.environmentId,
+                        accountId = provenance.principalId,
+                        serverId = provenance.serverId,
+                        authGeneration = provenance.authGeneration,
+                        selectionGeneration = provenance.selectionGeneration,
+                    ),
+                projection = projection,
+            )
+        // The thread data source stores the accepted detail (fenced from its request's start).
+        return published
+    }
+
+    /**
+     * The stored header detail of [channelIds] (offline resource) into this shell's identity hub, for a page
+     * opened on a cold start or offline; the network's detail (when it arrives) replaces it, and a detail
+     * already there is never overwritten. Returns how many were published.
+     */
+    internal suspend fun restoreStoredConversationIdentities(
+        scope: RaftShellStoreScope,
+        serverId: String,
+        channelIds: Collection<String>,
+    ): Int {
+        val identity = captureThreadReplyCacheIdentity(scope) ?: return 0
+        if (identity.serverId != serverId.trim()) return 0
+        val owner =
+            StoredConversationDetailOwner(
+                environmentId = identity.environmentId,
+                accountId = identity.principalId,
+                serverId = identity.serverId,
+                authGeneration = identity.authGeneration,
+                selectionGeneration = identity.selectionGeneration,
+            )
+        var published = 0
+        for (channelId in channelIds.map { it.trim() }.filter { it.isNotEmpty() }.distinct()) {
+            val detail = storedConversationDetails.read(owner, channelId) ?: continue
+            // The account / selection may have moved while the row was read.
+            if (captureThreadReplyCacheIdentity(scope) != identity) return published
+            if (storedConversationDetails.restore(owner, channelId, conversationIdentityHub(scope), detail)) {
+                published += 1
+            }
+        }
+        return published
     }
 
     fun sharedHomeStore(scope: RaftShellStoreScope): SharedHomeStore? =
@@ -1690,6 +1884,7 @@ internal class RaftSharedStoreProvider private constructor(
                     processOwner = { serverId -> processServerMembersOwner(authStore(scope), serverId) },
                     avatarRefStore = memberAvatarRefStore,
                     durableStore = serverMembersDurableStore,
+                    channelMembersOffline = channelMembersOffline,
                     actorResolve = jointActorResolve(networkClient(scope)),
                     actorResolveScope = RaftStoreThreading.newScope(),
                     incrementalSyncCoversRoster = { serverId -> syncChangesPullAllowed(serverId.value) }
@@ -1829,10 +2024,7 @@ internal class RaftSharedStoreProvider private constructor(
                     computers = RaftComputersNetworkApi(networkClient(scope)),
                     agents = RaftAgentsNetworkApi(networkClient(scope)),
                     logger = formLogger
-                ),
-                runtimeFormV2Enabled = { serverId ->
-                    serverFeatureFlags.isEnabled(serverId, RUNTIME_FORM_V2_FEATURE_FLAG_KEY)
-                }
+                )
             ).also { store ->
                 (shellAuthStore as? RaftAuthSessionEventSource)?.let { events ->
                     shellCreateAgentFormOwnerJobs.getOrPut(scope) {
@@ -2106,6 +2298,7 @@ internal class RaftSharedStoreProvider private constructor(
                     replyThreadFreshnessLedger = threadPayloadStore.freshnessLedger,
                     foregroundLoadGate = threadPayloadStore.foregroundLoadGate,
                     onUnreadCountsChanged = onUnreadCountsChanged,
+                    onThreadUnfollowProjection = { intent -> homeStores.get(scope)?.dispatch(intent) },
                     onSummaryFact = activityUnreadSummaryStore::submitFact,
                     onSummaryInvalidated = activityUnreadSummaryStore::submitInvalidation,
                     diagnosticsLogger = diagnosticsLogger
@@ -2133,6 +2326,7 @@ internal class RaftSharedStoreProvider private constructor(
                 replyThreadFreshnessLedger = threadPayloadStore.freshnessLedger,
                 foregroundLoadGate = threadPayloadStore.foregroundLoadGate,
                 onUnreadCountsChanged = onUnreadCountsChanged ?: {},
+                onThreadUnfollowProjection = { intent -> homeStores.get(scope)?.dispatch(intent) },
                 onSummaryFact = activityUnreadSummaryStore::submitFact,
                 onSummaryInvalidated = activityUnreadSummaryStore::submitInvalidation,
                 activityObjectsRepository = NetworkActivityObjectsRepository(networkClient),
@@ -2386,7 +2580,10 @@ internal class RaftSharedStoreProvider private constructor(
         homeActivityStoreScopes.remove(scope)?.cancel()
         shellNetworkClients.remove(scope)
         shellAuthStores.remove(scope)
-        shellServerMembersStores.remove(scope)?.clearScopedReadCaches()
+        shellServerMembersStores.remove(scope)?.let { store ->
+            store.clearScopedReadCaches()
+            store.dispose()
+        }
         shellRealtimeDomainEventOwners.remove(scope)
         shellAgentTypingStores.remove(scope)?.close()
         shellAgentDetailStores.remove(scope)
@@ -2487,11 +2684,8 @@ internal class RaftSharedStoreProvider private constructor(
                     "namespace=${RaftLocalPreferenceStore.KuiklyNamespace} " +
                     "scope=${sharedPreferenceStoreBinding.scope}"
             )
-            val apiEnvironmentKeyValueStoreBinding =
-                RaftSharedKeyValueStoreProvider.create(
-                    namespace = SharedApiEnvironmentStore.Namespace,
-                    storageName = "API environment"
-                )
+            // Shared with the environment indicator, which reads it without building this provider.
+            val apiEnvironmentKeyValueStoreBinding = RaftAppScopeApiEnvironment.binding()
             val apiEnvironmentKeyValueStore = apiEnvironmentKeyValueStoreBinding.store
             logSharedAuthDiagnostic(
                 "shared_key_value",
@@ -2499,15 +2693,18 @@ internal class RaftSharedStoreProvider private constructor(
                     "namespace=${SharedApiEnvironmentStore.Namespace} " +
                     "scope=${apiEnvironmentKeyValueStoreBinding.scope}"
             )
-            val apiEnvironmentStore =
-                SharedApiEnvironmentStore(
-                    apiEnvironmentKeyValueStore
-                )
+            val apiEnvironmentStore = RaftAppScopeApiEnvironment.store()
             // Content-addressed avatar keys are host-free only for the active environment's hosts.
             apiEnvironmentStore.current().let { RaftAvatarTrustedHosts.configure(it.apiBaseUrl, it.webUrl) }
             CoroutineScope(SupervisorJob()).launch {
                 apiEnvironmentStore.state.collect { RaftAvatarTrustedHosts.configure(it.apiBaseUrl, it.webUrl) }
             }
+            val offlineResourceCache =
+                RaftOfflineResourceCache(
+                    rows = SqlDelightRaftOfflineResourceRows(database),
+                    environmentId = { apiEnvironmentStore.current().apiBaseUrl },
+                    logger = sharedInfoLogger("SlockOfflineResources", "offline_resources"),
+                )
             val tasksDataStore =
                 SharedTasksDataStore(
                     ownerIdentityProvider = {
@@ -2517,7 +2714,8 @@ internal class RaftSharedStoreProvider private constructor(
                     },
                     currentServerIdProvider = {
                         authStore.readSession()?.currentServerId
-                    }
+                    },
+                    offlineLists = SharedTasksOfflineLists(offlineResourceCache.resource(TaskListResourceSpec)),
                 )
             CoroutineScope(SupervisorJob()).launch {
                 authStore.authSessionEvents.collect { event ->
@@ -3021,6 +3219,11 @@ internal class RaftSharedStoreProvider private constructor(
                     logger = sharedInfoLogger("SlockServerMembers", "server_members_durable"),
                 )
             lateinit var provider: RaftSharedStoreProvider
+            val channelMembersOffline =
+                SharedChannelMembersOffline(
+                    resource = offlineResourceCache.resource(ChannelMembersResourceSpec),
+                    logger = sharedInfoLogger("SlockOfflineResources", "channel_members_offline"),
+                )
             val serverMembersStore =
                 SharedServerMembersStore(
                     memberRepository = processServerMembersRepository,
@@ -3044,6 +3247,7 @@ internal class RaftSharedStoreProvider private constructor(
                     },
                     avatarRefStore = memberAvatarRefStore,
                     durableStore = serverMembersDurableStore,
+                    channelMembersOffline = channelMembersOffline,
                     actorResolve = jointActorResolve(networkClient),
                     actorResolveScope = RaftStoreThreading.newScope(),
                     incrementalSyncCoversRoster = { serverId -> provider.syncChangesPullAllowed(serverId.value) }
@@ -3133,12 +3337,8 @@ internal class RaftSharedStoreProvider private constructor(
                     logger = canonicalMessageV2SelfTaggedLogger("CanonicalMessageV2AdjacentPage"),
                     isKnownNonMember = { serverId, channelId -> provider.isKnownNonMemberConversation(serverId, channelId) },
                 )
-            val offlineResourceCache =
-                RaftOfflineResourceCache(
-                    rows = SqlDelightRaftOfflineResourceRows(database),
-                    environmentId = { apiEnvironmentStore.current().apiBaseUrl },
-                    logger = sharedInfoLogger("SlockOfflineResources", "offline_resources"),
-                )
+            val storedConversationDetails =
+                StoredConversationDetails(offlineResourceCache.resource(ConversationDetailResourceSpec))
             provider = RaftSharedStoreProvider(
                 host = host,
                 sqlDatabase = database,
@@ -3201,6 +3401,7 @@ internal class RaftSharedStoreProvider private constructor(
                     ),
                 homeSavedStateCache = SharedHomeSavedStateCache(offlineResourceCache.resource(SavedListResourceSpec)),
                 offlineResourceCache = offlineResourceCache,
+                channelMembersOffline = channelMembersOffline,
                 homeIdentityPersistSlice =
                     createSharedHomeIdentityPersistSlice(
                         storage = SharedPreferencePersistStorage(sharedPreferenceStore),
@@ -3214,6 +3415,10 @@ internal class RaftSharedStoreProvider private constructor(
                         tasksDataStore = tasksDataStore,
                         cursorStore = RealtimeAppliedSeqCursorStore(sharedPreferenceStore),
                         authorityProvider = realtimeAuthorityProvider,
+                        onAgentDeleted = { serverId, agentId -> provider.evictAgentDetail(serverId, agentId) },
+                        onChannelMembersUpdated = { serverId, channelId, admission ->
+                            provider.applyChannelMembersUpdated(serverId, channelId, admission)
+                        },
                     ).also { owner ->
                         // task #136: agent presence flows straight into the
                         // process registry's owner partition for the realtime
@@ -3225,6 +3430,9 @@ internal class RaftSharedStoreProvider private constructor(
                         owner.installActivityUnreadSink(activityUnreadRealtimeSink)
                         owner.installServerAppearanceSink { principalId, event ->
                             authStore.applyRealtimeServerAppearance(principalId, event)
+                        }
+                        owner.installAgentActivitySubscribedSink { serverId, event ->
+                            provider.agentActivitySubscriptions.onSubscribed(serverId, event.agentIds)
                         }
                     },
                 realtimeAuthorityProvider = realtimeAuthorityProvider,
@@ -3258,7 +3466,12 @@ internal class RaftSharedStoreProvider private constructor(
                         logger = sharedInfoLogger("CanonicalMessageV2Store", "canonical_v2_access_evict"),
                     ),
                 threadPendingSendJournal = threadPendingSendJournal,
-                channelSettingsSnapshotCache = ChannelSettingsSnapshotCache(),
+                channelSettingsSnapshotCache =
+                    ChannelSettingsSnapshotCache(
+                        stored = offlineResourceCache.resource(ChannelSettingsResourceSpec),
+                        storedDetails = storedConversationDetails,
+                    ),
+                storedConversationDetails = storedConversationDetails,
                 foregroundReconciler = foregroundReconciler,
                 homeStoreScope = RaftStoreThreading.newScope(),
                 homeActivityStoreScope = RaftStoreThreading.newScope(),
@@ -3473,11 +3686,23 @@ internal fun interface RealtimeGuardedActiveThreadSink {
 
 internal class SharedRealtimeDomainEventOwner(
     private val tasksDataStore: SharedTasksDataStore? = null,
+    /**
+     * Realtime `agent:deleted` on a server of the current grant: the agent's cached detail page (memory and
+     * its stored offline copy) goes, so a cold / offline open never shows a deleted agent.
+     */
+    private val onAgentDeleted: (suspend (serverId: String, agentId: String) -> Unit)? = null,
+    /**
+     * Realtime `channel:members-updated` on a server of the current grant (offline channel member lists), with
+     * the admission identity frozen from that grant; null on the canonical-final surface delivery (no grant).
+     */
+    private val onChannelMembersUpdated: (suspend (serverId: String, channelId: String?, admission: RealtimePresenceAdmission?) -> Unit)? = null,
     private val cursorStore: RealtimeAppliedSeqCursorStore? = null,
     private val runIfCurrentGrant: suspend (RealtimeGrantRecord, suspend () -> Unit) -> Boolean = { _, _ -> false },
     private val runWithCurrentMessageGrant:
         (suspend (RealtimeGrantRecord, suspend (CurrentMessageCommitContext) -> Unit) -> Boolean)? = null,
     private val canonicalFinalOwnerGateway: RealtimeCanonicalFinalOwnerGateway? = null,
+    /** Phase 3a fail-open bound on how long display waits for the durable V2 commit. */
+    private val canonicalMessageV2CommitTimeoutMs: Long = CANONICAL_MESSAGE_V2_REALTIME_COMMIT_TIMEOUT_MS,
 ) : RealtimeDomainEventOwner {
     private var sinks: RealtimeDomainEventSinks? = null
     private var guardedSinks: RealtimeGuardedDomainEventSinks? = null
@@ -3497,6 +3722,7 @@ internal class SharedRealtimeDomainEventOwner(
     private var canonicalFinalCommitStep: CanonicalFinalPreparedCommitStep? = null
     private var reactionShadowLane: SyncCoreReactionShadowLane? = null
     private var canonicalMessageV2OwnerGateway: CanonicalMessageV2OwnerGateway? = null
+    private var canonicalMessageV2ResumeGateway: RealtimeResumeCanonicalMessageV2Gateway? = null
 
     fun installMessageShadowFoldLane(lane: SyncCoreMessageShadowFoldLane) {
         messageShadowFoldLane = lane
@@ -3512,6 +3738,11 @@ internal class SharedRealtimeDomainEventOwner(
 
     fun installCanonicalMessageV2OwnerGateway(gateway: CanonicalMessageV2OwnerGateway) {
         canonicalMessageV2OwnerGateway = gateway
+    }
+
+    /** Message storage Phase 3b: stores a `sync:resume:response`'s messages before its applied seq is saved. */
+    fun installCanonicalMessageV2ResumeGateway(gateway: RealtimeResumeCanonicalMessageV2Gateway) {
+        canonicalMessageV2ResumeGateway = gateway
     }
 
     /** Task #167: forwards a new realtime transport epoch to the durable message canary. Caller checks the grant. */
@@ -3546,6 +3777,13 @@ internal class SharedRealtimeDomainEventOwner(
 
     fun installServerAppearanceSink(sink: suspend (principalId: String, event: ServerAppearanceUpdated) -> Unit) {
         serverAppearanceSink = sink
+    }
+
+    // `agent:activity:subscribed` answers this process's own subscribe on the grant's server socket.
+    private var agentActivitySubscribedSink: ((serverId: String, event: AgentActivitySubscribed) -> Unit)? = null
+
+    fun installAgentActivitySubscribedSink(sink: (serverId: String, event: AgentActivitySubscribed) -> Unit) {
+        agentActivitySubscribedSink = sink
     }
 
     // `notification_prefs:updated` with a server mode is emitted to the viewer's own user room. Process entry
@@ -3664,11 +3902,16 @@ internal class SharedRealtimeDomainEventOwner(
                 acceptedSource,
                 grant.presenceAdmission(presenceTransportEpoch)
             )
-            if (acceptedEvent is ServerAppearanceUpdated && acceptedEvent.serverId.value == serverId) {
+            // `appearance:updated` is per member, sent to their user room: it names whichever of their
+            // servers changed, not the connection's. The sink writes only the grant's account's servers.
+            if (acceptedEvent is ServerAppearanceUpdated) {
                 serverAppearanceSink?.invoke(grant.principalId, acceptedEvent)
             }
             if (acceptedEvent is ServerNotificationPreferencesChanged && acceptedEvent.serverId.value == serverId) {
                 serverNotificationPreferencesSink?.invoke(grant.principalId, serverId, acceptedEvent)
+            }
+            if (acceptedEvent is AgentActivitySubscribed) {
+                agentActivitySubscribedSink?.invoke(serverId, acceptedEvent)
             }
         }
 
@@ -3701,28 +3944,33 @@ internal class SharedRealtimeDomainEventOwner(
             ?: return runIfCurrentGrant(grant) {
                 legacyContinuation(grant.serverId, event, source)
             }
+        val resumeGateway = canonicalMessageV2ResumeGateway
+        if (event is SyncResumeResponse && resumeGateway != null) {
+            // Phase 3b: the replayed messages are stored (loose) before the legacy continuation saves the applied seq.
+            var commit: (suspend () -> Unit)? = null
+            val current = currentMessageRunner(grant) { commit = resumeGateway.captureUnderGrant(grant, event) }
+            if (!current) return false
+            val failure = commit?.let { runCanonicalMessageV2CommitFailOpen(grant, "resume currentSeq=${event.currentSeq}", it) }
+            if (failure == "timeout") {
+                // Fail-open: the applied seq is about to move while the detached write still runs.
+                val line = "canonical_v2_resume outcome=cursor_ahead_of_write server=${grant.serverId} currentSeq=${event.currentSeq} " +
+                    "rows=${event.messages.size}"
+                guardedSinks?.log?.invoke(line) ?: sinks?.log?.invoke(line)
+            }
+            return runIfCurrentGrant(grant) {
+                legacyContinuation(grant.serverId, event, source)
+            }
+        }
         val foldInput = event.canonicalMessageFoldInputOrNull()
         if (foldInput == null) {
             return runIfCurrentGrant(grant) {
                 legacyContinuation(grant.serverId, event, source)
             }
         }
-        when (canonicalMessageV2OwnerGateway?.accept(grant, foldInput, transportEpoch)) {
-            // Held = the durable write failed (nothing was written). Display must not fail with it
-            // (task #168): the event takes the same post-canary legacy path as a committed one.
-            // Pending = the event is buffered for the channel's loading enter snapshot: the canary returned
-            // without loading anything, so the event is displayed now under the grant it arrived with.
-            CanonicalMessageV2CanaryOutcome.Committed,
-            CanonicalMessageV2CanaryOutcome.Pending,
-            is CanonicalMessageV2CanaryOutcome.Held,
-            ->
-                return runIfCurrentGrant(grant) {
-                    legacyContinuation(grant.serverId, event, source)
-                }
-            CanonicalMessageV2CanaryOutcome.NotSelected,
-            null,
-            -> Unit
-        }
+        // Message storage Phase 3a: the durable V2 commit is bound to the exact current grant (an in-memory read in
+        // the slot) and its disk work runs after the slot released the authority registry, on every route; display
+        // follows after a fresh grant check (the T4 gateway's own, or runIfCurrentGrant below).
+        if (!commitCanonicalMessageV2AfterGrantCheck(currentMessageRunner, grant, foldInput, transportEpoch)) return false
         val legacyKey = event.realtimeDomainKey(grant.serverId)?.let(::LegacyRealtimeDedupKey)
         val gateway = canonicalFinalOwnerGateway
         if (gateway != null && legacyKey != null) {
@@ -3737,7 +3985,7 @@ internal class SharedRealtimeDomainEventOwner(
                     legacyContinuation(context.partition.serverId, event, source)
                 },
                 legacyWithCurrentT3 = { context ->
-                    runCurrentGrantMessageSlotThenLegacy(context, event, source, legacyContinuation)
+                    legacyContinuation(context.partition.serverId, event, source)
                 },
                 commitPrepared = { context ->
                     canonicalFinalCommitStep?.commitPrepared(
@@ -3750,24 +3998,58 @@ internal class SharedRealtimeDomainEventOwner(
                 },
             )
         }
-        return currentMessageRunner(grant) { context ->
-            runCurrentGrantMessageSlotThenLegacy(context, event, source, legacyContinuation)
+        return runIfCurrentGrant(grant) {
+            legacyContinuation(grant.serverId, event, source)
         }
     }
 
     /**
-     * The exact-grant message slot: runs inside [runWithCurrentMessageGrant], so the frame is still under the
-     * grant it arrived with. The V1 shadow commit that used to run here first was deleted (message storage
-     * design 2026-10-27, Phase 0a; its rows were never read). Phase 3a puts the V2 ingest here; display is the
-     * unchanged legacy continuation.
+     * Phase 3a: binds the V2 commit inside the exact-grant slot ([CanonicalMessageV2OwnerGateway.captureUnderGrant]
+     * reads only in-memory state there), then runs it fail-open after the slot. `false` = the grant was not current:
+     * nothing is committed and the frame must not be displayed.
      */
-    private suspend fun runCurrentGrantMessageSlotThenLegacy(
-        context: CurrentMessageCommitContext,
-        event: RealtimeEvent,
-        source: String,
-        legacyContinuation: suspend (String, RealtimeEvent, String) -> Unit,
-    ) {
-        legacyContinuation(context.partition.serverId, event, source)
+    private suspend fun commitCanonicalMessageV2AfterGrantCheck(
+        currentMessageRunner: suspend (RealtimeGrantRecord, suspend (CurrentMessageCommitContext) -> Unit) -> Boolean,
+        grant: RealtimeGrantRecord,
+        foldInput: CanonicalMessageFoldInput,
+        transportEpoch: Long?,
+    ): Boolean {
+        var commit: (suspend () -> Unit)? = null
+        val current = currentMessageRunner(grant) {
+            commit = canonicalMessageV2OwnerGateway?.captureUnderGrant(grant, foldInput, transportEpoch)
+        }
+        if (!current) return false
+        commit?.let { runCanonicalMessageV2CommitFailOpen(grant, "msg=${foldInput.row.id} seq=${foldInput.row.seq}", it) }
+        return true
+    }
+
+    /**
+     * Fail-open: display never waits longer than [canonicalMessageV2CommitTimeoutMs] on, and is never skipped by,
+     * the durable write. A throw is logged and swallowed; past the timeout the frame is displayed while the
+     * production ingest keeps the commit queued in order (it is never cancelled half-way, so the live coverage
+     * tracker's continuity stays exact). Only the caller's own cancellation propagates.
+     */
+    private suspend fun runCanonicalMessageV2CommitFailOpen(
+        grant: RealtimeGrantRecord,
+        label: String,
+        commit: suspend () -> Unit,
+    ): String? {
+        val failure = try {
+            val completed = withTimeoutOrNull(canonicalMessageV2CommitTimeoutMs) {
+                commit()
+                true
+            }
+            if (completed == null) "timeout" else null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (throwable: Throwable) {
+            "error=${throwable::class.simpleName ?: "unknown"}"
+        }
+        if (failure != null) {
+            val line = "canonical_v2_realtime outcome=display_only server=${grant.serverId} $label reason=$failure"
+            guardedSinks?.log?.invoke(line) ?: sinks?.log?.invoke(line)
+        }
+        return failure
     }
 
     override fun accept(serverId: String, event: RealtimeEvent, source: String) {
@@ -3969,6 +4251,10 @@ internal class SharedRealtimeDomainEventOwner(
         val resolvedServerId = serverId.takeIf { it.isNotBlank() } ?: return
         if (event is Heartbeat) return
         event.patchSharedTaskProjection(resolvedServerId)
+        event.deletedAgentIdOrNull()?.let { agentId -> onAgentDeleted?.invoke(resolvedServerId, agentId) }
+        event.updatedChannelMembersOrNull()?.let { update ->
+            onChannelMembersUpdated?.invoke(resolvedServerId, update.channelId, admission)
+        }
         deliverGuardedAppShellProjectionFinal(resolvedServerId, event, source, activeSinks)
         if (event is MemberPresenceUpdated && event.kind == build.raft.app.model.MemberKind.Agent) {
             if (admission != null) {
@@ -4167,6 +4453,33 @@ internal class SharedRealtimeDomainEventOwner(
     }
 }
 
+/** A realtime `channel:members-updated`: [channelId] null when the event names no channel (every channel). */
+internal data class RealtimeChannelMembersUpdate(val channelId: String?)
+
+/**
+ * A realtime `channel:members-updated`, else null. One without a channel id applies to every channel of the
+ * server (as ThreadPage reads it), never dropped.
+ */
+internal fun RealtimeEvent.updatedChannelMembersOrNull(): RealtimeChannelMembersUpdate? =
+    (this as? RealtimeRefreshRequired)
+        ?.takeIf { it.scope == RealtimeRefreshScope.ChannelMembers }
+        ?.let { event -> RealtimeChannelMembersUpdate(event.channelId?.value?.trim()?.takeIf(String::isNotEmpty)) }
+
+/** The agent of a realtime `agent:deleted`, else null. */
+internal fun RealtimeEvent.deletedAgentIdOrNull(): String? =
+    (this as? RealtimeRefreshRequired)
+        ?.takeIf { it.scope == RealtimeRefreshScope.Agents && it.reason == build.raft.app.data.realtime.RealtimeSocketEvents.AgentDeleted }
+        ?.let { event -> event.subjectId?.trim()?.takeIf(String::isNotEmpty) ?: event.memberId?.value?.trim()?.takeIf(String::isNotEmpty) }
+
+/**
+ * A realtime `agent:updated`: an agent's stored profile (avatar, name, description) changed. It
+ * carries only the id; like web, the roster's agents are read again (`/agents`).
+ */
+internal fun RealtimeEvent.isAgentProfileUpdate(): Boolean =
+    this is RealtimeRefreshRequired &&
+        scope == RealtimeRefreshScope.Agents &&
+        reason == build.raft.app.data.realtime.RealtimeSocketEvents.AgentUpdated
+
 private fun RealtimeEvent.updatesSharedTaskProjection(): Boolean =
     this is TaskCreated || this is TaskUpdated || this is TaskDeleted
 
@@ -4219,7 +4532,9 @@ private fun RealtimeEvent.realtimeDomainKey(serverId: String): String? =
             // suppress each other's presence updates in the app-shell fanout.
             // agent:seen is seq-less; lastSeenAt is the key so a new
             // observation is never deduped away.
-            serverSeq?.let { "member:presence:$serverId:${memberId.value}:$it" }
+            // agent:activity_state repeats its detailed frame's seq; its own key lets the presence
+            // registry (strictly-newer rule) decide instead of the dedupe.
+            serverSeq?.let { "member:presence:$serverId:${memberId.value}:$it${if (coarseState) ":state" else ""}" }
                 ?: "member:presence:$serverId:${memberId.value}:${presence.name}:${agentStatus?.name.orEmpty()}:${statusLabel.orEmpty()}:${detailKind.orEmpty()}:${activityToolName.orEmpty()}:${lastSeenAt.orEmpty()}"
         // task #136: refresh hints are idempotent TRIGGERS, not facts, and the
         // event carries no seq — a stable key made the accepted-key ledger

@@ -6,6 +6,12 @@ import build.raft.app.data.ArtifactKind
 import build.raft.app.data.eventVerb
 import build.raft.app.markdown.lucideIcon
 import build.raft.designsystem.components.raftSafeAreaHorizontalPadding
+import build.raft.designsystem.components.RaftHoverTier
+import build.raft.designsystem.components.raftPointerHover
+import build.raft.designsystem.components.raftStateOverlay
+import build.raft.designsystem.components.rememberRaftStateOverlay
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.ui.graphics.RectangleShape
 import build.raft.app.resources.*
 import build.raft.app.markdown.RaftMarkdownPreview
 import build.raft.app.markdown.markdownToPreview
@@ -66,6 +72,7 @@ import build.raft.app.data.InboxFilter
 import build.raft.app.data.InboxItem
 import build.raft.app.data.formatTaskConversationRef
 import build.raft.app.data.isTaskConversation
+import build.raft.app.data.showsMarkedUnreadDot
 import build.raft.app.data.SettingsServerSidebarPinnedItem
 import build.raft.app.data.SharedHomeContentState
 import build.raft.app.data.SharedActivitySenderProfile
@@ -89,6 +96,7 @@ import build.raft.designsystem.components.RaftTaskStatusBadge
 import build.raft.designsystem.components.RaftTaskStatusBadgeSize
 import build.raft.designsystem.components.RaftMentionMarker
 import build.raft.designsystem.components.RaftUnreadCount
+import build.raft.designsystem.components.RaftQuietUnreadDot
 import build.raft.designsystem.components.raftUnreadCountText
 import build.raft.designsystem.text.RaftText
 import build.raft.designsystem.theme.RaftTheme
@@ -323,6 +331,11 @@ internal data class ActivityConversationRowModel(
     val showMentionMarker: Boolean,
     val unreadCount: Int,
     val showUnreadCount: Boolean,
+    /**
+     * Marked unread with nothing counted (botiverse/slock #11795, web `conversation-card-marked-unread`):
+     * the quiet unread dot where the count would be.
+     */
+    val showMarkedUnreadDot: Boolean = false,
     val hasDraft: Boolean,
     val taskNumber: Int?,
     val taskStatus: TaskStatus?,
@@ -494,6 +507,7 @@ internal fun InboxItem.activityConversationRowModel(
         }
     val muted = activityConversationMuted(context, dmPeer)
     val unread = unreadCount.coerceAtLeast(0)
+    val markedDot = showsMarkedUnreadDot
     return ActivityConversationRowModel(
         leadingKind = leadingKind,
         dmPeer = dmPeer,
@@ -513,10 +527,11 @@ internal fun InboxItem.activityConversationRowModel(
         sender = sender,
         preview = preview?.let(::markdownToPreview)?.takeIf { it.text.isNotBlank() },
         muted = muted,
-        strong = unread > 0 && !muted,
+        strong = (unread > 0 || markedDot) && !muted,
         showMentionMarker = selectedFilter != InboxFilter.Mentions && hasMention && unread > 0,
         unreadCount = unread,
         showUnreadCount = !muted && unread > 0,
+        showMarkedUnreadDot = !muted && markedDot,
         hasDraft = hasDraft,
         taskNumber = taskNumber.takeIf { activityTaskStatusBadgesEnabled && kind == InboxItemKind.Thread && !taskConversationRow && taskStatus != null },
         taskStatus = taskStatus.takeIf { activityTaskStatusBadgesEnabled && kind == InboxItemKind.Thread && !taskConversationRow && taskNumber != null },
@@ -787,6 +802,10 @@ internal fun ActivityConversationListRow(
             else -> conversationFallback
         }
     var pressed by remember(item.key) { mutableStateOf(false) }
+    // raft-ui InboxItem is a list cell: a mouse or trackpad lays `fill-cell-hover` (150ms ease-out),
+    // never a finger. A selected row, a row with its menu open and a pressed row keep their own fill.
+    val hoverSource = remember { MutableInteractionSource() }
+    val hover = rememberRaftStateOverlay(hoverSource, RaftHoverTier.Cell, selected = selected || menuOpen || pressed)
     val swipeButtons =
         activitySwipeButtons(
             doneEnabled = canMarkDone && onSwipeDone != null,
@@ -818,6 +837,8 @@ internal fun ActivityConversationListRow(
                             else -> Modifier
                         }
                     )
+                    .raftStateOverlay(hover, RectangleShape)
+                    .raftPointerHover(hoverSource)
                     .then(
                         if (divider) {
                             Modifier.drawBehind {
@@ -1093,7 +1114,12 @@ private fun ActivityConversationTime(item: InboxItem, timeContext: RaftTimeConte
 @Composable
 private fun ActivityConversationMarks(model: ActivityConversationRowModel, marksHeight: Dp) {
     val colors = RaftTheme.colors
-    if (!model.hasDraft && !model.showMentionMarker && !model.muted && !model.showUnreadCount && model.taskStatusMark == null) return
+    if (
+        !model.hasDraft && !model.showMentionMarker && !model.muted && !model.showUnreadCount &&
+        !model.showMarkedUnreadDot && model.taskStatusMark == null
+    ) {
+        return
+    }
     Row(
         modifier = Modifier.height(marksHeight),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1132,6 +1158,8 @@ private fun ActivityConversationMarks(model: ActivityConversationRowModel, marks
                     contentDescription =
                         stringResource(Res.string.activity_list_unread_count_description, model.unreadCount),
                 )
+            model.showMarkedUnreadDot ->
+                RaftQuietUnreadDot(contentDescription = stringResource(Res.string.home_sidebar_marked_unread))
         }
     }
 }

@@ -330,6 +330,9 @@ final class RaftIosRealtimeHost: NSObject {
             "token": params.accessToken,
             "serverId": params.serverId,
             "clientKind": "mobile",
+            // botiverse/slock 968d102d: detailed agent:activity only for subscribed agents, plus
+            // agent:activity_state for all (shared AgentActivitySubscriptions drives the subscriptions).
+            "capabilities": ["agent_activity_subscriptions_v1"],
         ])
     }
 
@@ -469,7 +472,11 @@ final class RaftIosRealtimeHost: NSObject {
         }
         guard let params = runtime.connectParams else { return }
         let gate = payloadServerGate(connectionServerId: params.serverId, rawPayload: rawPayload)
-        guard gate.accept else {
+        // A user-scoped event (sent to the member's own room, e.g. appearance:updated) may name
+        // another server than this connection's: the shared layer applies it to that server
+        // (RealtimeSocketEvents.UserScopedServerEvents; artin 2026-10-28, a theme changed on web).
+        let userScopedElsewhere = gate.reason == "mismatch" && Self.userScopedServerEvents.contains(eventName)
+        guard gate.accept || userScopedElsewhere else {
             log(
                 "raw_event_skip reason=payload_server_\(gate.reason) connectionServerId=\(params.serverId) " +
                     "payloadServerId=\(gate.payloadServerId) eventName=\(eventName)"
@@ -571,6 +578,14 @@ final class RaftIosRealtimeHost: NSObject {
         let action = stringValue(userInfo[GeneratedRealtimeContract.PayloadKey.action])
         let channelId = stringValue(userInfo[GeneratedRealtimeContract.PayloadKey.channelId])
         let targetServerId = stringValue(userInfo[GeneratedRealtimeContract.PayloadKey.serverId])
+        if let subscriptionEvent = agentActivitySubscriptionEventName(action: action) {
+            handleAgentActivitySubscription(
+                eventName: subscriptionEvent,
+                agentIds: agentActivitySubscriptionIds(userInfo: userInfo),
+                targetServerId: targetServerId
+            )
+            return
+        }
         guard !channelId.isEmpty else {
             log("room_command_skip reason=missing_channel_id action=\(action)")
             return
@@ -608,6 +623,43 @@ final class RaftIosRealtimeHost: NSObject {
             guard decision.shouldEmit, let eventName = decision.eventName, let payload = decision.payload else { return }
             self.emitRoomCommand(runtime: runtime, eventName: eventName, channelId: payload)
         }
+    }
+
+    /// Shared `RaftRealtimeEvents.postAgentActivitySubscription`: one subscribe / unsubscribe emit on the
+    /// named server's socket. Dropped while disconnected: shared re-sends its whole set after every connect.
+    private func handleAgentActivitySubscription(eventName: String, agentIds: [String], targetServerId: String) {
+        guard !agentIds.isEmpty, !targetServerId.isEmpty else {
+            log("agent_activity_subscription_skip reason=missing_ids_or_server serverId=\(targetServerId)")
+            return
+        }
+        queue.async { [weak self] in
+            guard let self, let runtime = self.runtimes[targetServerId] else { return }
+            self.log("agent_activity_subscription serverId=\(targetServerId) eventName=\(eventName) count=\(agentIds.count)")
+            self.emit(runtime: runtime, eventName: eventName, payload: ["agentIds": agentIds])
+        }
+    }
+
+    private func agentActivitySubscriptionEventName(action: String) -> String? {
+        switch action {
+        case GeneratedRealtimeContract.RoomAction.agentActivitySubscribe:
+            return GeneratedRealtimeContract.SocketEvent.agentActivitySubscribe
+        case GeneratedRealtimeContract.RoomAction.agentActivityUnsubscribe:
+            return GeneratedRealtimeContract.SocketEvent.agentActivityUnsubscribe
+        default:
+            return nil
+        }
+    }
+
+    /// The `agentIds` array of the shared event (only in its `stringify` JSON; userInfo carries scalar keys).
+    private func agentActivitySubscriptionIds(userInfo: [AnyHashable: Any]) -> [String] {
+        guard
+            let json = userInfo["stringify"] as? String,
+            let data = json.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return []
+        }
+        return stringArray(object["agentIds"]).map { clean($0) }.filter { !$0.isEmpty }
     }
 
     private func emitRoomCommand(runtime: Runtime, eventName: String, channelId: String) {
@@ -790,6 +842,11 @@ final class RaftIosRealtimeHost: NSObject {
         )
     }
 
+    /** Kotlin RealtimeSocketEvents.UserScopedServerEvents: events that may name any of the member's servers. */
+    private static let userScopedServerEvents: Set<String> = [
+        GeneratedRealtimeContract.SocketEvent.appearanceUpdated,
+    ]
+
     private func payloadServerGate(connectionServerId: String, rawPayload: String) -> (accept: Bool, reason: String, payloadServerId: String) {
         guard
             let data = rawPayload.data(using: .utf8),
@@ -915,9 +972,12 @@ final class RaftIosRealtimeHost: NSObject {
         GeneratedRealtimeContract.SocketEvent.taskUpdated,
         GeneratedRealtimeContract.SocketEvent.taskDeleted,
         GeneratedRealtimeContract.SocketEvent.agentActivity,
+        GeneratedRealtimeContract.SocketEvent.agentActivityState,
+        GeneratedRealtimeContract.SocketEvent.agentActivitySubscribed,
         GeneratedRealtimeContract.SocketEvent.agentTyping,
         GeneratedRealtimeContract.SocketEvent.agentSession,
         GeneratedRealtimeContract.SocketEvent.agentCreated,
+        GeneratedRealtimeContract.SocketEvent.agentUpdated,
         GeneratedRealtimeContract.SocketEvent.agentDeleted,
         GeneratedRealtimeContract.SocketEvent.machineStatus,
         GeneratedRealtimeContract.SocketEvent.machineCapabilities,

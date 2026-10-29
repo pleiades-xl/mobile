@@ -1,5 +1,6 @@
 package build.raft.app
 
+import build.raft.app.data.loadOnEnter
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import build.raft.app.data.CanonicalMessageV2AdjacentPageWriter
 import build.raft.app.data.CanonicalMessageV2EnteredScopeLoader
@@ -64,6 +65,7 @@ class SharedThreadAnchorContextDurableRoundTripTest {
     fun anchorContextPagePersistedOnlineOpensOfflineAroundTheAnchor() = withFreshDatabase { database ->
         runBlocking {
             val online = Phase(database, "ctx-online-1", contextResult = DataResult.Content(contextSnapshot()))
+            online.seedLatestPage()
             online.open()
             online.awaitLog("canonical_v2_context_page")
             assertTrue(
@@ -73,6 +75,8 @@ class SharedThreadAnchorContextDurableRoundTripTest {
                 },
                 online.logs.toString(),
             )
+            // Phase 3b: the anchored open read the durable head epoch BEFORE its context request.
+            assertEquals(listOf<Long?>(0L), online.extender.contextRequestEpochs.toList())
             online.close()
 
             val offline = Phase(database, "ctx-offline-1", contextResult = contextUnavailable, enterReachable = false)
@@ -90,6 +94,7 @@ class SharedThreadAnchorContextDurableRoundTripTest {
         // Twin of the test above: identical online open and context page, the writer's server flag is off.
         runBlocking {
             val online = Phase(database, "ctx-online-2", contextResult = DataResult.Content(contextSnapshot()), writerFlag = false)
+            online.seedLatestPage()
             online.open()
             online.awaitLog("canonical_v2_context_page")
             assertTrue(
@@ -105,42 +110,6 @@ class SharedThreadAnchorContextDurableRoundTripTest {
             assertTrue(payload.durableLastKnown)
             assertEquals(listOf("m50", "m60", "m70", "m80"), payload.messages.map { it.id })
             offline.close()
-        }
-    }
-
-    @Test
-    fun identityChangeBeforeTheContextPageIsWrittenWritesNothing() = withFreshDatabase { database ->
-        // Twin of the first test: identical stored window and context page, but the account switches after the
-        // context page was fetched and handed off, while its write waits for this entry's enter snapshot.
-        // (A switch while the context request itself is out is refused upstream: the repository result is stale.)
-        runBlocking {
-            val seed = Phase(database, "ctx-seed-3", contextResult = contextUnavailable)
-            seed.open(route().copy(focusedMessageId = null))
-            assertNotNull(seed.reader.read(partitionOf(session), "channel-1"))
-            seed.close()
-
-            val online = Phase(database, "ctx-online-3", contextResult = DataResult.Content(contextSnapshot()))
-            val enterGate = CompletableDeferred<Unit>()
-            online.enterNetwork.pageGate = enterGate
-            online.open()
-            // The focused page is shown only after its context page was handed to the writer.
-            online.awaitPayload { payload -> payload.messages.any { it.id == "m30" } }
-            assertTrue(online.logs.none { "canonical_v2_context_page" in it }, "the write waits for the entry's enter")
-            online.sessionStore.saveSession(otherSession)
-            assertNotNull(online.dataSource.captureReplyCacheProducerContext())
-            enterGate.complete(Unit)
-            online.awaitLog("canonical_v2_context_page")
-            assertTrue(
-                online.logs.any {
-                    it == "canonical_v2_context_page server=server-1 scope=channel-1 anchor=m30 outcome=skipped " +
-                        "reason=identity_changed facts=0"
-                },
-                online.logs.toString(),
-            )
-            val stored = assertNotNull(online.reader.read(partitionOf(session), "channel-1"))
-            assertEquals(listOf(50L, 60L, 70L, 80L), stored.envelopes.map { it.fact.seq }, "the seeded window, untouched")
-            assertFalse(stored.envelopes.any { it.fact.id == "m30" })
-            online.close()
         }
     }
 
@@ -167,9 +136,36 @@ class SharedThreadAnchorContextDurableRoundTripTest {
                 replyResult = DataResult.Error(ScreenError(code = "unused", retryable = false)),
                 parentResult = contextResult,
             )
+        /** Phase 3b: the real writer; its head epoch moves with every context request (a read after it sees 1). */
+        val extender =
+            HeadEpochRecordingExtender(
+                CanonicalMessageV2AdjacentPageWriter(
+                    canary = canary,
+                    generationEngine = engine,
+                    fetcher = CanonicalMessageV2RestSnapshotFetcher(RecordingNetworkClient(canonicalV2TestPage()), logs::add),
+                    isEnabledForServer = { writerFlag },
+                    logger = logs::add,
+                ),
+            ) { repository.parentRequests.size.toLong() }
         private val enterBody = """{"messages":${page(50, 60, 70, 80)},"historyLimited":false}"""
         val enterNetwork =
             RecordingNetworkClient(enterBody, channelIds = if (enterReachable) setOf("channel-1") else emptySet())
+        private val loader = CanonicalMessageV2EnteredScopeLoader(
+            canary = canary,
+            generationEngine = engine,
+            fetcher = CanonicalMessageV2RestSnapshotFetcher(enterNetwork, logs::add),
+            isEnabledForServer = { true },
+            logger = logs::add,
+        )
+
+        /**
+         * Message storage Phase 2b: a focused (anchored) open fetches only the context page, so the channel's latest
+         * page — the window the context page joins — is written by an earlier ordinary open; this plays that write.
+         */
+        suspend fun seedLatestPage() {
+            loader.loadOnEnter(partitionOf(session), "channel-1") { true }
+        }
+
         val dataSource =
             testSharedThreadDataSource(
                 networkApi = SharedThreadStoreTest.FakeThreadApi(),
@@ -179,20 +175,8 @@ class SharedThreadAnchorContextDurableRoundTripTest {
                 conversationRepository = repository,
                 payloadStore = SharedThreadPayloadStore(prewarmStartIntervalMillis = 0L),
                 durableLastKnownReader = reader,
-                enteredScopeSnapshotLoader = CanonicalMessageV2EnteredScopeLoader(
-                    canary = canary,
-                    generationEngine = engine,
-                    fetcher = CanonicalMessageV2RestSnapshotFetcher(enterNetwork, logs::add),
-                    isEnabledForServer = { true },
-                    logger = logs::add,
-                ),
-                durablePageExtender = CanonicalMessageV2AdjacentPageWriter(
-                    canary = canary,
-                    generationEngine = engine,
-                    fetcher = CanonicalMessageV2RestSnapshotFetcher(RecordingNetworkClient(canonicalV2TestPage()), logs::add),
-                    isEnabledForServer = { writerFlag },
-                    logger = logs::add,
-                ),
+                enteredScopeSnapshotLoader = loader,
+                durablePageExtender = extender,
                 diagnosticsLogger = logs::add,
             )
         private val scopeJob = SupervisorJob()

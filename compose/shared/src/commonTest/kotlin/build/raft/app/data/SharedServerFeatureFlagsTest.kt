@@ -49,7 +49,7 @@ class SharedServerFeatureFlagsTest {
 
     @Test
     fun defaultOnKeyReadsOnWithoutAnExplicitServerDecision() = runBlocking {
-        for (doh in listOf(SYNC_CORE_MESSAGES_FEATURE_FLAG_KEY, MOBILE_THREAD_REVERSE_LAYOUT_FEATURE_FLAG_KEY, RUNTIME_FORM_V2_FEATURE_FLAG_KEY)) {
+        for (doh in listOf(SYNC_CORE_MESSAGES_FEATURE_FLAG_KEY, MOBILE_THREAD_REVERSE_LAYOUT_FEATURE_FLAG_KEY)) {
         // Unresolved (no evaluation yet, no stored value) and no server at all: ON.
         val idle = SharedServerFeatureFlags(FakeApi(ok("""{"evaluations":[]}""")))
         assertTrue(idle.isEnabled(server, doh))
@@ -79,7 +79,7 @@ class SharedServerFeatureFlagsTest {
 
     @Test
     fun defaultOnKeyFollowsAnExplicitServerDecision() = runBlocking {
-        for (doh in listOf(SYNC_CORE_MESSAGES_FEATURE_FLAG_KEY, MOBILE_THREAD_REVERSE_LAYOUT_FEATURE_FLAG_KEY, RUNTIME_FORM_V2_FEATURE_FLAG_KEY)) {
+        for (doh in listOf(SYNC_CORE_MESSAGES_FEATURE_FLAG_KEY, MOBILE_THREAD_REVERSE_LAYOUT_FEATURE_FLAG_KEY)) {
         for (reason in listOf("kill_switch", "flag_disabled", "default", "platform_rule")) {
             val flags =
                 SharedServerFeatureFlags(FakeApi(ok("""{"evaluations":[{"key":"$doh","enabled":false,"reason":"$reason"}]}""")))
@@ -173,12 +173,15 @@ class SharedServerFeatureFlagsTest {
         assertEquals("thread_unread_badge_v0", THREAD_UNREAD_BADGE_FEATURE_FLAG_KEY)
         // botiverse/slock d60367a1 packages/shared/src/featureFlags.ts SIDEBAR_MARK_ALL_READ_FEATURE_FLAG_KEY.
         assertEquals("sidebar_mark_all_read_v0", SIDEBAR_MARK_ALL_READ_FEATURE_FLAG_KEY)
+        // slock staging 2618da4f packages/web/src/store/serverFeatureFlags.ts TASK_V2_CONVERSATIONS_FLAG_KEY.
+        assertEquals("task_v2_conversations_v0", TASK_V2_CONVERSATIONS_FEATURE_FLAG_KEY)
         for (
             key in listOf(
                 WEBVIEW_ONBOARDING_V0_FEATURE_FLAG_KEY,
                 ACTIVITY_OVERVIEW_FEATURE_FLAG_KEY,
                 THREAD_UNREAD_BADGE_FEATURE_FLAG_KEY,
                 SIDEBAR_MARK_ALL_READ_FEATURE_FLAG_KEY,
+                TASK_V2_CONVERSATIONS_FEATURE_FLAG_KEY,
             )
         ) {
             assertTrue(key in REGISTERED_SERVER_FEATURE_FLAG_KEYS, key)

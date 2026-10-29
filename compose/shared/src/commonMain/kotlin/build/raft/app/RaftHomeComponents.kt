@@ -1,10 +1,11 @@
 package build.raft.app
 
+import build.raft.designsystem.components.RaftSideAction
+import build.raft.designsystem.components.RaftSideActionColumnDefaults
 import build.raft.designsystem.components.RaftStatusBarBackdropClaim
 import build.raft.designsystem.components.raftSafeAreaHorizontalPadding
 import build.raft.app.resources.*
 import build.raft.app.components.RaftIconSpinner
-import build.raft.designsystem.components.RaftTextFieldDefaults
 import build.raft.designsystem.components.RaftButton
 import build.raft.designsystem.components.RaftTopBarDefaults
 import build.raft.designsystem.components.raftCopyable
@@ -32,6 +33,7 @@ import build.raft.designsystem.components.RaftSidebarItemVariant
 import build.raft.designsystem.components.raftSidebarItemIconSize
 import build.raft.designsystem.components.RaftSidebarItemMarks
 import build.raft.designsystem.components.RaftSidebarItemMeta
+import build.raft.designsystem.components.RaftQuietUnreadDot
 import build.raft.designsystem.components.RaftSidebarSectionAction
 import build.raft.designsystem.components.RaftSidebarSectionHeader
 import build.raft.designsystem.components.RaftUnreadCount
@@ -43,7 +45,6 @@ import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.layout.RowScope
 import build.raft.app.base.Utils
 import build.raft.app.components.RaftBrutalActionButton
-import build.raft.app.components.RaftBrutalInputField
 import build.raft.app.components.RaftExternalBridgeBadge
 import build.raft.app.components.externalBridgeBadgeVisible
 import build.raft.app.components.RaftHashGlobeIcon
@@ -110,6 +111,9 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import build.raft.app.data.messageBodyFontSizeOwnerKey
+import build.raft.app.data.runCatchingPreservingCancellation
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
@@ -279,7 +283,9 @@ internal data class HomeSidebarBadgeProjection(
     val label: String?,
     val tone: HomeSidebarBadgeTone = HomeSidebarBadgeTone.Loud,
     val hasUnread: Boolean = false,
-    val hasAttention: Boolean = false
+    val hasAttention: Boolean = false,
+    /** Unread with no number (marked unread, botiverse/slock #11795): the quiet dot instead of [label]. */
+    val markedUnreadDot: Boolean = false
 )
 
 internal data class HomeConversationBadgeInput(
@@ -287,7 +293,9 @@ internal data class HomeConversationBadgeInput(
     val joined: Boolean = true,
     val muted: Boolean = false,
     val mentionPierced: Boolean = false,
-    val followed: Boolean = false
+    val followed: Boolean = false,
+    /** Marked unread with nothing countable: unread with the quiet dot when there is no count. */
+    val markedUnread: Boolean = false
 )
 
 internal fun homeConversationMutedIndicatorIcon(muted: Boolean): RaftLucideIconName? =
@@ -404,7 +412,12 @@ data class RaftHomeConversationItem(
      * the row's `[thread] N` segment. Projected from the Home store's followed-thread unread when
      * the server enables `thread_unread_badge_v0`; 0 otherwise.
      */
-    val followedThreadUnreadCount: Int = 0
+    val followedThreadUnreadCount: Int = 0,
+    /**
+     * Marked unread with nothing countable (botiverse/slock #11795, [build.raft.app.data.HomeSnapshot.markedUnreadIds]):
+     * with no count the row shows the quiet unread dot (web `QuietUnreadDot`); a count wins over it.
+     */
+    val markedUnread: Boolean = false
 )
 
 data class RaftHomeServerDrawerSection(
@@ -606,7 +619,6 @@ data class RaftHomeShellLabels(
     val createSection: String = "Create section",
     val sectionNameLabel: String = "Name",
     val sectionNamePlaceholder: String = "My Project",
-    val sectionEmojiLabel: String = "Emoji",
     val addChannel: String = "Add channel",
     val createJointChannel: String = "Create Joint Channel",
     val noServersAvailable: String = "No servers available",
@@ -659,7 +671,6 @@ data class RaftHomeShellLabels(
             createSection = stringResource(Res.string.home_section_create),
             sectionNameLabel = stringResource(Res.string.home_section_name_label),
             sectionNamePlaceholder = stringResource(Res.string.home_section_name_placeholder),
-            sectionEmojiLabel = stringResource(Res.string.home_section_emoji_label),
             addChannel = stringResource(Res.string.home_action_add_channel),
             createJointChannel = stringResource(Res.string.home_section_create_joint_channel),
             noServersAvailable = stringResource(Res.string.home_state_no_servers),
@@ -830,6 +841,15 @@ private fun RaftHomePageContent(routeVisibleTick: Int = 0) {
     fun unsupportedStandaloneHomeAction(action: String, itemId: String? = null) {
         bridge.log("standalone_home_unsupported_action action=$action itemId=${itemId.orEmpty()}")
     }
+    // The emoji picker (section icons) keeps skin tone and frequently used emoji per account,
+    // keyed like the thread's Add Reaction picker (sindresorhus, #3963).
+    val emojiPickerOwnerKey by produceState<String?>(null, sharedStores) {
+        value =
+            runCatchingPreservingCancellation { sharedStores.authStore.readSession() }.getOrNull()?.user?.id?.let { accountId ->
+                messageBodyFontSizeOwnerKey(sharedStores.apiEnvironmentStore.current().apiBaseUrl, accountId)
+            }
+    }
+    CompositionLocalProvider(LocalRaftEmojiPickerOwnerKey provides emojiPickerOwnerKey) {
     RaftStructuralHomeShell(
         currentServerName = payload.currentServerName,
         currentServerId = payload.currentServerId,
@@ -926,6 +946,7 @@ private fun RaftHomePageContent(routeVisibleTick: Int = 0) {
         pinnedMemberProfileResolver = pinnedMemberProfileResolver,
         diagnosticsLogger = bridge::log
     )
+    }
 }
 
 internal fun homeDirectMessageOpenFailureMessage(
@@ -2330,6 +2351,20 @@ private fun RaftStructuralHomeShellContent(
             bottomContentPadding
         }
     val bottomBarOverlaysContent = showBottomBar && raftAppBottomTabBarOverlaysContent()
+    // iPhone Duo (raft-design #859): beside the system's side column the bell is Home's page
+    // action in the column, and the head is the server switcher line on paper.
+    val sideColumnPosture = LocalRaftSideColumnPosture.current
+    val bellInColumn =
+        !serverSwitcherInTopBar &&
+            raftSideColumnControls(
+                back = null,
+                actions =
+                    listOf(
+                        homeSideColumnBellAction(visibleNotifications) {
+                            notificationCenterExpanded = !notificationCenterExpanded
+                        }
+                    ),
+            )
     val dismissNotificationCenterForFocusLoss = {
         if (notificationCenterExpanded) {
             notificationCenterExpanded = false
@@ -2387,6 +2422,7 @@ private fun RaftStructuralHomeShellContent(
                         notificationCenterExpanded = notificationCenterExpanded,
                         refreshing = headerRefreshing,
                         topSafeArea = topSafeArea,
+                        bellInColumn = bellInColumn,
                         onServerBadgeClick = onServerBadgeClickWithDismiss,
                         onBlankClick = {
                             dismissNotificationCenterForFocusLoss()
@@ -2395,6 +2431,23 @@ private fun RaftStructuralHomeShellContent(
                             }
                         },
                         onNotificationToggle = { notificationCenterExpanded = !notificationCenterExpanded }
+                    )
+                }
+                if (serverSwitcherInTopBar && !raftUnderAppShellTopBar()) {
+                    // iPhone Duo's inner screen (raft-design #859): no top bar, so the sidebar has
+                    // its 56dp head with the destination's name, its seam on the rail header's.
+                    // The server switcher is the rail's tile, not this head.
+                    RaftTopPageHeader(
+                        title = stringResource(Res.string.tab_home),
+                        backgroundColor = RaftColor.Canvas,
+                        topSafeAreaOverride = topSafeArea,
+                        contentStartPadding = RaftMainTabHeaderStartPadding,
+                        titleStyle = RaftMainTabHeaderTitleStyle,
+                        onTitleClick = {
+                            dismissNotificationCenterForFocusLoss()
+                            listScope.launch { listState.animateScrollToTopExpressive() }
+                        },
+                        showBodyTopBanner = false,
                     )
                 }
                 RaftAppShellBodyTopBanner()
@@ -2644,6 +2697,7 @@ private fun RaftStructuralHomeShellContent(
                                                         hasDraft = pinned?.hasDraft == true,
                                                         muted = pinned?.activityMuted == true,
                                                         unreadCount = pinned?.unreadCount ?: 0,
+                                                        markedUnread = pinned?.markedUnread == true,
                                                         selected = pinnedSelected,
                                                         menuOpen = pinnedMenuOpen,
                                                         onClick =
@@ -2685,6 +2739,7 @@ private fun RaftStructuralHomeShellContent(
                                                         muted = pinned.activityMuted,
                                                         bridgeProvider = pinned.bridgeProvider,
                                                         unreadCount = pinned.unreadCount,
+                                                        markedUnread = pinned.markedUnread,
                                                         mentioned = pinned.mentioned,
                                                         followedThreadUnreadCount = pinned.followedThreadUnreadCount,
                                                         interactionIdentity = homeSidebarInteractionIdentity("pinned", pinnedRow.key),
@@ -2748,6 +2803,7 @@ private fun RaftStructuralHomeShellContent(
                                                     muted = channel.activityMuted,
                                                     bridgeProvider = channel.bridgeProvider,
                                                     unreadCount = channel.unreadCount,
+                                                    markedUnread = channel.markedUnread,
                                                     mentioned = channel.mentioned,
                                                     followedThreadUnreadCount = channel.followedThreadUnreadCount,
                                                     interactionIdentity = homeSidebarInteractionIdentity("joint", channel.id),
@@ -2810,6 +2866,7 @@ private fun RaftStructuralHomeShellContent(
                                                     muted = channel.activityMuted,
                                                     bridgeProvider = channel.bridgeProvider,
                                                     unreadCount = channel.unreadCount,
+                                                    markedUnread = channel.markedUnread,
                                                     mentioned = channel.mentioned,
                                                     followedThreadUnreadCount = channel.followedThreadUnreadCount,
                                                     interactionIdentity = homeSidebarInteractionIdentity("channel", channel.id),
@@ -2885,6 +2942,7 @@ private fun RaftStructuralHomeShellContent(
                                                     hasDraft = dm.hasDraft,
                                                     muted = dm.activityMuted,
                                                     unreadCount = dm.unreadCount,
+                                                    markedUnread = dm.markedUnread,
                                                     selected = dmSelected,
                                                     menuOpen = activePinMenuConversationId == dm.id && activeMenuSection == RaftHomeSortSection.DirectMessages,
                                                     onClick = if (sidebarInteractionsEnabled) ({ onChannelClickWithDismiss(dm.id) }) else null,
@@ -2977,6 +3035,7 @@ private fun RaftStructuralHomeShellContent(
                                                         hasDraft = item.hasDraft,
                                                         muted = item.activityMuted,
                                                         unreadCount = item.unreadCount,
+                                                        markedUnread = item.markedUnread,
                                                         selected = customSelected,
                                                         menuOpen = customMenuOpen,
                                                         onClick = if (sidebarInteractionsEnabled) ({ onChannelClickWithDismiss(item.id) }) else null,
@@ -2991,6 +3050,7 @@ private fun RaftStructuralHomeShellContent(
                                                         muted = item.activityMuted,
                                                         bridgeProvider = item.bridgeProvider,
                                                         unreadCount = item.unreadCount,
+                                                        markedUnread = item.markedUnread,
                                                         mentioned = item.mentioned,
                                                         followedThreadUnreadCount = item.followedThreadUnreadCount,
                                                         interactionIdentity = homeSidebarInteractionIdentity("custom", customRowKey),
@@ -3081,7 +3141,7 @@ private fun RaftStructuralHomeShellContent(
                             modifier =
                                 Modifier
                                     .padding(
-                                        top = homeServerSwitcherPanelTopOffset(topSafeArea),
+                                        top = homeServerSwitcherPanelTopOffset(topSafeArea, bellInColumn),
                                         start = RaftAppSpacing.Lg
                                     )
                                     .clickable(onClick = {})
@@ -3101,11 +3161,22 @@ private fun RaftStructuralHomeShellContent(
                             visibleNotifications,
                             onNotificationView,
                             onNotificationDismiss,
-                            Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(top = homeNotificationPopoverTopOffset(topSafeArea))
-                                .homeNotificationPopoverPhoneWidth()
-                                .raftFloatingContentClickTarget(),
+                            if (bellInColumn) {
+                                // Beside the column's bell, toward the content: its bottom edge level
+                                // with the bell's, 8dp from the column (MobileNav's vertical tab bar
+                                // popover; page-structure "Frame insets").
+                                Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(bottom = homeSideColumnBellPopoverBottomOffset(sideColumnPosture))
+                                    .homeNotificationPopoverPhoneWidth()
+                                    .raftFloatingContentClickTarget()
+                            } else {
+                                Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(top = homeNotificationPopoverTopOffset(topSafeArea))
+                                    .homeNotificationPopoverPhoneWidth()
+                                    .raftFloatingContentClickTarget()
+                            },
                             minWidth = 0.dp,
                             maxWidth = HomeNotificationPopoverPhoneMaxWidth
                         )
@@ -3347,7 +3418,6 @@ private fun RaftStructuralHomeShellContent(
                         submitLabel = if (editingSection != null) null else labels.createSection,
                         nameLabel = labels.sectionNameLabel,
                         namePlaceholder = labels.sectionNamePlaceholder,
-                        emojiLabel = labels.sectionEmojiLabel,
                         initialName = editingSection?.name.orEmpty(),
                         initialEmoji = editingSection?.emoji.orEmpty(),
                         onDismiss = { sectionDialogTarget = null },
@@ -3730,7 +3800,8 @@ internal fun raftHomeConversationMenuItems(
                 icon = if (pinTargetIsPinned) RaftLucideIconName.PinOff else RaftLucideIconName.Pin
             )
         )
-        if (conversation.activityMuteSupported) {
+        // Unmute stays offered while muted even if mute is no longer supported (removed App bot DM).
+        if (conversation.activityMuteSupported || conversation.activityMuted) {
             add(
                 RaftBaseMenuItem(
                     id = if (conversation.activityMuted) "unmute-channel" else "mute-channel",
@@ -3920,63 +3991,6 @@ private sealed interface RaftHomeSectionDialogTarget {
     data class Edit(val sectionId: String) : RaftHomeSectionDialogTarget
 }
 
-/**
- * task #512: create/rename dialog for a custom section — web
- * SidebarSectionDialog.tsx reduced to a name field plus a plain emoji text
- * field (no emoji picker on mobile). Web caps the name at 80 chars.
- */
-@Composable
-private fun RaftHomeSectionDialog(
-    title: String,
-    submitLabel: String?,
-    nameLabel: String,
-    namePlaceholder: String,
-    emojiLabel: String,
-    initialName: String,
-    initialEmoji: String,
-    onDismiss: () -> Unit,
-    onSubmit: (name: String, emoji: String?) -> Unit
-) {
-    var name by remember { mutableStateOf(textFieldValueAtEnd(initialName)) }
-    var emoji by remember { mutableStateOf(textFieldValueAtEnd(initialEmoji)) }
-    val trimmedName = name.text.trim()
-    RaftUnifiedDialog(
-        title = title,
-        onDismiss = onDismiss,
-        maxWidth = 384.dp
-    ) {
-        Text(text = nameLabel, style = RaftType.Caption, color = RaftColor.TextMutedGray)
-        RaftBrutalInputField(
-            value = name,
-            onValueChange = { name = it.coerceTextLength(80) },
-            placeholder = namePlaceholder,
-            autoFocus = true,
-            keyboardOptions = RaftTextFieldDefaults.NoAutoCorrectKeyboardOptions
-        )
-        Text(text = emojiLabel, style = RaftType.Caption, color = RaftColor.TextMutedGray)
-        RaftBrutalInputField(
-            value = emoji,
-            onValueChange = { emoji = it.coerceTextLength(8) },
-            placeholder = "🙂"
-        )
-        RaftDialogFooter {
-            RaftButton(
-                text = stringResource(Res.string.common_cancel),
-                onClick = onDismiss,
-                variant = RaftButtonVariant.Ghost,
-                size = RaftButtonSize.Lg
-            )
-            RaftButton(
-                text = submitLabel ?: stringResource(Res.string.common_save),
-                onClick = { onSubmit(trimmedName, emoji.text.trim().takeIf { it.isNotEmpty() }) },
-                enabled = trimmedName.isNotEmpty(),
-                variant = RaftButtonVariant.Primary,
-                size = RaftButtonSize.Lg
-            )
-        }
-    }
-}
-
 enum class RaftSidebarSortTarget { Channels, JointChannels, DirectMessages, Pinned }
 
 internal fun RaftSidebarSortTarget.toReorderSidebarIntent(order: List<String>): SharedHomeIntent.ReorderSidebar =
@@ -4023,10 +4037,21 @@ internal fun formatHomeSidebarBadgeCount(count: Long): String? =
 
 internal fun homeConversationBadgeProjection(input: HomeConversationBadgeInput): HomeSidebarBadgeProjection {
     val label = formatHomeSidebarBadgeCount(input.unreadCount)
-    if (label == null) return HomeSidebarBadgeProjection(label = null)
     val loud =
         input.joined &&
             (!input.muted || input.mentionPierced || input.followed)
+    if (label == null) {
+        // web SidebarPeerRowBody / getChannelUnreadIndicatorState: marked unread with no count is
+        // unread (the row's menu offers Mark as Read) with the quiet dot; a count wins over it.
+        if (!input.markedUnread) return HomeSidebarBadgeProjection(label = null)
+        return HomeSidebarBadgeProjection(
+            label = null,
+            tone = if (loud) HomeSidebarBadgeTone.Loud else HomeSidebarBadgeTone.Quiet,
+            hasUnread = true,
+            hasAttention = loud,
+            markedUnreadDot = true
+        )
+    }
     return HomeSidebarBadgeProjection(
         label = label,
         tone = if (loud) HomeSidebarBadgeTone.Loud else HomeSidebarBadgeTone.Quiet,
@@ -4046,7 +4071,8 @@ internal fun RaftHomeConversationItem.homeConversationBadgeProjection(
             joined = joined,
             muted = muted,
             mentionPierced = mentionPierced,
-            followed = followed
+            followed = followed,
+            markedUnread = markedUnread
         )
     )
 
@@ -4099,11 +4125,44 @@ internal fun homeServerSwitcherJoinCommunityActions(
         }
     }
 
-internal fun homeServerSwitcherPanelTopOffset(topSafeArea: Dp): Dp =
-    topSafeArea + RaftAppSize.PageHeaderHeight + HomeServerSwitcherTopGap
+internal fun homeServerSwitcherPanelTopOffset(topSafeArea: Dp, sideColumnTitleLine: Boolean = false): Dp =
+    homeShellHeaderHeight(topSafeArea, sideColumnTitleLine) + HomeServerSwitcherTopGap
 
-internal fun homeShellHeaderHeight(topSafeArea: Dp): Dp =
+/** The Home head: the 56dp row, on the yellow frame, or beside the Duo side column on paper. */
+internal fun homeShellHeaderHeight(topSafeArea: Dp, sideColumnTitleLine: Boolean = false): Dp =
     topSafeArea + RaftAppSize.PageHeaderHeight
+
+/**
+ * From the window's bottom to the bottom of the bell's popover beside the Duo side column: level
+ * with the bell's bottom, which stands [RaftSideActionColumnDefaults.Inset] over the native tab bar.
+ */
+internal fun homeSideColumnBellPopoverBottomOffset(posture: RaftSideColumnPosture): Dp =
+    posture.nativeTabBarHeight + RaftSideActionColumnDefaults.Inset
+
+/** Home's one page action in the Duo side column: the bell, its pixel for unseen notifications. */
+@Composable
+private fun homeSideColumnBellAction(
+    notifications: List<RaftHomeNotificationItem>,
+    onToggle: () -> Unit,
+): RaftSideAction {
+    val visible = remember(notifications) { notifications.visibleHomeNotifications() }
+    val attentionDescription =
+        when (visible.size) {
+            0 -> null
+            1 -> Res.string.home_notification_center_item_count_one.format(listOf(1)).localized()
+            else -> Res.string.home_notification_center_item_count_many.format(listOf(visible.size)).localized()
+        }
+    return raftSideColumnLucideAction(
+        id = "home-bell",
+        label = stringResource(Res.string.home_notification_center_title),
+        icon = RaftLucideIconName.Bell,
+        onClick = onToggle,
+        attention = visible.isNotEmpty(),
+        attentionDescription = attentionDescription,
+        // The iOS host may draw Home's column (the bell alone) with a system bar button.
+        systemSymbol = "bell",
+    )
+}
 
 internal fun homeShellTopSafeArea(
     applyTopSafeArea: Boolean,
@@ -4794,16 +4853,21 @@ private fun HomeTitlebar(
     notificationCenterExpanded: Boolean = false,
     refreshing: Boolean,
     topSafeArea: Dp,
+    /** iPhone Duo: the bell is in the side column; the head is the switcher line on paper. */
+    bellInColumn: Boolean = false,
     onServerBadgeClick: () -> Unit,
     onBlankClick: (() -> Unit)? = null,
     onNotificationToggle: () -> Unit
 ) {
+    val background = if (bellInColumn) RaftColor.Canvas else RaftColor.Frame
     // raft-ui phone head: the frame layer (Source Yellow in light) with a 1dp seam. The seam is
     // flattened onto the canvas like RaftTopPageHeader's, so it reads the same grey on every tab
     // (an alpha seam over the yellow frame came out yellow-brown).
     // The frame runs up under the status bar: the host's status bar icons follow it.
-    RaftStatusBarBackdropClaim(RaftColor.Frame, enabled = topSafeArea > 0.dp)
-    Box(modifier = Modifier.fillMaxWidth().height(homeShellHeaderHeight(topSafeArea)).background(RaftColor.Frame)) {
+    RaftStatusBarBackdropClaim(background, enabled = topSafeArea > 0.dp)
+    Box(modifier = Modifier.fillMaxWidth().height(homeShellHeaderHeight(topSafeArea, bellInColumn)).background(background)) {
+        // Beside the Duo side column the switcher line is the page's first line, on paper, with the
+        // same seam as every top-level head.
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -4837,7 +4901,7 @@ private fun HomeTitlebar(
             }
             // The bell's icon box ends on the content line (16dp), mirroring the server avatar on
             // the left; its 44dp target reaches past it.
-            HomeNotificationCenter(
+            if (!bellInColumn) HomeNotificationCenter(
                 notifications = notifications,
                 open = notificationCenterExpanded,
                 onToggle = onNotificationToggle,
@@ -4964,9 +5028,18 @@ internal fun RaftAppTopBarNotificationBell(
     HomeNotificationBellButton(notifications, open, onToggle, RaftAppTopBarNotificationTriggerSize)
 }
 
-/** The bell's popover under the wide top bar, at its trailing end; shown while [state] is open. */
+/**
+ * The bell's popover, shown while [state] is open: under the wide top bar, at its trailing end; or,
+ * with [besideRail] (the bell in the rail's footer, iPhone Duo's inner screen), next to the rail,
+ * 8dp past its seam and 8dp above [bottomInset], rising from the bell.
+ */
 @Composable
-internal fun RaftAppTopBarNotificationOverlay(state: RaftAppShellTopBarState, topInset: Dp) {
+internal fun RaftAppTopBarNotificationOverlay(
+    state: RaftAppShellTopBarState,
+    topInset: Dp,
+    besideRail: Boolean = false,
+    bottomInset: Dp = 0.dp,
+) {
     if (!state.bellOpen.value) return
     RaftFloatingOverlayHost(
         onDismiss = { state.bellOpen.value = false },
@@ -4977,10 +5050,18 @@ internal fun RaftAppTopBarNotificationOverlay(state: RaftAppShellTopBarState, to
                 state.notifications,
                 state.onView,
                 state.onDismiss,
-                Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(top = topInset, end = RaftTopBarDefaults.TrailingEndPadding)
-                    .raftFloatingContentClickTarget()
+                if (besideRail) {
+                    Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(
+                            start = RaftAppRailOuterWidth + RaftAppRailPopoverGap,
+                            bottom = bottomInset + RaftAppRailPopoverGap,
+                        )
+                } else {
+                    Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = topInset, end = RaftTopBarDefaults.TrailingEndPadding)
+                }.raftFloatingContentClickTarget()
             )
         }
     }
@@ -5810,6 +5891,7 @@ private fun HomeServerDrawerConversationRow(
                 hasDraft = item.hasDraft,
                 muted = item.activityMuted,
                 unreadCount = item.unreadCount,
+                markedUnread = item.markedUnread,
                 onClick = onClick.takeIf { enabled }
             )
         } else {
@@ -5821,6 +5903,7 @@ private fun HomeServerDrawerConversationRow(
                 muted = item.activityMuted,
                 bridgeProvider = item.bridgeProvider,
                 unreadCount = item.unreadCount,
+                markedUnread = item.markedUnread,
                 mentioned = item.mentioned,
                 followedThreadUnreadCount = item.followedThreadUnreadCount,
                 interactionIdentity = identity,
@@ -6484,6 +6567,13 @@ internal data class HomeChannelRowMarks(
     val loudThreadCount: Int,
     val quietLabel: String?,
     val showDraft: Boolean,
+    /**
+     * Marked unread with nothing counted (botiverse/slock #11795, web `showMarkedUnreadDot`): the
+     * quiet unread dot where a count would be, before the draft pencil.
+     */
+    val markedUnreadDot: Boolean = false,
+    /** web `unreadTone`: the unread name of a loud count, or of a marked row in a joined, unmuted channel. */
+    val unreadTone: Boolean = loudCount > 0 || loudThreadCount > 0,
 ) {
     val loud: Boolean
         get() = loudCount > 0 || loudThreadCount > 0
@@ -6496,18 +6586,22 @@ internal fun homeChannelRowMarks(
     joined: Boolean,
     muted: Boolean,
     hasDraft: Boolean,
+    markedUnread: Boolean = false,
 ): HomeChannelRowMarks {
     val unread = unreadCount.coerceAtLeast(0)
     val threads = followedThreadUnreadCount.coerceAtLeast(0)
     val hasUnread = unread > 0 || threads > 0
     val loud = hasUnread && joined && !muted
     val quiet = hasUnread && !loud
+    val markedUnreadDot = !hasUnread && markedUnread
     return HomeChannelRowMarks(
         mention = mentioned && joined,
         loudCount = if (loud) unread else 0,
         loudThreadCount = if (loud) threads else 0,
         quietLabel = if (quiet) formatHomeSidebarBadgeCount(if (unread > 0) unread else threads) else null,
-        showDraft = hasDraft && !hasUnread,
+        showDraft = hasDraft && !hasUnread && !markedUnreadDot,
+        markedUnreadDot = markedUnreadDot,
+        unreadTone = loud || (markedUnreadDot && joined && !muted),
     )
 }
 
@@ -6541,6 +6635,7 @@ private fun HomeSidebarChannelRow(
     joined: Boolean = true,
     muted: Boolean = false,
     unreadCount: Int = 0,
+    markedUnread: Boolean = false,
     mentioned: Boolean = false,
     followedThreadUnreadCount: Int = 0,
     hasDraft: Boolean = false,
@@ -6557,7 +6652,8 @@ private fun HomeSidebarChannelRow(
             mentioned = mentioned,
             joined = joined,
             muted = muted,
-            hasDraft = hasDraft
+            hasDraft = hasDraft,
+            markedUnread = markedUnread
         )
     val loudCount = marks.loudCount
     val loudThreadCount = marks.loudThreadCount
@@ -6579,10 +6675,16 @@ private fun HomeSidebarChannelRow(
         } else {
             null
         }
+    val markedUnreadDescription =
+        if (marks.markedUnreadDot) stringResource(Res.string.home_sidebar_marked_unread) else null
     val aside: (@Composable RowScope.() -> Unit)? =
         when {
             quietLabel != null -> {
                 { RaftSidebarItemMeta(quietLabel) }
+            }
+            // web ChannelRow `showMarkedUnreadDot`: unread with no count, before the draft pencil.
+            marks.markedUnreadDot -> {
+                { RaftQuietUnreadDot(contentDescription = markedUnreadDescription) }
             }
             showDraft -> {
                 { HomeSidebarLucideIcon(RaftLucideIconName.Pencil, HomeSidebarMetaIconSize) }
@@ -6600,7 +6702,7 @@ private fun HomeSidebarChannelRow(
         } else {
             aside
         }
-    val tone = homeConversationRowTone(muted = muted, joined = joined, selected = selected, loudUnread = marks.loud)
+    val tone = homeConversationRowTone(muted = muted, joined = joined, selected = selected, loudUnread = marks.unreadTone)
     val longClick = rememberHomeSidebarLongClick(interactionIdentity, onLongPress)
     val rowModifier = modifier.then(longClick.anchorModifier)
     val title = remember(name) { homeSidebarUserContentName(name) }
@@ -7113,6 +7215,7 @@ internal fun HomeSidebarDirectMessageRow(
     selected: Boolean = false,
     muted: Boolean = false,
     unreadCount: Int = 0,
+    markedUnread: Boolean = false,
     hasDraft: Boolean = false,
     interactionIdentity: String = "dm:${memberId.orEmpty()}:$name",
     menuOpen: Boolean = false,
@@ -7120,7 +7223,10 @@ internal fun HomeSidebarDirectMessageRow(
     onLongPress: ((RaftPopoverAnchor) -> Unit)? = null
 ) {
     val isAgent = peerType?.equals("agent", ignoreCase = true) == true
-    val badge = homeConversationBadgeProjection(HomeConversationBadgeInput(unreadCount = unreadCount, muted = muted))
+    val badge =
+        homeConversationBadgeProjection(
+            HomeConversationBadgeInput(unreadCount = unreadCount, muted = muted, markedUnread = markedUnread)
+        )
     val avatarWireValue = rememberRaftMemberAvatarWireValue(memberAvatarResolver, memberId)
     // botiverse/slock #11273 (web `DmRow` / `AgentDmRow`): an App Bot's name carries the Bot
     // badge; it shows no status pixel and no runtime or activity meta.
@@ -7129,7 +7235,15 @@ internal fun HomeSidebarDirectMessageRow(
     // an agent:activity push recomposes those two leaves, not the whole row.
     val agentMemberId = raftHomeDmPresenceAgentId(memberId, isAgent = isAgent, isAppBot = appBot != null)
     val trailingSlots =
-        raftHomeDmTrailingSlots(badge = badge.label, hasDraft = hasDraft, isAgent = agentMemberId != null, isAppBot = appBot != null)
+        raftHomeDmTrailingSlots(
+            badge = badge.label,
+            hasDraft = hasDraft,
+            isAgent = agentMemberId != null,
+            isAppBot = appBot != null,
+            markedUnread = badge.markedUnreadDot
+        )
+    val markedUnreadDescription =
+        if (badge.markedUnreadDot) stringResource(Res.string.home_sidebar_marked_unread) else null
     val mutedIcon = homeConversationMutedIndicatorIcon(muted)
     val longClick = rememberHomeSidebarLongClick(interactionIdentity, onLongPress)
     val title = remember(name) { homeSidebarUserContentName(name) }
@@ -7180,6 +7294,8 @@ internal fun HomeSidebarDirectMessageRow(
                                         HomeSidebarBadgeTone.Loud -> RaftSidebarItemMarks(unreadCount = unreadCount, countDescription = null)
                                         HomeSidebarBadgeTone.Quiet -> RaftSidebarItemMeta(badge.label.orEmpty())
                                     }
+                                RaftHomeDmTrailingSlot.MarkedUnreadDot ->
+                                    RaftQuietUnreadDot(contentDescription = markedUnreadDescription)
                                 RaftHomeDmTrailingSlot.Draft -> HomeSidebarLucideIcon(RaftLucideIconName.Pencil, HomeSidebarMetaIconSize)
                                 RaftHomeDmTrailingSlot.AgentMeta ->
                                     DirectMessageAgentMeta(

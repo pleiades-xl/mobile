@@ -231,6 +231,9 @@ kotlin {
                 implementation(libs.okhttp.mockwebserver3)
                 implementation(libs.sqldelight.sqlite.driver)
                 implementation(libs.robolectric)
+                // Compose UI tests on Robolectric (runRobolectricComposeUiTest, e.g.
+                // RaftSupportingPaneBackUiTest); AGENTS.md "Compose UI tests". Test classpath only.
+                implementation(libs.cmp.ui.test)
                 // Native scroll arbitration tests exercise the renderer’s compile-only host APIs.
                 implementation(libs.androidx.recyclerview)
                 implementation(libs.androidx.core.ktx)
@@ -383,6 +386,9 @@ android {
         }
         named("test") {
             resources.srcDir("src/commonMain/sqldelight/databases")
+            // KMP does not put commonTest resources on the Android unit-test classpath; the vendored
+            // slock contract cases (contract-cases/unread, UnreadContractCasesTest) live there.
+            resources.srcDir("src/commonTest/resources")
         }
         named("androidTest") {
             assets.srcDir("src/commonMain/sqldelight/databases")

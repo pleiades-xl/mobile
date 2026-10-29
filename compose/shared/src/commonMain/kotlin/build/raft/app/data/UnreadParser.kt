@@ -1,5 +1,7 @@
 package build.raft.app.data
 
+import build.raft.app.data.generated.MarkConversationUnreadResponseDto
+import build.raft.app.data.generated.ReadMutationPendingResponseDto
 import build.raft.app.model.ChannelId
 import build.raft.app.model.ServerSummary
 import kotlinx.serialization.Serializable
@@ -12,7 +14,8 @@ import kotlinx.serialization.json.Json
  *  - GET  /api/channels/unread?summary=1       → [ChannelUnreadSummaryWireDto]
  *  - POST /api/channels/:id/read               → `{ ok }`
  *  - POST /api/channels/:id/read-all           → `{ ok, seq }`
- *  - POST /api/channels/:id/unread             → `{ ok, unreadCount }`
+ *  - POST /api/channels/:id/unread             → generated [MarkConversationUnreadResponseDto]
+ *                                                 (`{ ok, unreadCount, maxReadSeq, readStateVersion, markedUnread, outcome? }`)
  *  - POST /api/channels/inbox/read-all         → `{ ok, markedCount }`
  *
  * Field names are exact camelCase. No snake_case fallbacks, no nested
@@ -50,10 +53,11 @@ private data class WireReadStateAckScope(
 internal val CHANNEL_UNREAD_SUMMARY_QUERY: List<Pair<String, String>> = listOf("summary" to "1")
 
 /**
- * `readState` of one summary entry: botiverse/slock `packages/shared/src/inboxScopeReadFrontier.ts`
- * `InboxScopeReadFrontier` (`{kind:"absent"} | {kind:"corrupt"} | {kind:"present", readStateVersion,
- * maxReadSeq: string, latestActivity: {messageId, seq: string} | null}`). Carried for contract
- * completeness; Home reads its read cursors from the read-state path, not from here.
+ * `readState` of one summary entry or Activity row: botiverse/slock
+ * `packages/shared/src/inboxScopeReadFrontier.ts` `InboxScopeReadFrontier` (`{kind:"absent"} |
+ * {kind:"corrupt"} | {kind:"present", readStateVersion, maxReadSeq: string, latestActivity:
+ * {messageId, seq: string} | null, markedUnread?: true}`). Home reads its read cursors from the
+ * read-state path; from here it takes only [markedUnread].
  */
 @Serializable
 data class ChannelUnreadSummaryReadStateWireDto(
@@ -61,7 +65,16 @@ data class ChannelUnreadSummaryReadStateWireDto(
     val readStateVersion: Long? = null,
     val maxReadSeq: String? = null,
     val latestActivity: ChannelUnreadSummaryLatestActivityWireDto? = null,
-)
+    /**
+     * botiverse/slock #11795: the person marked the conversation unread and nothing countable is
+     * unread ("unread, no number"). Present only when true; absent means not marked.
+     */
+    val markedUnread: Boolean? = null,
+) {
+    /** Marked unread: a present frontier that says so. Absent / corrupt frontiers are never marked. */
+    val isMarkedUnread: Boolean
+        get() = kind == "present" && markedUnread == true
+}
 
 @Serializable
 data class ChannelUnreadSummaryLatestActivityWireDto(
@@ -130,17 +143,24 @@ data class ChannelUnreadSummary(
     val threadUnreadByParent: Map<ChannelId, HomeParentThreadUnread>,
     /** Task #164: served from the server's remembered summary (`X-Raft-Stale`); may be old. */
     val stale: Boolean = false,
+    /**
+     * Scopes marked unread with nothing countable (`readState.markedUnread`, botiverse/slock #11795),
+     * by channel id value: shown unread with a dot and no number. Never in [unreadCounts]' totals.
+     */
+    val markedUnreadIds: Set<String> = emptySet(),
 )
 
 fun ChannelUnreadSummaryWireDto.toChannelUnreadSummary(): ChannelUnreadSummary {
     val unreadCounts = LinkedHashMap<ChannelId, Int>()
     val mentioned = LinkedHashSet<ChannelId>()
     val threads = LinkedHashMap<String, HomeFollowedThreadUnread>()
+    val marked = LinkedHashSet<String>()
     for ((key, entry) in channels) {
         val id = key.trim().takeIf { it.isNotEmpty() }?.let(::ChannelId) ?: continue
         val count = entry.unreadCount.coerceAtLeast(0)
         unreadCounts[id] = count
         if (entry.hasMention) mentioned += id
+        if (entry.readState?.isMarkedUnread == true) marked += id.value
         val parent = entry.parentChannelId?.trim()?.takeIf { it.isNotEmpty() }
         if (parent != null && count > 0) {
             threads[id.value] = HomeFollowedThreadUnread(ChannelId(parent), count, entry.hasMention)
@@ -156,6 +176,7 @@ fun ChannelUnreadSummaryWireDto.toChannelUnreadSummary(): ChannelUnreadSummary {
                     key.trim().takeIf { it.isNotEmpty() }?.let { ChannelId(it) to HomeParentThreadUnread(value.count, value.hasMention) }
                 }
                 .toMap(),
+        markedUnreadIds = marked,
     )
 }
 
@@ -227,3 +248,35 @@ fun parseReadReceiptResult(
         null
     }
 }.getOrNull()
+
+/**
+ * Parse a `POST /api/channels/:id/unread` answer through the contract DTO generated from the slock
+ * OpenAPI artifact (`readState` module, [MarkConversationUnreadResponseDto]). Null on contract
+ * mismatch (including `ok: false`) so the caller collapses it to an error.
+ *
+ * A 202 [ReadMutationPendingResponseDto] (admitted, result not known yet) is a pending result
+ * ([ReadReceiptResult.markUnreadPending], read as [MarkUnreadOutcome.Pending]): no count, no mark, no
+ * outcome; the `read_state:updated` that follows decides (Tenny, #proj-mobile:#70).
+ */
+fun parseMarkConversationUnreadResult(bodyText: String, channelId: ChannelId): ReadReceiptResult? {
+    val answer = runCatching {
+        unreadJson.decodeFromString(MarkConversationUnreadResponseDto.serializer(), bodyText)
+    }.getOrNull()
+    if (answer != null) {
+        if (!answer.ok) return null
+        return ReadReceiptResult(
+            channelId = channelId,
+            readStateVersion = answer.readStateVersion,
+            maxReadSeq = answer.maxReadSeq,
+            // A seq distance, not a message count; clamped only so it fits the shared Int field.
+            unreadCount = answer.unreadCount.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt(),
+            changed = true,
+            markedUnread = answer.markedUnread,
+            serverMarkUnreadOutcome = answer.outcome,
+        )
+    }
+    return runCatching {
+        unreadJson.decodeFromString(ReadMutationPendingResponseDto.serializer(), bodyText)
+        ReadReceiptResult(channelId = channelId, changed = true, markUnreadPending = true)
+    }.getOrNull()
+}

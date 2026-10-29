@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HANDS_CLI="${HANDS_CLI:-hands}"
-HANDS_CLI_PACKAGE="${HANDS_CLI_PACKAGE:-@botiverse/hands-cli@0.5.31}"
+HANDS_CLI_PACKAGE="${HANDS_CLI_PACKAGE:-@botiverse/hands-cli@0.5.35}"
 APP_SLUG="${HANDS_APP_SLUG:-raft-android}"
 CHANNEL="${HANDS_CHANNEL:-${SLOCK_HANDS_CHANNEL:-main}}"
 VARIANT="${SLOCK_ANDROID_VARIANT:-release}"
@@ -18,6 +18,8 @@ COLLECT_SYMBOLS="${SLOCK_COLLECT_ANDROID_SYMBOLS:-1}"
 REQUIRE_SYMBOLS="${SLOCK_REQUIRE_ANDROID_SYMBOLS:-0}"
 EXTERNAL_SYMBOL_ARCHIVE="${SLOCK_ANDROID_SYMBOL_ARCHIVE:-}"
 DRY_RUN="${SLOCK_HANDS_DRY_RUN:-0}"
+# shellcheck source=lib/hands_retry.sh
+. "${ROOT_DIR}/scripts/lib/hands_retry.sh"
 
 die() {
   echo "error: $*" >&2
@@ -105,7 +107,7 @@ Environment overrides:
   HANDS_API=https://hands.build
   HANDS_AUTH_TOKEN=<agent or CI bearer token>
   HANDS_CLI=hands
-  HANDS_CLI_PACKAGE=@botiverse/hands-cli@0.5.31
+  HANDS_CLI_PACKAGE=@botiverse/hands-cli@0.5.35
   SLOCK_ANDROID_VERSION_MAJOR=1
   SLOCK_ANDROID_VERSION_MINOR=0
   SLOCK_ANDROID_VERSION_PATCH=0
@@ -330,6 +332,15 @@ fi
 if [ "${SLOCK_HANDS_DRAFT:-0}" = "1" ]; then
   HANDS_ARGS+=(--draft)
 fi
+# Build provenance: the android-release.yml run that built and signed this APK (and kept
+# its signed AAB as an artifact). github-release.yml uses it to find that AAB.
+if [ "${GITHUB_ACTIONS:-}" = "true" ] && [ -n "${GITHUB_RUN_ID:-}" ]; then
+  HANDS_ARGS+=(
+    --ci-provider github-actions
+    --ci-run-id "${GITHUB_RUN_ID}"
+    --ci-url "${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+  )
+fi
 if [ -f "${MAPPING_PATH}" ]; then
   HANDS_ARGS+=(--mapping "${MAPPING_PATH}")
 fi
@@ -346,4 +357,5 @@ if [ "${DELTA_VERSIONS}" != "0" ]; then
   HANDS_ARGS+=(--generate-deltas "${DELTA_VERSIONS}")
 fi
 
-run_hands "${HANDS_ARGS[@]}"
+# Retries only transient 5xx / network failures; see scripts/lib/hands_retry.sh.
+hands_retry run_hands "${HANDS_ARGS[@]}"

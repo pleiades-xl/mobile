@@ -68,6 +68,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
@@ -183,9 +184,10 @@ fun RaftMenuItem(
 ) {
     val colors = RaftTheme.colors
     val source = interactionSource ?: remember { MutableInteractionSource() }
-    val isPressed = raftIsPressed(source)
     val isFocused = raftIsFocused(source)
-    val highlighted = enabled && (isPressed || isFocused)
+    val isHovered = raftIsHovered(source)
+    // `hover:bg-brand-soft data-highlighted:bg-brand-soft`: pointer, press and keyboard alike.
+    val overlay = rememberRaftStateOverlay(source, RaftHoverTier.Highlight, enabled = enabled, highlighted = isFocused)
     val ink = if (enabled) colors.foreground else colors.foregroundDisabled
     val iconInk = if (enabled) colors.foregroundMuted else colors.foregroundDisabled
     // raft-ui 0.20: an item embedded in the popup's frame wears radius-chip (6dp).
@@ -200,6 +202,7 @@ fun RaftMenuItem(
             onDispose { nav.entries -= entry }
         }
     }
+    RaftMenuPointerCursor(nav, entry, enabled && isHovered)
     // A field Select's options share the field type (select.tsx `chrome: field`:
     // `text-field font-field` on the item text, so the chosen one stays 400).
     val labelStyle =
@@ -222,9 +225,10 @@ fun RaftMenuItem(
                     Modifier
                 },
             )
-            .background(if (highlighted) colors.brandSoft else Color.Transparent, shape)
+            .raftStateOverlay(overlay, shape)
             // Drawn over the highlight, as a CSS border paints over the background.
             .then(if (divider) Modifier.topHairline(colors.lineHairline) else Modifier)
+            .raftPointerHover(source)
             .clickable(source, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
             .semantics { if (checked) selected = true }
             .then(if (divider) Modifier.padding(top = RaftStroke.Hairline) else Modifier)
@@ -396,13 +400,14 @@ fun RaftDropdownMenu(
     val density = LocalDensity.current
     val safe = WindowInsets.safeDrawing
     val layoutDirection = LocalLayoutDirection.current
+    val frame = LocalRaftFrameInsets.current
     val area =
         RaftSafeArea(
             left = safe.getLeft(density, layoutDirection),
             top = safe.getTop(density),
             right = safe.getRight(density, layoutDirection),
             bottom = safe.getBottom(density),
-        )
+        ).clearOf(frame, density)
     val windowMargin = with(density) { 8.dp.roundToPx() }
     val insets =
         with(density) {
@@ -422,6 +427,8 @@ fun RaftDropdownMenu(
     // A right swipe must not pop the page underneath an open menu.
     RaftBlockBackSwipe()
     Popup(popupPositionProvider = provider, onDismissRequest = { dismiss() }, properties = PopupProperties(focusable = true)) {
+        // Its own window on Android: keep the host's bar icons while it holds focus.
+        RaftPopupWindowPolicy()
         LaunchedEffect(Unit) {
             if (inputModes.inputMode == InputMode.Keyboard) {
                 // The rows attach their focus targets in the first frame.
@@ -466,6 +473,18 @@ fun RaftDropdownMenu(
                 }
             }
         }
+    }
+}
+
+/**
+ * One cursor for pointer and keys (Base UI's highlight): a pointer over a row while the
+ * keyboard has another row of the same menu moves the focus onto it, so only one row is
+ * `brand-soft`. Leaves the focus alone while the search field has it, so typing goes on.
+ */
+@Composable
+internal fun RaftMenuPointerCursor(nav: RaftMenuNav?, entry: RaftMenuNav.Entry, hovered: Boolean) {
+    LaunchedEffect(nav, entry, hovered) {
+        if (hovered && nav != null && nav.entries.any { it.focused && it !== entry }) nav.focus(entry)
     }
 }
 
@@ -528,6 +547,21 @@ internal val LocalRaftMenuNav = staticCompositionLocalOf<RaftMenuNav?> { null }
 /** The window's safe area (system bars, cutouts, the keyboard), in px from each edge. */
 @Immutable
 internal data class RaftSafeArea(val left: Int = 0, val top: Int = 0, val right: Int = 0, val bottom: Int = 0)
+
+/**
+ * The safe area grown to cover the host's [frame] insets: the menu's 8dp window margin then keeps
+ * it [RaftFrameInsetsDefaults.PopupGap] from each inset too (raft-ui `usePopupCollisionPadding`).
+ */
+internal fun RaftSafeArea.clearOf(frame: RaftFrameInsets, density: Density): RaftSafeArea {
+    if (frame.isZero) return this
+    return with(density) {
+        copy(
+            left = maxOf(left, frame.left.coerceAtLeast(0.dp).roundToPx()),
+            top = maxOf(top, frame.top.coerceAtLeast(0.dp).roundToPx()),
+            right = maxOf(right, frame.right.coerceAtLeast(0.dp).roundToPx()),
+        )
+    }
+}
 
 /** The transparent room round a popup's surface, in px. */
 @Immutable

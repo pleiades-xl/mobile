@@ -28,6 +28,7 @@ import build.raft.app.components.RaftProvideDesignSystemStrings
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import build.raft.app.raftPlatformPageVisibleLifecycleState
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import build.raft.app.cmp.RaftPageProvider
 import build.raft.app.cmp.RaftCmpRouter
@@ -37,9 +38,11 @@ import build.raft.app.cmp.host.RaftCmpPageArgs
 import build.raft.app.LocalRaftNativeTabBarBridge
 import build.raft.app.RaftNativeTabBarHostIdPageDataKey
 import build.raft.app.RaftNativeTabBarRegistry
-import build.raft.app.RAFT_APP_SHELL_PAGE
+import build.raft.app.RaftSideActionHostIdPageDataKey
+import build.raft.app.RaftSideActionHostRegistry
+import build.raft.app.rememberRaftSideActionHost
+import build.raft.designsystem.components.LocalRaftSideActionHost
 import build.raft.app.RaftPageHorizontalSafeAreaShell
-import build.raft.app.RaftPushedPageDockFrame
 import build.raft.app.compat.json.JSONObject
 import build.raft.app.image.raftInstallImageLoader
 import build.raft.app.toKuiklyJson
@@ -62,6 +65,9 @@ object RaftPageRegistry {
 
     fun hasPage(pageName: String): Boolean = factories.containsKey(pageName)
 
+    /** Where [pageName] opens on the wide layout ([raftPagePaneRoles]; [RaftPaneRole.Window] if unlisted). */
+    fun paneRole(pageName: String): RaftPaneRole = raftPagePaneRoles[pageName] ?: RaftPaneRole.Window
+
     /** Creates a fresh page instance for [pageName] (null if unknown). */
     fun factory(pageName: String): (() -> Pager)? = factories[pageName]
 
@@ -70,7 +76,7 @@ object RaftPageRegistry {
         val factory = factories[pageName] ?: return null
         // Hosts load the stored theme at startup; this covers a host that did not (idempotent).
         RaftAppAppearanceRuntime.ensureLoaded()
-        return { RaftPagerHost(factory, root = true) }
+        return { RaftPagerHost(factory) }
     }
 
     /** Hosts call this once at startup (Android: `RaftApplication.onCreate`). */
@@ -89,15 +95,13 @@ private val pagerIdSequence = atomic(0)
  * events while the host lifecycle is resumed and [active] is true, and provides [LocalActivity]
  * (for `getPager()` callers) and [LocalRaftPageArgs] (= [args]) to the page.
  *
- * Child pages (`RaftChildPage`) nest a second host with their own [args]. A [root] page (a
- * window's or a pushed page's own) other than the app shell draws the shell's side dock.
+ * Child pages (`RaftChildPage`) nest a second host with their own [args].
  */
 @Composable
 fun RaftPagerHost(
     factory: () -> Pager,
     args: RaftCmpPageArgs = LocalRaftPageArgs.current,
     active: Boolean = true,
-    root: Boolean = false,
 ) {
     val host = LocalRaftHost.current
     // The Raft Coil loader must be the singleton before any page asks Coil for an image.
@@ -151,22 +155,13 @@ fun RaftPagerHost(
     pager.pageData.applyRaftWindowMetrics(metrics)
 
     val lifecycleOwner = LocalLifecycleOwner.current
-    var resumed by remember(lifecycleOwner) {
-        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
-    }
+    var lifecycleState by remember(lifecycleOwner) { mutableStateOf(lifecycleOwner.lifecycle.currentState) }
     DisposableEffect(lifecycleOwner) {
-        val observer =
-            LifecycleEventObserver { _, event ->
-                when (event) {
-                    Lifecycle.Event.ON_RESUME -> resumed = true
-                    Lifecycle.Event.ON_PAUSE -> resumed = false
-                    else -> Unit
-                }
-            }
+        val observer = LifecycleEventObserver { _, event -> lifecycleState = event.targetState }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-    val visible = resumed && active
+    val visible = raftPagerHostLifecycleVisible(lifecycleState) && active
     LaunchedEffect(pager, visible) {
         if (visible != pager.isAppeared) {
             val event = if (visible) Pager.PAGER_EVENT_DID_APPEAR else Pager.PAGER_EVENT_DID_DISAPPEAR
@@ -195,6 +190,14 @@ fun RaftPagerHost(
     // stayed on the old channel while the shell had already selected the new one. Kuikly gave each
     // page its own render view, so this is that contract.
     key(pager) {
+    // iPhone Duo: the host's system bar buttons for this page's side column (iOS), while the host
+    // has switched them on; null everywhere else, and the column draws itself.
+    val sideActionHost =
+        rememberRaftSideActionHost(
+            remember(pager) {
+                RaftSideActionHostRegistry.bridgeFor(pager.pageData.params.optString(RaftSideActionHostIdPageDataKey))
+            }
+        )
     CompositionLocalProvider(
         LocalActivity provides remember(pager) { RaftPageActivity(pager) },
         LocalRaftPageArgs provides args,
@@ -203,6 +206,7 @@ fun RaftPagerHost(
             remember(pager) {
                 RaftNativeTabBarRegistry.bridgeFor(pager.pageData.params.optString(RaftNativeTabBarHostIdPageDataKey))
             },
+        LocalRaftSideActionHost provides sideActionHost,
     ) {
         // Back handlers of an inactive (kept-alive, hidden) page must not fire.
         RaftProvidePageActive(active) {
@@ -217,9 +221,7 @@ fun RaftPagerHost(
                             // Left/right safe area for every page (landscape sensor housing,
                             // a side status bar): content and controls never run under it.
                             RaftPageHorizontalSafeAreaShell {
-                                RaftPushedPageDockFrame(enabled = root && args.pageName != RAFT_APP_SHELL_PAGE) {
-                                    (pager as? ComposeContainer)?.composedContent?.invoke()
-                                }
+                                (pager as? ComposeContainer)?.composedContent?.invoke()
                             }
                         }
                     }
@@ -229,6 +231,18 @@ fun RaftPagerHost(
     }
     }
 }
+
+/**
+ * Whether the host lifecycle shows the page ([Pager.PAGER_EVENT_DID_APPEAR]). Android / iOS: from
+ * RESUMED, as before. Desktop: from STARTED, because Compose Desktop drops a visible window that
+ * merely lost focus (the user clicked another app) to STARTED and only a minimized window (or the
+ * app hidden with Cmd-H, see the desktop host) to CREATED. Treating focus loss as a disappear hid
+ * the wide detail pane (blank right column) and re-ran the resume refresh on every focus regain.
+ */
+internal fun raftPagerHostLifecycleVisible(
+    state: Lifecycle.State,
+    visibleFrom: Lifecycle.State = raftPlatformPageVisibleLifecycleState(),
+): Boolean = state.isAtLeast(visibleFrom)
 
 /** Window facts a page host reports into [PageData] (dp). */
 internal data class RaftPageWindowMetrics(

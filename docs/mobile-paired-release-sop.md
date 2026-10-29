@@ -300,6 +300,15 @@ gh workflow run ios-release.yml \
   -f release_mode=draft
 ```
 
+The default builds with Xcode 27.1 (iOS 27.1 SDK, iPhone Duo edge-to-edge) on
+GitHub's `xcode-27-xlarge` runner (owner decision 2026-10-28: all iOS builds use
+Xcode 27.1). Only GitHub's `xcode-27*` images have Xcode 27.1, and
+GitHub-hosted macOS minutes are billed. The manual fallback, only when the
+`xcode-27*` pool is unavailable, is
+`-f macos_runner=blacksmith-12vcpu-macos-latest -f xcode_app_path=/Applications/Xcode_26.6.app`:
+that build uses the iOS 26.5 SDK, is letterboxed on iPhone Duo, and is recorded
+as a deliberate opt-in Xcode lane in its summary and Hands metadata.
+
 For the Google Play carrier, use the same exact release-ref checkout and
 source identity but dispatch `android_variant=play` with
 `upload_android_artifacts=true`. The workflow retains the signed AAB and

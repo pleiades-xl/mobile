@@ -33,6 +33,9 @@ import build.raft.app.network.sync.SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID
 import build.raft.app.network.sync.ThreadDurablePageDirection
 import build.raft.app.network.sync.ThreadDurableReplyParent
 import build.raft.app.network.sync.ThreadEnteredScopeSnapshotLoader
+import build.raft.app.network.sync.ThreadDurableEnterTicket
+import build.raft.app.network.sync.ThreadDurableRequestStamp
+import build.raft.app.network.sync.ThreadDurableEnteredPage
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -41,6 +44,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -857,6 +861,49 @@ class SharedThreadStoreReplyOriginAndPagingTest {
         assertEquals(2, extender.calls.size)
         scope.cancel()
     }
+
+    @Test
+    fun olderAndNewerPagingReadTheDurableHeadEpochBeforeTheirRequests() = runTest {
+        // Message storage Phase 3b: the epoch handed to the extender is the one read BEFORE each page request. The
+        // fake epoch moves with every paging request, so a read after the fetch would hand over 1 and 2.
+        val scope = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
+        val repository =
+            FakeConversationRepository(
+                olderResult =
+                    DataResult.Content(
+                        threadSnapshot(body = "older repo body", id = "m5", seq = 5).copy(rawMessagePage = durableRawPage("m5", limit = 30))
+                    ),
+                newerResult =
+                    DataResult.Content(
+                        threadSnapshot(body = "newer repo body", id = "m12", seq = 12).copy(rawMessagePage = durableRawPage("m12", limit = 30))
+                    )
+            )
+        val extender = RecordingDurablePageExtender()
+        extender.headEpochProvider = { (repository.olderRequests.size + repository.newerRequests.size).toLong() }
+        val store =
+            SharedThreadStore(
+                dataSource =
+                    testSharedThreadDataSource(
+                        storeScope = backgroundScope,
+                        networkApi = FakeThreadApi(),
+                        sessionStore = InMemoryRaftAuthSessionStore(sampleSession()),
+                        cacheEnvironmentIdProvider = { TestThreadEnvironmentId },
+                        conversationRepository = repository,
+                        durablePageExtender = extender
+                    ),
+                scope = scope
+            )
+        store.accept(SharedThreadIntent.Start(basePayload()))
+        store.accept(SharedThreadIntent.SetPagingAvailability(canLoadMoreBefore = true, canLoadMoreAfter = true))
+
+        store.accept(SharedThreadIntent.LoadOlder)
+        store.accept(SharedThreadIntent.LoadNewer)
+
+        assertEquals(2, extender.calls.size)
+        assertEquals(listOf<Long?>(0L, 1L), extender.requestHeadEpochs)
+        scope.cancel()
+    }
+
     @Test
     fun pagesWithoutARawPageOrOnReplyRoutesAreNeverOfferedToTheExtender() = runTest {
         // Twin of the test above: identical paging, but the repository page carries no raw page.
@@ -920,49 +967,48 @@ class SharedThreadStoreReplyOriginAndPagingTest {
         assertEquals(1, extender.calls.size)
     }
     @Test
-    fun replyRouteOpenedBeforeItsStreamIsKnownRequestsTheThreadSnapshotOnceResolved() = runTest {
-        // Task #168 step 3: `start()` cannot name the thread scope of an unresolved reply route; the
-        // enter snapshot is requested once the first refresh resolved the stream.
-        suspend fun replyLoadsFor(route: RaftThreadScreenPayload): List<Pair<String, ThreadDurableReplyParent>> {
+    fun aChannelEntryWritesItsOwnPageThroughUnderTheTicketTakenBeforeTheRequest() = runTest {
+        // Message storage Phase 2b: the entry's own request is the durable write — ticket first, then the request, then
+        // the page it got. Twin: the same entry whose request fails releases the ticket and writes nothing.
+        suspend fun eventsFor(fail: Boolean): List<String> {
             val scopeJob = SupervisorJob()
             val scope = CoroutineScope(coroutineContext + scopeJob)
-            val loads = mutableListOf<Pair<String, ThreadDurableReplyParent>>()
+            val events = mutableListOf<String>()
             val loader =
                 object : ThreadEnteredScopeSnapshotLoader {
-                    override suspend fun loadOnEnter(
+                    override suspend fun beginEnter(
                         partition: DurablePartitionKey,
                         channelId: String,
-                        stillCurrent: () -> Boolean
-                    ) = Unit
+                        replyParent: ThreadDurableReplyParent?,
+                        registerBaseline: Boolean,
+                        stamp: ThreadDurableRequestStamp?
+                    ): ThreadDurableEnterTicket {
+                        events += "begin:$channelId:baseline=$registerBaseline"
+                        return ThreadDurableEnterTicket(partition, channelId, replyParent, 0L, 0L, baseline = null)
+                    }
 
-                    override suspend fun loadReplyThreadOnEnter(
-                        partition: DurablePartitionKey,
-                        threadChannelId: String,
-                        replyParent: ThreadDurableReplyParent,
+                    override suspend fun persistEnteredPage(
+                        ticket: ThreadDurableEnterTicket,
+                        page: ThreadDurableEnteredPage,
                         stillCurrent: () -> Boolean
                     ) {
-                        loads += threadChannelId to replyParent
+                        events += "persist:${page.channelId}:limit=${page.requestedLimit}:rows=${page.rawMessages.size}:current=${stillCurrent()}"
+                    }
+
+                    override suspend fun abandonEnter(ticket: ThreadDurableEnterTicket) {
+                        events += "abandon:${ticket.channelId}"
                     }
                 }
             val repository =
                 FakeConversationRepository(
-                    threadResult =
-                        DataResult.Content(
-                            threadSnapshot(
-                                threadId = "thread-m1",
-                                conversation =
-                                    conversationSummary("thread-m1").copy(
-                                        kind = ConversationKind.Thread,
-                                        channelId = ChannelId("channel-1"),
-                                        thread =
-                                            ThreadConversation(
-                                                parentChannelId = ChannelId("channel-1"),
-                                                parentMessageId = MessageId("m1"),
-                                                streamChannelId = ChannelId("thread-m1")
-                                            )
-                                    )
-                            )
-                        )
+                    threadResultProvider = { _, _, limit ->
+                        events += "fetch"
+                        if (fail) {
+                            DataResult.Error(ScreenError(code = "thread_network", retryable = true))
+                        } else {
+                            DataResult.Content(threadSnapshot().copy(rawMessagePage = durableRawPage("m5", limit = limit)))
+                        }
+                    }
                 )
             val store =
                 SharedThreadStore(
@@ -977,21 +1023,195 @@ class SharedThreadStoreReplyOriginAndPagingTest {
                         ),
                     scope = scope
                 )
-            store.accept(SharedThreadIntent.Start(route))
-            withTimeout(5_000L) { while (loads.isEmpty()) yield() }
+            store.accept(SharedThreadIntent.Start(basePayload()))
+            withTimeout(5_000L) { while (events.none { it.startsWith("persist") || it.startsWith("abandon") }) delay(10) }
             repeat(20) { yield() }
             scopeJob.cancelAndJoin()
-            return loads.toList()
+            return events.toList()
+        }
+
+        val written = eventsFor(fail = false)
+        assertEquals("begin:channel-1:baseline=true", written.first(), written.toString())
+        assertEquals("fetch", written[1], written.toString())
+        assertTrue(written.drop(2).single().matches(Regex("persist:channel-1:limit=\\d+:rows=1:current=true")), written.toString())
+        assertEquals(listOf("begin:channel-1:baseline=true", "fetch", "abandon:channel-1"), eventsFor(fail = true))
+    }
+
+    @Test
+    fun replyRouteOpenedBeforeItsStreamIsKnownWritesThePageItsRequestResolved() = runTest {
+        // Task #168 step 3 / message storage Phase 2b: `start()` cannot name the thread scope of an unresolved reply
+        // route, so its request takes no ticket (no realtime baseline); the page the request resolved is still written
+        // through, under a ticket taken after it. A route with its stream known takes its ticket before the request.
+        // The ticket taken after the request carries the stamp read before it (never one read at write time).
+        data class Run(
+            val begins: List<Triple<String, ThreadDurableReplyParent?, Boolean>>,
+            val persisted: List<String>,
+            val stamps: List<Long?> = emptyList()
+        )
+        suspend fun runFor(route: RaftThreadScreenPayload): Run {
+            val scopeJob = SupervisorJob()
+            val scope = CoroutineScope(coroutineContext + scopeJob)
+            val begins = mutableListOf<Triple<String, ThreadDurableReplyParent?, Boolean>>()
+            val persisted = mutableListOf<String>()
+            val stamps = mutableListOf<Long?>()
+            var stampsRead = 0L
+            val loader =
+                object : ThreadEnteredScopeSnapshotLoader {
+                    override suspend fun beginEnter(
+                        partition: DurablePartitionKey,
+                        channelId: String,
+                        replyParent: ThreadDurableReplyParent?,
+                        registerBaseline: Boolean,
+                        stamp: ThreadDurableRequestStamp?
+                    ): ThreadDurableEnterTicket {
+                        begins += Triple(channelId, replyParent, registerBaseline)
+                        stamps += stamp?.revAtRequest
+                        return ThreadDurableEnterTicket(partition, channelId, replyParent, 0L, 0L, baseline = null)
+                    }
+
+                    // Each read is numbered: the ticket must carry the first one (read before the request).
+                    override suspend fun requestStamp(partition: DurablePartitionKey): ThreadDurableRequestStamp =
+                        ThreadDurableRequestStamp(partition, 0L, revAtRequest = ++stampsRead, expectedHeadEpoch = 0L)
+
+                    override suspend fun persistEnteredPage(
+                        ticket: ThreadDurableEnterTicket,
+                        page: ThreadDurableEnteredPage,
+                        stillCurrent: () -> Boolean
+                    ) {
+                        persisted += page.channelId
+                    }
+                }
+            val snapshot =
+                threadSnapshot(
+                    threadId = "thread-m1",
+                    conversation =
+                        conversationSummary("thread-m1").copy(
+                            kind = ConversationKind.Thread,
+                            channelId = ChannelId("channel-1"),
+                            thread =
+                                ThreadConversation(
+                                    parentChannelId = ChannelId("channel-1"),
+                                    parentMessageId = MessageId("m1"),
+                                    streamChannelId = ChannelId("thread-m1")
+                                )
+                        )
+                ).copy(rawMessagePage = durableRawPage("r1", limit = 30))
+            val repository = FakeConversationRepository(threadResult = DataResult.Content(snapshot))
+            val store =
+                SharedThreadStore(
+                    dataSource =
+                        testSharedThreadDataSource(
+                            storeScope = backgroundScope,
+                            networkApi = FakeThreadApi(),
+                            sessionStore = InMemoryRaftAuthSessionStore(sampleSession()),
+                            cacheEnvironmentIdProvider = { TestThreadEnvironmentId },
+                            conversationRepository = repository,
+                            enteredScopeSnapshotLoader = loader
+                        ),
+                    scope = scope
+                )
+            store.accept(SharedThreadIntent.Start(route))
+            withTimeout(5_000L) { while (persisted.isEmpty()) delay(10) }
+            repeat(20) { yield() }
+            scopeJob.cancelAndJoin()
+            return Run(begins.toList(), persisted.toList(), stamps.toList())
         }
 
         val parent = ThreadDurableReplyParent(parentChannelId = "channel-1", rootMessageId = "m1")
         val resolvedRoute = replyPayload(parentMessageId = "m1", threadId = "thread-m1")
         val unresolvedRoute = resolvedRoute.copy(sourceThreadId = null, streamChannelId = null)
         assertEquals(null, unresolvedRoute.resolveThreadRouteIdentity().timelineChannelId)
-        assertEquals(listOf("thread-m1" to parent), replyLoadsFor(unresolvedRoute))
-        // Twin: the identical route with its stream already known is requested by start() alone,
-        // exactly once.
-        assertEquals(listOf("thread-m1" to parent), replyLoadsFor(resolvedRoute))
+        assertEquals(
+            Run(listOf(Triple("thread-m1", parent, false)), listOf("thread-m1"), stamps = listOf(1L)),
+            runFor(unresolvedRoute)
+        )
+        // Twin: the identical route with its stream already known takes its ticket (with the baseline) before the
+        // request, exactly once.
+        assertEquals(
+            Run(listOf(Triple("thread-m1", parent, true)), listOf("thread-m1"), stamps = listOf(null)),
+            runFor(resolvedRoute)
+        )
+    }
+
+    @Test
+    fun aTicketlessPageWithoutTheStampReadBeforeItsRequestIsNeverWritten() = runTest {
+        // #3905 review: a reply page whose stream its request resolved takes its ticket after the request, from the
+        // stamp (generation, revision, head epoch) read before it. Without that stamp nothing is written: a stamp read
+        // at write time would postdate the request and miss a horizonReset during it (#3875). Twin: the identical
+        // page with the stamp is written under exactly that stamp.
+        val stamps = mutableListOf<ThreadDurableRequestStamp?>()
+        val persisted = mutableListOf<String>()
+        var stampReads = 0
+        val loader =
+            object : ThreadEnteredScopeSnapshotLoader {
+                override suspend fun beginEnter(
+                    partition: DurablePartitionKey,
+                    channelId: String,
+                    replyParent: ThreadDurableReplyParent?,
+                    registerBaseline: Boolean,
+                    stamp: ThreadDurableRequestStamp?
+                ): ThreadDurableEnterTicket {
+                    stamps += stamp
+                    return ThreadDurableEnterTicket(partition, channelId, replyParent, 0L, 0L, baseline = null)
+                }
+
+                override suspend fun requestStamp(partition: DurablePartitionKey): ThreadDurableRequestStamp {
+                    stampReads += 1
+                    return ThreadDurableRequestStamp(partition, 0L, 0L, expectedHeadEpoch = stampReads.toLong())
+                }
+
+                override suspend fun persistEnteredPage(
+                    ticket: ThreadDurableEnterTicket,
+                    page: ThreadDurableEnteredPage,
+                    stillCurrent: () -> Boolean
+                ) {
+                    persisted += page.channelId
+                }
+            }
+        val dataSource =
+            testSharedThreadDataSource(
+                storeScope = backgroundScope,
+                networkApi = FakeThreadApi(),
+                sessionStore = InMemoryRaftAuthSessionStore(sampleSession()),
+                cacheEnvironmentIdProvider = { TestThreadEnvironmentId },
+                enteredScopeSnapshotLoader = loader
+            )
+        val context = assertNotNull(dataSource.captureReplyCacheProducerContext())
+        val route = replyPayload(parentMessageId = "m1", threadId = "thread-m1").resolveThreadRouteIdentity()
+        val parent = ThreadDurableReplyParent(parentChannelId = "channel-1", rootMessageId = "m1")
+        val page =
+            ThreadDurableEnteredPage(
+                channelId = "thread-m1",
+                rawMessages = Json.parseToJsonElement("""[{"id":"r1"}]""") as JsonArray,
+                requestedLimit = 30,
+                messageWindow = null,
+                historyLimited = false
+            )
+
+        dataSource.persistEnteredPageIfCurrent(
+            ticket = null,
+            stamp = null,
+            page = page,
+            routeIdentity = route,
+            context = context,
+            replyParent = parent
+        )
+        assertEquals(emptyList(), stamps, "no ticket is taken without the pre-request stamp")
+        assertEquals(emptyList(), persisted)
+        assertEquals(0, stampReads, "no stamp is read at write time")
+
+        val beforeRequest = assertNotNull(dataSource.durableRequestStampIfCurrent(context))
+        dataSource.persistEnteredPageIfCurrent(
+            ticket = null,
+            stamp = beforeRequest,
+            page = page,
+            routeIdentity = route,
+            context = context,
+            replyParent = parent
+        )
+        assertEquals(listOf<ThreadDurableRequestStamp?>(beforeRequest), stamps)
+        assertEquals(listOf("thread-m1"), persisted)
+        assertEquals(1, stampReads)
     }
     private fun durableRawPage(id: String, limit: Int): RawMessagePageWitness =
         RawMessagePageWitness(

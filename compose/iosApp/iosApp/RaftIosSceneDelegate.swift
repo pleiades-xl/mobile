@@ -3,7 +3,6 @@ import SafariServices
 import shared
 import SwiftUI
 import UIKit
-import UIKit.UIGestureRecognizerSubclass
 import CoreMotion
 
 // task #471: scene plumbing for iPad multi-window.
@@ -55,7 +54,6 @@ final class RaftIosSceneDelegate: UIResponder, UIWindowSceneDelegate {
             window.overrideUserInterfaceStyle = UIUserInterfaceStyle(
                 rawValue: Int(RaftAppAppearanceRuntime.shared.hostStyleCode)
             ) ?? .unspecified
-            window.addGestureRecognizer(RaftTouchProbe(target: nil, action: nil))
             RaftShakeDetector.shared.start()
             self.window = window
             RaftIosAppearanceHost.attach()
@@ -226,38 +224,9 @@ extension UIColor {
     }
 }
 
-/// Self-build diagnostics (iPhone Duo dead taps, 2026-10-28): logs the view each touch lands on.
-/// It fails at once, so it never takes part in gesture handling.
-final class RaftTouchProbe: UIGestureRecognizer {
-    override init(target: Any?, action: Selector?) {
-        super.init(target: target, action: action)
-        cancelsTouchesInView = false
-        delaysTouchesBegan = false
-        delaysTouchesEnded = false
-    }
-
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
-        if let touch = touches.first, let window = view {
-            let point = touch.location(in: window)
-            var chain: [String] = []
-            var hit = touch.view
-            while let current = hit, chain.count < 4 {
-                chain.append(String(describing: type(of: current)))
-                hit = current.superview
-            }
-            RaftIosDiagnosticsRecord(
-                "info",
-                "RaftTouchProbe",
-                "touch_down x=\(Int(point.x)) y=\(Int(point.y)) view=\(chain.joined(separator: "<"))"
-            )
-        }
-        state = .failed
-    }
-}
-
-/// Self-build (xuheng-li 2026-10-28): shake the phone, or long-press the side dock's server
-/// button, to share the app's diagnostics log files, the newest launches in full (the Settings
-/// export keeps only the last ~120 KB).
+/// Self-build (xuheng-li 2026-10-28): shake the phone, or long-press the server button, to share
+/// the app's diagnostics log files, the newest launches in full (the Settings export keeps only
+/// the last ~120 KB).
 final class RaftShakeWindow: UIWindow {
     override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
         guard motion == .motionShake else { return super.motionEnded(motion, with: event) }
@@ -289,27 +258,6 @@ final class RaftShakeDetector {
             RaftIosDiagnosticsRecord("info", "RaftShakeShare", "shake_share source=accelerometer")
             RaftLogShare.present()
         }
-    }
-}
-
-/// Self-build: the side dock on a page pushed over the app shell goes back to the shell first.
-enum RaftPopToShell {
-    static func run() {
-        let window = UIApplication.shared.connectedScenes
-            .compactMap { ($0 as? UIWindowScene)?.keyWindow }
-            .first
-        guard let window, let root = window.rootViewController else { return }
-        if root.presentedViewController != nil { root.dismiss(animated: false) }
-        navigation(in: window)?.popToRootViewController(animated: true)
-    }
-
-    /// The page stack's navigation controller, found through the views (SwiftUI hosts it).
-    private static func navigation(in view: UIView) -> UINavigationController? {
-        if let navigation = view.next as? UINavigationController { return navigation }
-        for subview in view.subviews {
-            if let found = navigation(in: subview) { return found }
-        }
-        return nil
     }
 }
 

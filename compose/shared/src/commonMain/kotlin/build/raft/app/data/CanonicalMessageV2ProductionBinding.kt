@@ -20,6 +20,11 @@ import build.raft.app.network.sync.CanonicalMessageFoldInput
 import build.raft.app.network.sync.CanonicalMessageFoldKind
 import build.raft.app.network.sync.CanonicalMessageV2CanaryOutcome
 import build.raft.app.network.sync.CanonicalMessageV2CommitResult
+import build.raft.app.network.sync.CanonicalMessageV2Coverage
+import build.raft.app.network.sync.CanonicalMessageV2SegmentAlgebra
+import build.raft.app.network.sync.CanonicalMessageV2SegmentSource
+import build.raft.app.network.sync.CanonicalMessageV2ThreadParent
+import build.raft.app.network.sync.threadParent
 import build.raft.app.network.sync.CanonicalMessageV2GenerationEngine
 import build.raft.app.network.sync.CanonicalMessageV2ProductionCanary
 import build.raft.app.network.sync.CanonicalMessageV2SnapshotFrame
@@ -33,6 +38,9 @@ import build.raft.app.network.sync.SyncScopeId
 import build.raft.app.network.sync.SyncScopeKey
 import build.raft.app.network.sync.DurablePartitionKey
 import build.raft.app.network.sync.ThreadEnteredScopeSnapshotLoader
+import build.raft.app.network.sync.ThreadDurableEnterTicket
+import build.raft.app.network.sync.ThreadDurableEnteredPage
+import build.raft.app.network.sync.ThreadDurableRequestStamp
 import build.raft.app.network.sync.decodeCanonicalMessageWire
 import build.raft.app.network.sync.toCanonicalMessageV2Envelope
 import kotlinx.coroutines.CancellationException
@@ -45,6 +53,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 
@@ -74,6 +83,17 @@ internal fun interface CanonicalMessageV2OwnerGateway {
 
     /** Task #167: the transport behind [grant] (re)connected as [transportEpoch]; callers check the grant is current. */
     suspend fun noteTransportEpoch(grant: RealtimeGrantRecord, transportEpoch: Long) {}
+
+    /**
+     * Message storage Phase 3a: called INSIDE the exact-current-grant slot; reads only what binds the commit to that
+     * grant and returns the commit, which the owner runs after the slot (never holding the authority registry
+     * during disk work), before display. Default: [accept] as the deferred commit.
+     */
+    suspend fun captureUnderGrant(
+        grant: RealtimeGrantRecord,
+        foldInput: CanonicalMessageFoldInput,
+        transportEpoch: Long?,
+    ): suspend () -> Unit = { accept(grant, foldInput, transportEpoch) }
 }
 
 /**
@@ -121,6 +141,21 @@ internal sealed interface CanonicalMessageV2ReplyParentConfirmation {
     data class Refused(val diagnostic: String) : CanonicalMessageV2ReplyParentConfirmation
 }
 
+/**
+ * Result of [CanonicalMessageV2RestSnapshotFetcher.convertPageRows] (message storage Phase 2b): the converted rows,
+ * the seqs of the rows left out, how many left-out rows had no readable seq, and the first reason a row was left
+ * out (`null` = every row converted).
+ */
+internal data class CanonicalMessageV2PageRows(
+    val envelopes: List<CanonicalMessageEnvelopeV2>,
+    val rejectedSeqs: Set<Long>,
+    val rejectedWithoutSeq: Int,
+    val firstRefusal: String?,
+) {
+    /** A left-out row with no seq cannot be split around: the page proves no range. */
+    val claimable: Boolean get() = rejectedWithoutSeq == 0
+}
+
 /** Result of [CanonicalMessageV2RestSnapshotFetcher.convertPage]. */
 internal sealed interface CanonicalMessageV2PageConversion {
     data class Converted(val envelopes: List<CanonicalMessageEnvelopeV2>) : CanonicalMessageV2PageConversion
@@ -140,110 +175,32 @@ internal sealed interface CanonicalMessageV2PageConversion {
  * only the id); a non-null value must match the server's answer (the canary path).
  */
 internal class CanonicalMessageV2RestSnapshotFetcher(
-    private val networkClient: RaftNetworkClient,
+    internal val networkClient: RaftNetworkClient,
     private val logger: (String) -> Unit = {},
 ) {
-    suspend fun fetch(
-        partition: DurablePartitionKey,
-        scopeId: SyncScopeId,
-        expectedScopeKind: String?,
-    ): CanonicalMessageV2SnapshotLoadResult {
+    /**
+     * Message storage Phase 2b: the top-level kind of [scopeId] from `channels/{id}`, and a task's parent channel
+     * (slock `schema.ts` `channels.parent_channel_id`). `null` = unavailable, not top-level, or a task without its
+     * parent. Only asked when the page and the stored header cannot name the kind.
+     */
+    suspend fun topLevelKind(partition: DurablePartitionKey, scopeId: SyncScopeId): Pair<String, SyncScopeId?>? {
         val detail = fetchJson(
             priority = DataRequestPriority.Background,
             path = "channels/$scopeId",
             serverId = partition.serverId,
-        ) ?: return unavailable("canonical_v2_channel_detail_unavailable")
+        ) ?: return null
         val channelType = (detail["type"] as? JsonPrimitive)
             ?.takeIf { it.isString }
             ?.content
             ?.takeIf { it in CANONICAL_MESSAGE_V2_TOP_LEVEL_SCOPE_KINDS }
-            ?: return unavailable("canonical_v2_scope_not_top_level")
-        // Task v2: a task conversation's page converts under its parent channel (`channels/{id}`
-        // names it; slock `schema.ts` `channels.parent_channel_id`).
-        val taskParentChannelId =
-            if (channelType == CANONICAL_MESSAGE_V2_TASK_SCOPE_KIND) {
-                detail.stringOrNull("parentChannelId")?.takeIf { it.isNotBlank() && it == it.trim() }
-                    ?: return unavailable("canonical_v2_task_parent_missing")
-            } else {
-                null
-            }
-        if (expectedScopeKind != null && channelType != expectedScopeKind) {
-            return unavailable("canonical_v2_scope_kind_changed")
-        }
-        val scope = SyncScopeKey(partition = partition, scopeId = scopeId, scopeKind = channelType)
-
-        val page = fetchJson(
-            priority = DataRequestPriority.Background,
-            path = "messages/channel/$scopeId",
-            serverId = partition.serverId,
-            query = listOf("limit" to CANONICAL_V2_CANARY_PAGE_LIMIT.toString()),
-        ) ?: return unavailable("canonical_v2_snapshot_unavailable")
-        val rawMessages = page["messages"] as? JsonArray
-            ?: return unavailable("canonical_v2_snapshot_shape")
-        if (rawMessages.isEmpty()) {
-            // An empty page is a full answer (task #1137): the channel has no top-level messages. It is
-            // persisted as an empty baseline — no facts, no seqs, both ends loaded — so the offline
-            // reader can render "empty channel" instead of "cannot load". An incremental message later
-            // advances the null seqs like any other (`advancedBy`).
-            logger("canonical_v2_snapshot_empty_page scope=$scopeId")
-            return CanonicalMessageV2SnapshotLoadResult.Loaded(
-                CanonicalMessageV2SnapshotFrame(
-                    scope = scope,
-                    envelopes = emptyList(),
-                    cursor = PersistedCursor(
-                        latestSeq = null,
-                        oldestLoadedSeq = null,
-                        newestLoadedSeq = null,
-                        hasLoadedOldest = true,
-                        hasLoadedNewest = true,
-                        epoch = null,
-                    ),
-                ),
-            )
-        }
-        val envelopes = when (
-            val converted = convertPage(partition, scopeId, channelType, rawMessages, taskParentChannelId = taskParentChannelId)
-        ) {
-            is CanonicalMessageV2PageConversion.Converted -> converted.envelopes
-            is CanonicalMessageV2PageConversion.Refused -> return unavailable(converted.diagnostic)
-        }
-        return CanonicalMessageV2SnapshotLoadResult.Loaded(
-            CanonicalMessageV2SnapshotFrame(scope = scope, envelopes = envelopes, cursor = snapshotCursor(envelopes)),
-        )
+            ?: return null
+        if (channelType != CANONICAL_MESSAGE_V2_TASK_SCOPE_KIND) return channelType to null
+        val parent = detail.stringOrNull("parentChannelId")?.takeIf { it.isNotBlank() && it == it.trim() } ?: return null
+        return channelType to parent
     }
 
     /**
-     * Task #168 step 3: the reply-thread twin of [fetch]. The route names the thread and its parent;
-     * the server must confirm both before a page is fetched:
-     * 1. `channels/{thread}` is a `thread` whose `parentChannelId` / `parentMessageId` equal
-     *    [replyParent] (a moved or foreign thread is refused, never re-parented);
-     * 2. `channels/{parent}` is a top-level kind — it becomes the cursor's `parentScopeKind`, which is
-     *    what pins the root fact inside the parent scope's stored window;
-     * 3. `messages/channel/{thread}` converts as a whole into `thread` envelopes under that parent.
-     * The cursor rules are the top-level page's ([snapshotCursor]) plus the three parent fields.
-     */
-    suspend fun fetchReplyThread(
-        partition: DurablePartitionKey,
-        threadChannelId: SyncScopeId,
-        replyParent: ThreadDurableReplyParent,
-    ): CanonicalMessageV2SnapshotLoadResult {
-        val parent = when (val confirmed = confirmReplyParent(partition, threadChannelId, replyParent)) {
-            is CanonicalMessageV2ReplyParentConfirmation.Confirmed -> confirmed.parent
-            is CanonicalMessageV2ReplyParentConfirmation.Refused -> return unavailable(confirmed.diagnostic)
-        }
-        val page = fetchJson(
-            priority = DataRequestPriority.Background,
-            path = "messages/channel/$threadChannelId",
-            serverId = partition.serverId,
-            query = listOf("limit" to CANONICAL_V2_CANARY_PAGE_LIMIT.toString()),
-        ) ?: return unavailable("canonical_v2_snapshot_unavailable")
-        val rawMessages = page["messages"] as? JsonArray
-            ?: return unavailable("canonical_v2_snapshot_shape")
-        return replyThreadFrame(partition, threadChannelId, parent, rawMessages, CANONICAL_V2_CANARY_PAGE_LIMIT)
-    }
-
-    /**
-     * Steps 1–2 of [fetchReplyThread] (task #14b: shared with the Activity prewarm writer): the server
+     * Task #14b / Phase 2b (shared by the enter write-through and the Activity prewarm writer): the server
      * confirms that [threadChannelId] is a `thread` under exactly [replyParent], and names the parent's
      * top-level kind. Never re-parents: any disagreement is [CanonicalMessageV2ReplyParentConfirmation.Refused].
      */
@@ -294,20 +251,20 @@ internal class CanonicalMessageV2RestSnapshotFetcher(
         parent: CanonicalMessageV2ReplyParentScope,
         rawMessages: JsonArray,
         pageLimit: Int,
+        /** The page's server window and history flag (Phase 2a: what range the page proves). */
+        messageWindow: ChannelMessageWindow? = null,
+        historyLimited: Boolean = false,
     ): CanonicalMessageV2SnapshotLoadResult {
         val scope = SyncScopeKey(partition = partition, scopeId = threadChannelId, scopeKind = REPLY_THREAD_SCOPE_KIND)
-        val envelopes = if (rawMessages.isEmpty()) {
+        if (rawMessages.isEmpty()) {
             // A thread with no replies yet is an answer too (task #1137 rule): an empty baseline.
             logger("canonical_v2_snapshot_empty_page scope=$threadChannelId scopeKind=$REPLY_THREAD_SCOPE_KIND")
-            emptyList()
-        } else {
-            when (
-                val converted = convertPage(partition, threadChannelId, REPLY_THREAD_SCOPE_KIND, rawMessages, parent)
-            ) {
-                is CanonicalMessageV2PageConversion.Converted -> converted.envelopes
-                is CanonicalMessageV2PageConversion.Refused -> return unavailable(converted.diagnostic)
-            }
         }
+        // Phase 2b: row by row — a bad reply is left out and the claim is split around it.
+        val rows = convertPageRows(partition, threadChannelId, REPLY_THREAD_SCOPE_KIND, rawMessages, parent)
+        rows.firstRefusal?.let { logger("canonical_v2_page_rows_left_out scope=$threadChannelId scopeKind=thread reason=$it") }
+        val envelopes = rows.envelopes
+        if (envelopes.isEmpty() && rawMessages.isNotEmpty()) return unavailable(rows.firstRefusal ?: "canonical_v2_snapshot_not_full_v6")
         return CanonicalMessageV2SnapshotLoadResult.Loaded(
             CanonicalMessageV2SnapshotFrame(
                 scope = scope,
@@ -318,6 +275,10 @@ internal class CanonicalMessageV2RestSnapshotFetcher(
                     rootMessageId = parent.rootMessageId,
                 ),
             ),
+            latestPageCoverage(
+                partition, threadChannelId, envelopes.map { it.fact.seq } + rows.rejectedSeqs, pageLimit, messageWindow, historyLimited,
+            )?.takeIf { rows.claimable },
+            excludedSeqs = rows.rejectedSeqs,
         )
     }
 
@@ -359,6 +320,31 @@ internal class CanonicalMessageV2RestSnapshotFetcher(
         /** Task v2: the task's channel, required for, and only for, a `task` page. */
         taskParentChannelId: SyncScopeId? = null,
     ): CanonicalMessageV2PageConversion {
+        val rows = convertPageRows(partition, scopeId, channelType, rawMessages, replyParent, taskParentChannelId)
+        rows.firstRefusal?.let { return CanonicalMessageV2PageConversion.Refused(it) }
+        return CanonicalMessageV2PageConversion.Converted(rows.envelopes)
+    }
+
+    /**
+     * Message storage Phase 2b: [convertPage] row by row. A row that is not full v6, fails to decode, or is a thread
+     * parent whose reply count is unknown is left out instead of refusing the page: the writer stores the other rows
+     * and splits the page's claim around the left-out seqs ([CanonicalMessageV2PageRows.rejectedSeqs]). A left-out
+     * row without a readable seq ([CanonicalMessageV2PageRows.rejectedWithoutSeq]) cannot be split around, so the
+     * page then claims no range at all.
+     *
+     * [replyCountByParentId]: the counts the visible page already carried (its embedded summaries); `null` = fetch
+     * them from `channels/{id}/threads` (only when the page has thread parents). A failed fetch leaves only the
+     * thread-parent rows out.
+     */
+    suspend fun convertPageRows(
+        partition: DurablePartitionKey,
+        scopeId: SyncScopeId,
+        channelType: String,
+        rawMessages: JsonArray,
+        replyParent: CanonicalMessageV2ReplyParentScope? = null,
+        taskParentChannelId: SyncScopeId? = null,
+        replyCountByParentId: Map<String, Int>? = null,
+    ): CanonicalMessageV2PageRows {
         require((channelType == REPLY_THREAD_SCOPE_KIND) == (replyParent != null)) {
             "a reply parent is required for, and only for, a thread page"
         }
@@ -366,17 +352,13 @@ internal class CanonicalMessageV2RestSnapshotFetcher(
             "a task parent channel is required for, and only for, a task page"
         }
         // The messages page never carries replyCount/threadSummary (server emits those only via
-        // `channels/{id}/threads` and the internal agent API). Messages without `threadId` have
-        // exactly zero replies; thread parents get the real count from the summaries endpoint, and
-        // if that call fails while parents are present the page is refused rather than persisted
-        // with silently zeroed counts.
-        val replyCountByParentId = if (replyParent != null) {
-            val nested = rawMessages.any { (it as? JsonObject)?.threadChannelIdOrNull() != null }
-            if (nested) return CanonicalMessageV2PageConversion.Refused("canonical_v2_thread_nested_reply")
-            emptyMap()
-        } else {
-            fetchThreadReplyCounts(partition, scopeId, rawMessages)
-                ?: return CanonicalMessageV2PageConversion.Refused("canonical_v2_thread_summaries_unavailable")
+        // `channels/{id}/threads`, embedded in the page as `threadSummariesByParentMessageId`, and the internal agent
+        // API). Messages without `threadId` have exactly zero replies; thread parents get the real count from the
+        // summaries, and a parent whose count is unknown is left out rather than persisted with a zeroed count.
+        val counts: Map<String, Int>? = when {
+            replyParent != null -> emptyMap()
+            replyCountByParentId != null -> replyCountByParentId
+            else -> fetchThreadReplyCounts(partition, scopeId, rawMessages)
         }
         val context = CanonicalConversationContextWire(
             channelType = channelType,
@@ -384,34 +366,49 @@ internal class CanonicalMessageV2RestSnapshotFetcher(
             parentChannelType = replyParent?.parentScopeKind,
             parentMessageId = replyParent?.rootMessageId,
         )
-        val envelopes = rawMessages.mapNotNull { element ->
-            val raw = element as? JsonObject ?: return@mapNotNull null
-            if (!raw.hasFullV2SnapshotNodeKeys()) return@mapNotNull null
+        val envelopes = mutableListOf<CanonicalMessageEnvelopeV2>()
+        val rejectedSeqs = mutableSetOf<Long>()
+        var rejectedWithoutSeq = 0
+        var firstRefusal: String? = null
+        fun reject(raw: JsonObject?, diagnostic: String) {
+            if (firstRefusal == null) firstRefusal = diagnostic
+            val seq = (raw?.get("seq") as? JsonPrimitive)?.takeIf { !it.isString }?.content?.toLongOrNull()
+            if (seq != null && seq >= 0L) rejectedSeqs += seq else rejectedWithoutSeq += 1
+        }
+        rawMessages.forEach { element ->
+            val raw = element as? JsonObject ?: return@forEach reject(null, "canonical_v2_snapshot_not_full_v6")
+            if (replyParent != null && raw.threadChannelIdOrNull() != null) {
+                // The V2 normalizer has no nested-thread shape.
+                return@forEach reject(raw, "canonical_v2_thread_nested_reply")
+            }
+            if (!raw.hasFullV2SnapshotNodeKeys()) return@forEach reject(raw, "canonical_v2_snapshot_not_full_v6")
             val carry = decodeCanonicalMessageWire(raw, ProductionFace.EnrichedUpdated) { violation ->
                 logger(
                     "canonical_v2_snapshot_decode_rejected scope=$scopeId " +
                         "fields=${violation.missingOrInvalidRequiredFields.sorted().joinToString(",")}",
                 )
-            } ?: return@mapNotNull null
-            val replyCount = raw.snapshotReplyCountOrNull(replyCountByParentId)
+            } ?: return@forEach reject(raw, "canonical_v2_snapshot_not_full_v6")
+            val replyCount = when {
+                raw.threadChannelIdOrNull() == null -> 0
+                counts == null -> return@forEach reject(raw, "canonical_v2_thread_summaries_unavailable")
+                else -> raw.snapshotReplyCountOrNull(counts)
+            }
             if (replyCount == null) {
                 logger(
                     "canonical_v2_snapshot_reply_count_missing scope=$scopeId " +
                         "message=${(raw["id"] as? JsonPrimitive)?.contentOrNull}",
                 )
-                return@mapNotNull null
+                return@forEach reject(raw, "canonical_v2_snapshot_not_full_v6")
             }
-            CanonicalMessageFoldInput.from(CanonicalMessageFoldKind.Updated, carry)
+            val envelope = CanonicalMessageFoldInput.from(CanonicalMessageFoldKind.Updated, carry)
                 .toCanonicalMessageV2Envelope(
                     partition = partition,
                     replyCount = replyCount,
                     producerContextOverride = context,
-                )
+                ) ?: return@forEach reject(raw, "canonical_v2_snapshot_not_full_v6")
+            envelopes += envelope
         }
-        if (envelopes.size != rawMessages.size) {
-            return CanonicalMessageV2PageConversion.Refused("canonical_v2_snapshot_not_full_v6")
-        }
-        return CanonicalMessageV2PageConversion.Converted(envelopes)
+        return CanonicalMessageV2PageRows(envelopes, rejectedSeqs, rejectedWithoutSeq, firstRefusal)
     }
 
     /**
@@ -510,7 +507,7 @@ internal class CanonicalMessageV2RestSnapshotFetcher(
 internal class CanonicalMessageV2EnteredScopeLoader(
     private val canary: CanonicalMessageV2ProductionCanary,
     private val generationEngine: CanonicalMessageV2GenerationEngine,
-    private val fetcher: CanonicalMessageV2RestSnapshotFetcher,
+    internal val fetcher: CanonicalMessageV2RestSnapshotFetcher,
     private val isEnabledForServer: (serverId: String) -> Boolean,
     private val logger: (String) -> Unit = {},
     /**
@@ -522,125 +519,244 @@ internal class CanonicalMessageV2EnteredScopeLoader(
     private val maxFactsPerScope: Int = CanonicalMessageV2RetentionPolicy().maxFactsPerScope,
 ) : ThreadEnteredScopeSnapshotLoader {
     private val inFlightMutex = Mutex()
-    private val inFlight = mutableSetOf<Pair<DurablePartitionKey, SyncScopeId>>()
     /** Task #14b: prewarm writes in flight, guarded by [inFlightMutex]; never blocks an enter. */
     private val prewarmInFlight = mutableSetOf<Pair<DurablePartitionKey, SyncScopeId>>()
 
-    override suspend fun loadOnEnter(
+    override suspend fun beginEnter(
         partition: DurablePartitionKey,
         channelId: SyncScopeId,
-        stillCurrent: () -> Boolean,
-    ) = loadAndCommit(partition, channelId, replyParentScopeId = null, stillCurrent) {
-        fetcher.fetch(partition, channelId, expectedScopeKind = null)
+        replyParent: ThreadDurableReplyParent?,
+        registerBaseline: Boolean,
+        stamp: ThreadDurableRequestStamp?,
+    ): ThreadDurableEnterTicket? {
+        if (partition.consumerId != SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID) return null
+        if (channelId.isBlank() || channelId != channelId.trim()) return null
+        if (replyParent != null && replyParent.parentChannelId == channelId) return null
+        if (!isEnabledForServer(partition.serverId)) return null
+        // Read BEFORE the baseline is registered: a cancellation or failure here leaves no open baseline behind.
+        // Read before the fetch: a fact written after this point (also a realtime loose one) is newer and stays.
+        val taken = stamp?.takeIf { it.partition == partition } ?: requestStamp(partition)
+        // Registered before the fetch (hole A), for a reply thread too (task #14a). Task #14c: the thread's own
+        // membership and its parent's are separate (a thread join ack may lift the former, never the latter).
+        val baseline = if (registerBaseline) {
+            canary.beginEnterBaseline(
+                partition,
+                channelId,
+                nonMember = isKnownNonMember(partition.serverId, channelId),
+                replyParentScopeId = replyParent?.parentChannelId,
+                parentNonMember = replyParent != null && isKnownNonMember(partition.serverId, replyParent.parentChannelId),
+            )
+        } else {
+            null
+        }
+        return ThreadDurableEnterTicket(
+            partition = partition,
+            channelId = channelId,
+            replyParent = replyParent,
+            expectedPartitionGeneration = taken.expectedPartitionGeneration,
+            revAtRequest = taken.revAtRequest,
+            baseline = baseline,
+            expectedHeadEpoch = taken.expectedHeadEpoch,
+        )
+    }
+
+    override suspend fun requestStamp(partition: DurablePartitionKey): ThreadDurableRequestStamp =
+        ThreadDurableRequestStamp(
+            partition = partition,
+            expectedPartitionGeneration = generationEngine.partitionGeneration(partition),
+            revAtRequest = generationEngine.storedLocalRev(partition),
+            // Phase 3b: a horizonReset after this read voids the page's head claim (never its facts).
+            expectedHeadEpoch = generationEngine.partitionHeadEpoch(partition),
+        )
+
+    override suspend fun abandonEnter(ticket: ThreadDurableEnterTicket) {
+        ticket.baseline?.let { canary.abandonEnterBaseline(it) }
     }
 
     /**
-     * Task #168 step 3: the same gates, in the same order, for a reply thread. Only the fetch differs
-     * ([CanonicalMessageV2RestSnapshotFetcher.fetchReplyThread] confirms the parent with the server),
-     * plus one check before the write: every envelope belongs to this thread scope, so a foreign
-     * reply is logged and refused instead of poisoning the scope inside the store.
+     * Phase 2b: the thread store's own page, written through. Gates, each answering "write nothing" (and
+     * abandoning the baseline):
+     * 1. flag; the page is the ticket's channel;
+     * 2. the scope: a reply thread's parent is the stored, server-confirmed header's when it names the route's
+     *    parent, else confirmed with the server ([CanonicalMessageV2RestSnapshotFetcher.confirmReplyParent]); a
+     *    top-level kind comes from the page itself (its rows' `conversationContext`), else the channel detail the
+     *    same load fetched, else the stored header, else `channels/{id}` — the only request this writer may make
+     *    besides the reply counts of an old server's page and a reply thread's first confirmation;
+     * 3. rows convert one by one; a left-out row splits the page's claim ([CanonicalMessageV2PageRows]);
+     * 4. under the scope writer: `stillCurrent()` and flag rechecked; a thread header naming another parent is
+     *    cleared; [CanonicalMessageV2GenerationEngine.applyCoverage] with the ticket's generation and revision. Only
+     *    a page whose (split) claim still reaches the head, and whose head claim no horizonReset voided since the
+     *    ticket ([CanonicalMessageV2GenerationEngine.applyCoverageReportingBaseline]), is the realtime baseline
+     *    ([CanonicalMessageV2ProductionCanary.onEnterCommitted]); any other commit is an external commit.
      */
-    override suspend fun loadReplyThreadOnEnter(
-        partition: DurablePartitionKey,
-        threadChannelId: SyncScopeId,
-        replyParent: ThreadDurableReplyParent,
+    override suspend fun persistEnteredPage(
+        ticket: ThreadDurableEnterTicket,
+        page: ThreadDurableEnteredPage,
         stillCurrent: () -> Boolean,
-    ) = loadAndCommit(partition, threadChannelId, replyParentScopeId = replyParent.parentChannelId, stillCurrent) {
-        if (replyParent.parentChannelId == threadChannelId) {
-            CanonicalMessageV2SnapshotLoadResult.Unavailable("canonical_v2_thread_parent_mismatch")
-        } else {
-            fetcher.fetchReplyThread(partition, threadChannelId, replyParent)
-        }
-    }
-
-    private suspend fun loadAndCommit(
-        partition: DurablePartitionKey,
-        scopeId: SyncScopeId,
-        /** The route's parent channel of a reply thread; `null` for a top-level channel. */
-        replyParentScopeId: SyncScopeId?,
-        stillCurrent: () -> Boolean,
-        fetch: suspend () -> CanonicalMessageV2SnapshotLoadResult,
     ) {
-        require(partition.consumerId == SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID)
-        val replyThread = replyParentScopeId != null
-        if (scopeId.isBlank() || scopeId != scopeId.trim()) return
-        if (!isEnabledForServer(partition.serverId)) return
+        val partition = ticket.partition
+        val scopeId = ticket.channelId
+        val replyParent = ticket.replyParent
+        val replyThread = replyParent != null
         fun log(outcome: String) = log(partition, scopeId, replyThread, outcome)
-        val key = partition to scopeId
-        val admitted = inFlightMutex.withLock { inFlight.add(key) }
-        if (!admitted) {
-            log("in_flight")
-            return
-        }
-        // Registered before the fetch (hole A), for a reply thread too (task #14a). Task #14c: the thread's own
-        // membership and its parent's are separate (a thread join ack may lift the former, never the latter).
-        fun nonMember() = isKnownNonMember(partition.serverId, scopeId)
-        fun parentNonMember() = replyParentScopeId != null && isKnownNonMember(partition.serverId, replyParentScopeId)
-        val baseline: CanonicalMessageV2EnterBaseline? =
-            canary.beginEnterBaseline(
+        try {
+            if (!isEnabledForServer(partition.serverId)) return log("flag_off")
+            if (page.channelId != scopeId) return log("page_mismatch")
+            val scope: SyncScopeKey
+            val threadParent: CanonicalMessageV2ReplyParentScope?
+            val taskParentChannelId: SyncScopeId?
+            if (replyParent != null) {
+                scope = SyncScopeKey(partition = partition, scopeId = scopeId, scopeKind = REPLY_THREAD_SCOPE_KIND)
+                // A windowless header was written by a realtime reply (the parent its frame claimed): unconfirmed.
+                val stored = generationEngine.storedCursor(scope)?.takeIf { it.oldestLoadedSeq != null || it.hasLoadedOldest }
+                threadParent = stored?.let { storedReplyParentOrNull(it, replyParent) }
+                    ?: when (val confirmed = fetcher.confirmReplyParent(partition, scopeId, replyParent)) {
+                        is CanonicalMessageV2ReplyParentConfirmation.Confirmed -> confirmed.parent
+                        is CanonicalMessageV2ReplyParentConfirmation.Refused -> return log(confirmed.diagnostic)
+                    }
+                taskParentChannelId = null
+            } else {
+                val kind = topLevelKindOf(partition, scopeId, page) ?: return log("canonical_v2_scope_not_top_level")
+                scope = SyncScopeKey(partition = partition, scopeId = scopeId, scopeKind = kind.first)
+                threadParent = null
+                taskParentChannelId = kind.second
+            }
+            if (page.rawMessages.isEmpty()) {
+                logger("canonical_v2_snapshot_empty_page scope=$scopeId${if (replyThread) " scopeKind=thread" else ""}")
+            }
+            val rows = fetcher.convertPageRows(
+                partition = partition,
+                scopeId = scopeId,
+                channelType = scope.scopeKind,
+                rawMessages = page.rawMessages,
+                replyParent = threadParent,
+                taskParentChannelId = taskParentChannelId,
+                replyCountByParentId = page.replyCountByParentId,
+            )
+            if (rows.envelopes.isEmpty() && page.rawMessages.isNotEmpty()) {
+                return log(rows.firstRefusal ?: "canonical_v2_snapshot_not_full_v6")
+            }
+            val foreign = rows.envelopes.any { envelope ->
+                val envelopeScopeId = when (val context = envelope.context) {
+                    is CanonicalConversationContextV2.TopLevel -> context.scope.scopeId.takeIf { !replyThread }
+                    is CanonicalConversationContextV2.Thread -> context.replyScope.scopeId.takeIf { replyThread }
+                }
+                envelopeScopeId != scopeId
+            }
+            if (foreign) return log("foreign_scope")
+            val coverage = latestPageCoverage(
                 partition,
                 scopeId,
-                nonMember = nonMember(),
-                replyParentScopeId = replyParentScopeId,
-                parentNonMember = parentNonMember(),
-            )
-        try {
-            val expectedGeneration = generationEngine.partitionGeneration(partition)
-            val frame = when (val fetched = fetch()) {
-                is CanonicalMessageV2SnapshotLoadResult.Loaded -> fetched.frame
-                is CanonicalMessageV2SnapshotLoadResult.Unavailable -> {
-                    log(fetched.diagnostic)
-                    return
-                }
+                rows.envelopes.map { it.fact.seq } + rows.rejectedSeqs,
+                page.requestedLimit,
+                page.messageWindow,
+                page.historyLimited,
+            )?.takeIf { rows.claimable }
+            val atHead = coverage?.excluding(rows.rejectedSeqs)?.lastOrNull()?.headAtVerify == true
+            val leftOut = rows.firstRefusal?.let { " left_out=${rows.rejectedSeqs.size + rows.rejectedWithoutSeq} reason=$it" }.orEmpty()
+            val cursorParent = threadParent?.let {
+                CanonicalMessageV2ThreadParent(it.parentScopeKind, it.parentScopeId, it.rootMessageId)
             }
-            if (replyThread) {
-                val foreign = frame.scope.scopeKind != "thread" || frame.envelopes.any { envelope ->
-                    (envelope.context as? CanonicalConversationContextV2.Thread)?.replyScope?.scopeId != scopeId
-                }
-                if (foreign) {
-                    log("foreign_scope")
-                    return
-                }
-            }
-            generationEngine.withScopeWriter(frame.scope) {
-                if (!stillCurrent()) {
-                    log("identity_changed")
-                    return@withScopeWriter
-                }
-                if (!isEnabledForServer(partition.serverId)) {
-                    log("flag_revoked")
-                    return@withScopeWriter
-                }
+            generationEngine.withScopeWriter(scope) {
+                if (!stillCurrent()) return@withScopeWriter log("identity_changed")
+                if (!isEnabledForServer(partition.serverId)) return@withScopeWriter log("flag_revoked")
                 try {
-                    val result = generationEngine.applySnapshot(frame, expectedGeneration)
-                    log(result.wireOutcome(frame.envelopes.size))
+                    clearHeaderOfAnotherParent(scope, cursorParent)?.let(::log)
+                    // Phase 2a (P1): the page is added, never a rebaseline — older stored pages stay.
+                    val commit = generationEngine.applyCoverageReportingBaseline(
+                        scope = scope,
+                        envelopes = rows.envelopes,
+                        coverage = coverage,
+                        revAtRequest = ticket.revAtRequest,
+                        userDriven = true,
+                        expectedPartitionGeneration = ticket.expectedPartitionGeneration,
+                        threadParent = cursorParent,
+                        // A page that proves no head range stores its facts; it is no realtime baseline — the stored
+                        // head would otherwise be continued past a hole.
+                        establishesBaseline = atHead,
+                        excludedSeqs = rows.rejectedSeqs,
+                        // Phase 3b: read with the ticket, before the request.
+                        expectedHeadEpoch = ticket.expectedHeadEpoch,
+                    )
+                    val result = commit.result
+                    // A horizonReset since the ticket voided the page's head claim: facts and range only, no baseline.
+                    val headVoided = atHead && result == CanonicalMessageV2CommitResult.Committed && !commit.baselineAdmitted
+                    log(
+                        result.wireOutcome(rows.envelopes.size) + leftOut +
+                            (if (!atHead) " coverage=${coverage?.let { "not_head" } ?: "none"}" else "") +
+                            (if (headVoided) " head_claim=stale_epoch" else ""),
+                    )
                     if (result == CanonicalMessageV2CommitResult.Committed) {
-                        val expectedKinds =
-                            if (replyThread) CANONICAL_MESSAGE_V2_REPLY_THREAD_SCOPE_KINDS else CANONICAL_MESSAGE_V2_TOP_LEVEL_SCOPE_KINDS
-                        if (baseline != null && frame.scope.scopeKind in expectedKinds) {
+                        val baseline = ticket.baseline
+                        if (baseline != null && commit.baselineAdmitted) {
+                            val committed = generationEngine.currentCursor(scope)
+                            val frame = CanonicalMessageV2SnapshotFrame(
+                                scope = scope,
+                                envelopes = rows.envelopes,
+                                cursor = committed ?: PersistedCursor(null, null, null),
+                            )
                             canary.onEnterCommitted(
                                 baseline,
                                 frame,
-                                nonMemberAtCommit = nonMember(),
-                                parentNonMemberAtCommit = parentNonMember(),
+                                nonMemberAtCommit = isKnownNonMember(partition.serverId, scopeId),
+                                parentNonMemberAtCommit = replyParent != null &&
+                                    isKnownNonMember(partition.serverId, replyParent.parentChannelId),
                             )
                         } else {
-                            canary.onExternalCommit(frame.scope)
+                            canary.onExternalCommit(scope)
                         }
                     }
                 } catch (poisoned: CanonicalMessageV2ScopePoisoned) {
-                    // A stale/cross-scope durable row must never escape the background enter job.
-                    // The page already has its network-backed content; leave the durable window
-                    // untouched and fail closed until a later clean baseline can be written.
+                    // A stale/cross-scope durable row must never escape the background write. The page already
+                    // has its network-backed content; leave the durable scope untouched.
                     log("poisoned fact=${poisoned.factId.orEmpty()}")
                 }
             }
         } finally {
             // No-op once committed; otherwise the frames buffered meanwhile were never written.
-            baseline?.let { canary.abandonEnterBaseline(it) }
-            // NonCancellable: a cancelled job must still release its marker, or the scope is refused forever.
-            withContext(NonCancellable) { inFlightMutex.withLock { inFlight.remove(key) } }
+            ticket.baseline?.let { canary.abandonEnterBaseline(it) }
         }
+    }
+
+    /**
+     * The top-level scope kind of [page] (and a task's parent channel): the page's own rows first (every row names
+     * its `conversationContext.channelType`), then the channel detail the same load fetched, then the stored header
+     * (exactly one top-level kind), then `channels/{id}`. `null` = not a top-level conversation.
+     */
+    private suspend fun topLevelKindOf(
+        partition: DurablePartitionKey,
+        scopeId: SyncScopeId,
+        page: ThreadDurableEnteredPage,
+    ): Pair<String, SyncScopeId?>? {
+        val contexts = page.rawMessages.mapNotNull { (it as? JsonObject)?.get("conversationContext") as? JsonObject }
+        val rowKinds = contexts.mapNotNull { it.stringOrNull("channelType") }.toSet()
+        val storedKinds = generationEngine.baselinedScopeKinds(partition, scopeId).filter { it in CANONICAL_MESSAGE_V2_TOP_LEVEL_SCOPE_KINDS }
+        val kind = rowKinds.singleOrNull()
+            ?: page.channelType?.takeIf { rowKinds.isEmpty() }
+            ?: storedKinds.singleOrNull()?.takeIf { rowKinds.isEmpty() }
+        if (kind != null && kind !in CANONICAL_MESSAGE_V2_TOP_LEVEL_SCOPE_KINDS) return null
+        if (kind != null && kind != CANONICAL_MESSAGE_V2_TASK_SCOPE_KIND) return kind to null
+        val rowTaskParent = contexts.mapNotNull { it.stringOrNull("parentChannelId") }.toSet().singleOrNull()
+        if (kind != null && (page.taskParentChannelId ?: rowTaskParent) != null) {
+            return kind to (page.taskParentChannelId ?: rowTaskParent)
+        }
+        // Unknown (an empty page of a scope never stored) or a task without its parent: ask the server.
+        return fetcher.topLevelKind(partition, scopeId)
+    }
+
+    /**
+     * Message storage Phase 3a/2a: a realtime reply may have created the thread's header naming the parent its
+     * frame claimed. The server-confirmed [parent] of an enter / prewarm wins: a header naming another parent
+     * channel or root is another thread's, so the scope is cleared before the page is written (the design's
+     * "a mismatch triggers a clear and rewrite"). Returns the log outcome when it cleared, else `null`. Must run
+     * inside the scope writer.
+     */
+    private suspend fun clearHeaderOfAnotherParent(scope: SyncScopeKey, parent: CanonicalMessageV2ThreadParent?): String? {
+        parent ?: return null
+        val stored = generationEngine.storedCursor(scope)?.threadParent() ?: return null
+        if (stored.parentScopeId == parent.parentScopeId && stored.rootMessageId == parent.rootMessageId) return null
+        generationEngine.clearScope(scope)
+        return "parent_rewritten old=${stored.parentScopeId}/${stored.rootMessageId}"
     }
 
     private fun log(partition: DurablePartitionKey, scopeId: SyncScopeId, replyThread: Boolean, outcome: String) {
@@ -674,10 +790,15 @@ internal class CanonicalMessageV2EnteredScopeLoader(
      *    is told [CanonicalMessageV2ProductionCanary.onExternalCommit] (no baseline: the thread window stays
      *    display only for realtime replies, `thread_delivery_unconfirmed` is untouched).
      */
+    override suspend fun currentLocalRev(partition: DurablePartitionKey): Long? =
+        if (partition.consumerId == SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID) generationEngine.storedLocalRev(partition) else null
+
     override fun replyThreadCommitGeneration(partition: DurablePartitionKey, threadChannelId: SyncScopeId): Long =
         generationEngine.scopeCommitGeneration(
             SyncScopeKey(partition = partition, scopeId = threadChannelId, scopeKind = REPLY_THREAD_SCOPE_KIND),
         )
+
+    override fun headEpoch(partition: DurablePartitionKey): Long = generationEngine.partitionHeadEpoch(partition)
 
     override suspend fun persistReplyThreadPrewarmPage(
         partition: DurablePartitionKey,
@@ -686,6 +807,10 @@ internal class CanonicalMessageV2EnteredScopeLoader(
         rawMessages: JsonArray,
         requestedLimit: Int,
         expectedCommitGeneration: Long,
+        messageWindow: ChannelMessageWindow?,
+        historyLimited: Boolean,
+        requestHeadEpoch: Long?,
+        revAtRequest: Long?,
         stillCurrent: () -> Boolean,
     ) {
         require(partition.consumerId == SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID)
@@ -703,7 +828,6 @@ internal class CanonicalMessageV2EnteredScopeLoader(
         val key = partition to threadChannelId
         val admission = inFlightMutex.withLock {
             when {
-                key in inFlight -> "enter_in_flight"
                 !prewarmInFlight.add(key) -> "in_flight"
                 else -> null
             }
@@ -712,7 +836,11 @@ internal class CanonicalMessageV2EnteredScopeLoader(
         try {
             val scope = SyncScopeKey(partition = partition, scopeId = threadChannelId, scopeKind = REPLY_THREAD_SCOPE_KIND)
             val expectedGeneration = generationEngine.partitionGeneration(partition)
-            val stored = generationEngine.storedCursor(scope)
+            // Phase 3b: a horizonReset after this read voids the page's head claim (never its facts).
+            val expectedHeadEpoch = requestHeadEpoch ?: generationEngine.partitionHeadEpoch(partition)
+            // Message storage Phase 3a: a header with no window was created by a realtime reply and names only the
+            // parent that frame claimed: not server-confirmed, so it is confirmed here like a missing one.
+            val stored = generationEngine.storedCursor(scope)?.takeIf { it.oldestLoadedSeq != null || it.hasLoadedOldest }
             val parent = if (stored != null) {
                 storedReplyParentOrNull(stored, replyParent) ?: return skip("parent_mismatch")
             } else {
@@ -721,12 +849,15 @@ internal class CanonicalMessageV2EnteredScopeLoader(
                     is CanonicalMessageV2ReplyParentConfirmation.Refused -> return skip(confirmed.diagnostic)
                 }
             }
-            val frame = when (
-                val built = fetcher.replyThreadFrame(partition, threadChannelId, parent, rawMessages, requestedLimit)
+            val loaded = when (
+                val built = fetcher.replyThreadFrame(
+                    partition, threadChannelId, parent, rawMessages, requestedLimit, messageWindow, historyLimited,
+                )
             ) {
-                is CanonicalMessageV2SnapshotLoadResult.Loaded -> built.frame
+                is CanonicalMessageV2SnapshotLoadResult.Loaded -> built
                 is CanonicalMessageV2SnapshotLoadResult.Unavailable -> return skip(built.diagnostic)
             }
+            val frame = loaded.frame
             val foreign = frame.envelopes.any { envelope ->
                 (envelope.context as? CanonicalConversationContextV2.Thread)?.replyScope?.scopeId != threadChannelId
             }
@@ -741,12 +872,8 @@ internal class CanonicalMessageV2EnteredScopeLoader(
                     return@withScopeWriter skip("superseded")
                 }
                 try {
-                    // `restore` re-reads the committed cursor + facts and (re)marks the scope baselined in this
-                    // process, which the extend's `applyIncremental` requires. It only republishes what is on disk.
-                    val restored = generationEngine.restore(scope)
-                    val current = restored.cursor
-                    // Extending keeps every stored fact (the window grows); replacing is only for a real gap.
-                    var joinedCursor: PersistedCursor? = null
+                    // Phase 3a: a windowless (realtime-only) header is no window: the page creates one.
+                    val current = generationEngine.storedCursor(scope)?.takeIf { it.oldestLoadedSeq != null || it.hasLoadedOldest }
                     if (current != null) {
                         if (storedReplyParentOrNull(current, replyParent) != parent) {
                             return@withScopeWriter skip("parent_mismatch")
@@ -756,28 +883,29 @@ internal class CanonicalMessageV2EnteredScopeLoader(
                         if (pageNewest == null || (storedNewest != null && pageNewest <= storedNewest)) {
                             return@withScopeWriter skip("stored_not_older")
                         }
-                        joinedCursor = latestPageJoinedCursorOrNull(
-                            restored,
-                            current,
-                            frame.envelopes,
-                            reachedEnd = frame.envelopes.size < requestedLimit,
-                            maxFactsPerScope = maxFactsPerScope,
-                        )
                     }
-                    val (reason, result) = when {
-                        current == null -> "window_created" to generationEngine.applySnapshot(frame, expectedGeneration)
-                        joinedCursor != null -> "window_extended" to generationEngine.applyIncremental(
-                            CanonicalMessageV2IncrementalFrame(scope = scope, envelopes = frame.envelopes, cursor = joinedCursor),
-                            expectedGeneration,
-                        )
-                        // Not joined: the gap was wider than the page (or the window is an empty baseline). Same as
-                        // the gap catch-up's `window_replaced`: the page becomes the window; the dropped history
-                        // comes back through older paging.
-                        else -> "window_replaced" to generationEngine.applySnapshot(frame, expectedGeneration)
+                    // Phase 2a (P1): the page's range is added to the stored ones; nothing stored is dropped.
+                    // Phase 2b: revAtRequest was read by the caller before its fetch. The commit-generation check above
+                    // does not see realtime loose writes (countsAsScopeCommit = false); their revision does.
+                    if (current == null) clearHeaderOfAnotherParent(scope, frame.cursor.threadParent())?.let { skipped ->
+                        log("parent_rewritten", skipped)
                     }
+                    val before = generationEngine.storedSegments(scope)
+                    val result = generationEngine.applyCoverage(
+                        scope = scope,
+                        envelopes = frame.envelopes,
+                        coverage = loaded.coverage,
+                        revAtRequest = revAtRequest ?: generationEngine.storedLocalRev(partition),
+                        userDriven = true,
+                        expectedPartitionGeneration = expectedGeneration,
+                        threadParent = frame.cursor.threadParent(),
+                        establishesBaseline = loaded.coverage?.excluding(loaded.excludedSeqs)?.lastOrNull()?.headAtVerify == true,
+                        excludedSeqs = loaded.excludedSeqs,
+                        expectedHeadEpoch = expectedHeadEpoch,
+                    )
                     when (result) {
                         CanonicalMessageV2CommitResult.Committed -> {
-                            log("committed", reason, frame.envelopes.size)
+                            log("committed", rangeOutcome(before, generationEngine.storedSegments(scope)), frame.envelopes.size)
                             canary.onExternalCommit(frame.scope)
                         }
                         else -> skip(result.wireOutcome(frame.envelopes.size))
@@ -858,8 +986,13 @@ internal class CanonicalMessageV2AdjacentPageWriter(
     /** Task #14c: the canary's late-ack catch-up requests (see [CanonicalMessageV2ProductionCanary.threadJoinConfirmations]). */
     override fun threadJoinConfirmations(): Flow<CanonicalMessageV2ThreadJoinConfirmed> = canary.threadJoinConfirmations
 
+    override suspend fun currentLocalRev(partition: DurablePartitionKey): Long? =
+        if (partition.consumerId == SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID) generationEngine.storedLocalRev(partition) else null
+
     override suspend fun abandonLatestPageBaseline(baseline: CanonicalMessageV2EnterBaseline) =
         canary.abandonEnterBaseline(baseline)
+
+    override fun headEpoch(partition: DurablePartitionKey): Long = generationEngine.partitionHeadEpoch(partition)
 
     override suspend fun extendWithAdjacentPage(
         partition: DurablePartitionKey,
@@ -869,6 +1002,7 @@ internal class CanonicalMessageV2AdjacentPageWriter(
         rawMessages: JsonArray,
         requestedLimit: Int,
         replyParent: ThreadDurableReplyParent?,
+        requestHeadEpoch: Long?,
         stillCurrent: () -> Boolean,
     ) {
         require(partition.consumerId == SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID)
@@ -909,6 +1043,10 @@ internal class CanonicalMessageV2AdjacentPageWriter(
         }
 
         val expectedGeneration = generationEngine.partitionGeneration(partition)
+
+        // Phase 3b: a horizonReset after this read voids the page's head claim (never its facts).
+
+        val expectedHeadEpoch = requestHeadEpoch ?: generationEngine.partitionHeadEpoch(partition)
         val envelopes = when (
             val converted = fetcher.convertPage(partition, channelId, scopeKind, rawMessages, storedParent)
         ) {
@@ -1000,6 +1138,7 @@ internal class CanonicalMessageV2AdjacentPageWriter(
                 val result = generationEngine.applyIncremental(
                     CanonicalMessageV2IncrementalFrame(scope = scope, envelopes = envelopes, cursor = cursor),
                     expectedGeneration,
+                    expectedHeadEpoch = expectedHeadEpoch,
                 )
                 log(result.wireOutcome(envelopes.size))
                 if (result == CanonicalMessageV2CommitResult.Committed) {
@@ -1042,8 +1181,15 @@ internal class CanonicalMessageV2AdjacentPageWriter(
         rawMessages: JsonArray,
         requestedLimit: Int,
         replyParent: ThreadDurableReplyParent?,
+        messageWindow: ChannelMessageWindow?,
+        historyLimited: Boolean,
+        requestHeadEpoch: Long?,
+        revAtRequest: Long?,
         stillCurrent: () -> Boolean,
-    ) = applyLatestPageAfterBaseline(partition, channelId, rawMessages, requestedLimit, replyParent, null, stillCurrent)
+    ) = applyLatestPageAfterBaseline(
+        partition, channelId, rawMessages, requestedLimit, replyParent, null, messageWindow, historyLimited, requestHeadEpoch,
+        revAtRequest, stillCurrent,
+    )
 
     /**
      * Task #168 step 3: with a [baseline] (registered before the fetch, only for a member channel whose
@@ -1061,10 +1207,17 @@ internal class CanonicalMessageV2AdjacentPageWriter(
         requestedLimit: Int,
         replyParent: ThreadDurableReplyParent?,
         baseline: CanonicalMessageV2EnterBaseline?,
+        messageWindow: ChannelMessageWindow?,
+        historyLimited: Boolean,
+        requestHeadEpoch: Long?,
+        revAtRequest: Long?,
         stillCurrent: () -> Boolean,
     ) {
         try {
-            applyLatestPageInternal(partition, channelId, rawMessages, requestedLimit, replyParent, baseline, stillCurrent)
+            applyLatestPageInternal(
+                partition, channelId, rawMessages, requestedLimit, replyParent, baseline, messageWindow, historyLimited, requestHeadEpoch,
+                revAtRequest, stillCurrent,
+            )
         } finally {
             baseline?.let { canary.abandonEnterBaseline(it) }
         }
@@ -1077,6 +1230,10 @@ internal class CanonicalMessageV2AdjacentPageWriter(
         requestedLimit: Int,
         replyParent: ThreadDurableReplyParent?,
         baseline: CanonicalMessageV2EnterBaseline?,
+        messageWindow: ChannelMessageWindow?,
+        historyLimited: Boolean,
+        requestHeadEpoch: Long?,
+        revAtRequest: Long?,
         stillCurrent: () -> Boolean,
     ) {
         require(partition.consumerId == SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID)
@@ -1114,12 +1271,12 @@ internal class CanonicalMessageV2AdjacentPageWriter(
         }
 
         val expectedGeneration = generationEngine.partitionGeneration(partition)
-        val envelopes = when (
-            val converted = fetcher.convertPage(partition, channelId, scopeKind, rawMessages, storedParent)
-        ) {
-            is CanonicalMessageV2PageConversion.Converted -> converted.envelopes
-            is CanonicalMessageV2PageConversion.Refused -> return log(converted.diagnostic)
-        }
+        // Phase 3b: a horizonReset after this read voids the page's head claim (never its facts).
+        val expectedHeadEpoch = requestHeadEpoch ?: generationEngine.partitionHeadEpoch(partition)
+        // Phase 2b: row by row — a bad row is left out and the page's claim is split around it.
+        val rows = fetcher.convertPageRows(partition, channelId, scopeKind, rawMessages, storedParent)
+        val envelopes = rows.envelopes
+        if (envelopes.isEmpty()) return log(rows.firstRefusal ?: "canonical_v2_snapshot_not_full_v6")
         val foreign = envelopes.any { envelope ->
             val envelopeScopeId = when (val context = envelope.context) {
                 is CanonicalConversationContextV2.TopLevel -> context.scope.scopeId.takeIf { replyParent == null }
@@ -1129,56 +1286,56 @@ internal class CanonicalMessageV2AdjacentPageWriter(
         }
         if (foreign) return log("foreign_scope")
         if (envelopes.map { it.fact.id }.distinct().size != envelopes.size) return log("duplicate_fact")
-        val pageSeqs = envelopes.map { it.fact.seq }
+        val pageSeqs = envelopes.map { it.fact.seq } + rows.rejectedSeqs
         val pageMin = pageSeqs.min()
         val pageMax = pageSeqs.max()
-        val reachedEnd = envelopes.size < requestedLimit
+        val leftOut = rows.firstRefusal?.let { " left_out=${rows.rejectedSeqs.size + rows.rejectedWithoutSeq} reason=$it" }.orEmpty()
 
         generationEngine.withScopeWriter(scope) {
             if (!stillCurrent()) return@withScopeWriter log("identity_changed")
             if (!isEnabledForServer(partition.serverId)) return@withScopeWriter log("flag_revoked")
             try {
-                val restored = generationEngine.restore(scope)
-                val stored = restored.cursor ?: return@withScopeWriter log("no_window")
+                val stored = generationEngine.storedCursor(scope) ?: return@withScopeWriter log("no_window")
                 if (replyParent != null && storedReplyParentOrNull(stored, replyParent) != storedParent) {
                     return@withScopeWriter log("parent_mismatch")
                 }
-                val storedOldest = stored.oldestLoadedSeq
-                val storedNewest = stored.newestLoadedSeq
-                val joinedCursor = latestPageJoinedCursorOrNull(restored, stored, envelopes, reachedEnd, maxFactsPerScope)
-                var committedFrame: CanonicalMessageV2SnapshotFrame? = null
-                val (outcome, result) = if (joinedCursor != null) {
-                    val cursor: PersistedCursor = joinedCursor
-                    val result = generationEngine.applyIncremental(
-                        CanonicalMessageV2IncrementalFrame(scope = scope, envelopes = envelopes, cursor = cursor),
-                        expectedGeneration,
-                    )
-                    // What the window holds now, for the baseline replay: the page under the union cursor.
-                    committedFrame = CanonicalMessageV2SnapshotFrame(scope = scope, envelopes = envelopes, cursor = cursor)
-                    "extended ${result.wireOutcome(envelopes.size)} newest=${cursor.newestLoadedSeq}" to result
+                // Phase 2a (P1): the latest page is ADDED with the range it proves. A page that does not reach the
+                // stored ranges becomes a new head; nothing stored is dropped (the gap shows up between them).
+                val before = generationEngine.storedSegments(scope)
+                val coverage = latestPageCoverage(partition, channelId, pageSeqs, requestedLimit, messageWindow, historyLimited)
+                    ?.takeIf { rows.claimable }
+                val baseline = coverage?.excluding(rows.rejectedSeqs)?.lastOrNull()?.headAtVerify == true
+                val commit = generationEngine.applyCoverageReportingBaseline(
+                    scope = scope,
+                    envelopes = envelopes,
+                    coverage = coverage,
+                    // Phase 2b: read by the caller before its fetch, so a fact written meanwhile (also a realtime loose
+                    // write, which bumps no commit generation) is newer and kept. `null` = an older caller: now.
+                    revAtRequest = revAtRequest ?: generationEngine.storedLocalRev(partition),
+                    userDriven = true,
+                    expectedPartitionGeneration = expectedGeneration,
+                    threadParent = stored.threadParent(),
+                    establishesBaseline = baseline,
+                    excludedSeqs = rows.rejectedSeqs,
+                    expectedHeadEpoch = expectedHeadEpoch,
+                )
+                val result = commit.result
+                // What the window holds now, for the baseline replay: the page under the committed cursor.
+                val committedFrame = generationEngine.currentCursor(scope)?.let { cursor ->
+                    CanonicalMessageV2SnapshotFrame(scope = scope, envelopes = envelopes, cursor = cursor)
+                }
+                val outcome = if (result == CanonicalMessageV2CommitResult.Committed) {
+                    "${rangeOutcome(before, generationEngine.storedSegments(scope))} new=$pageMin..$pageMax " +
+                        result.wireOutcome(envelopes.size) + leftOut
                 } else {
-                    val cursor = PersistedCursor(
-                        latestSeq = pageMax,
-                        oldestLoadedSeq = pageMin,
-                        newestLoadedSeq = pageMax,
-                        hasLoadedOldest = reachedEnd,
-                        hasLoadedNewest = true,
-                        epoch = null,
-                        parentScopeKind = stored.parentScopeKind.takeIf { replyParent != null },
-                        parentScopeId = stored.parentScopeId.takeIf { replyParent != null },
-                        rootMessageId = stored.rootMessageId.takeIf { replyParent != null },
-                    )
-                    val frame = CanonicalMessageV2SnapshotFrame(scope = scope, envelopes = envelopes, cursor = cursor)
-                    val result = generationEngine.applySnapshot(frame, expectedGeneration)
-                    committedFrame = frame
-                    "window_replaced old=${storedOldest ?: "none"}..${storedNewest ?: "none"} " +
-                        "oldFacts=${restored.envelopes.size} new=$pageMin..$pageMax " +
-                        result.wireOutcome(envelopes.size) to result
+                    result.wireOutcome(envelopes.size)
                 }
                 log(outcome)
                 if (result == CanonicalMessageV2CommitResult.Committed) {
                     val frame = committedFrame
-                    if (ownBaseline != null && frame != null) {
+                    // Only a page admitted as the baseline (its head claim not voided by a horizonReset since
+                    // [expectedHeadEpoch] was read) makes the window continuous.
+                    if (ownBaseline != null && frame != null && commit.baselineAdmitted) {
                         canary.onEnterCommitted(
                             ownBaseline,
                             frame,
@@ -1221,6 +1378,7 @@ internal class CanonicalMessageV2AdjacentPageWriter(
         hasOlder: Boolean,
         hasNewer: Boolean,
         replyParent: ThreadDurableReplyParent?,
+        requestHeadEpoch: Long?,
         stillCurrent: () -> Boolean,
     ) {
         require(partition.consumerId == SYNC_CORE_MESSAGES_V2_DURABLE_CONSUMER_ID)
@@ -1256,6 +1414,10 @@ internal class CanonicalMessageV2AdjacentPageWriter(
         }
 
         val expectedGeneration = generationEngine.partitionGeneration(partition)
+
+        // Phase 3b: a horizonReset after this read voids the page's head claim (never its facts).
+
+        val expectedHeadEpoch = requestHeadEpoch ?: generationEngine.partitionHeadEpoch(partition)
         val envelopes = when (
             val converted = fetcher.convertPage(partition, channelId, scopeKind, rawMessages, storedParent)
         ) {
@@ -1321,6 +1483,7 @@ internal class CanonicalMessageV2AdjacentPageWriter(
                 val result = generationEngine.applyIncremental(
                     CanonicalMessageV2IncrementalFrame(scope = scope, envelopes = added, cursor = cursor, insertOnly = true),
                     expectedGeneration,
+                    expectedHeadEpoch = expectedHeadEpoch,
                 )
                 val reason = when {
                     extendsOlder && extendsNewer -> "window_extended_both"
@@ -1341,49 +1504,44 @@ internal class CanonicalMessageV2AdjacentPageWriter(
 }
 
 /**
- * The gap catch-up's join FACT and union cursor (task #168 step 1), shared with the Activity prewarm
- * writer (task #14b): the latest page [envelopes] joins the stored window iff a fact stored INSIDE the
- * window (`oldestLoadedSeq..newestLoadedSeq`, on disk) is one of the page's ids — both blocks are
- * contiguous, so sharing one message means page ∪ window is contiguous. Returns the union cursor (newest
- * edge = the page's newest, `hasLoadedNewest`; oldest edge moves only when the page reaches below it; the
- * retention cap moves the oldest edge exactly like a newer adjacent page), or `null` when not joined (the
- * caller then replaces the window with the page). [envelopes] must be non-empty.
+ * Message storage Phase 2a: the range a LATEST page (`messages/channel/{id}?limit=[pageLimit]`, no cursor) of
+ * [scopeId] proves. With the server [messageWindow] it is the window's claim, checked against this scope
+ * ([ChannelMessageWindow.toCoverage]; a mismatched or unusable window proves nothing). A page without one (older
+ * server) keeps the legacy claim: `[min, max]` at the head, reaching the oldest when the page was short of the
+ * limit and no plan cutoff hid older rows; an empty such page is the empty baseline `[0, 0]`.
  */
-private fun latestPageJoinedCursorOrNull(
-    restored: RestoredCanonicalMessageV2Scope,
-    stored: PersistedCursor,
-    envelopes: List<CanonicalMessageEnvelopeV2>,
-    reachedEnd: Boolean,
-    maxFactsPerScope: Int,
-): PersistedCursor? {
-    val storedOldest = stored.oldestLoadedSeq ?: return null
-    val storedNewest = stored.newestLoadedSeq ?: return null
-    val pageIds = envelopes.mapTo(mutableSetOf()) { it.fact.id }
-    val joined = restored.envelopes.any { fact -> fact.fact.id in pageIds && fact.fact.seq in storedOldest..storedNewest }
-    if (!joined) return null
-    val pageSeqs = envelopes.map { it.fact.seq }
-    val pageMin = pageSeqs.min()
-    val pageMax = pageSeqs.max()
-    val storedIds = restored.envelopes.mapTo(mutableSetOf()) { it.fact.id }
-    val addedSeqs = envelopes.filter { it.fact.id !in storedIds }.map { it.fact.seq }
-    val union = stored.copy(
-        latestSeq = maxOf(stored.latestSeq ?: pageMax, pageMax),
-        oldestLoadedSeq = minOf(storedOldest, pageMin),
-        newestLoadedSeq = maxOf(storedNewest, pageMax),
-        hasLoadedOldest = if (pageMin < storedOldest) reachedEnd else stored.hasLoadedOldest,
-        hasLoadedNewest = true,
-    )
-    if (restored.envelopes.size + addedSeqs.size <= maxFactsPerScope) return union
-    val survivingOldest = (restored.envelopes.map { it.fact.seq } + addedSeqs)
-        .sortedDescending()
-        .take(maxFactsPerScope)
-        .min()
-    return if (survivingOldest > checkNotNull(union.oldestLoadedSeq)) {
-        union.copy(oldestLoadedSeq = survivingOldest, hasLoadedOldest = false)
-    } else {
-        union
+internal fun latestPageCoverage(
+    partition: DurablePartitionKey,
+    scopeId: SyncScopeId,
+    seqs: List<Long>,
+    pageLimit: Int,
+    messageWindow: ChannelMessageWindow?,
+    historyLimited: Boolean,
+): CanonicalMessageV2Coverage? {
+    if (messageWindow != null) {
+        return messageWindow.toCoverage(partition.serverId, scopeId, historyLimited, CanonicalMessageV2SegmentSource.Latest)
     }
+    val reachesOldest = seqs.size < pageLimit && !historyLimited
+    val min = seqs.minOrNull()
+        ?: return if (reachesOldest) CanonicalMessageV2Coverage(0L, 0L, true, true, CanonicalMessageV2SegmentSource.Latest) else null
+    return CanonicalMessageV2Coverage(min, seqs.max(), reachesOldest, headAtVerify = true, CanonicalMessageV2SegmentSource.Latest)
 }
+
+/**
+ * One log word for what a range write did to the stored segments: `window_created` (none before),
+ * `window_extended` (the old head is inside the new head), `island_kept` (the page did not reach the old head,
+ * which stays as an older island).
+ */
+private fun rangeOutcome(
+    before: List<build.raft.app.network.sync.CanonicalMessageV2Segment>,
+    after: List<build.raft.app.network.sync.CanonicalMessageV2Segment>,
+): String {
+    val oldHead = CanonicalMessageV2SegmentAlgebra.head(before) ?: return "window_created"
+    val newHead = CanonicalMessageV2SegmentAlgebra.head(after) ?: return "island_kept"
+    return if (oldHead.highSeq in newHead && oldHead.effectiveLowSeq >= newHead.effectiveLowSeq) "window_extended" else "island_kept"
+}
+
+private fun JsonObject.historyLimited(): Boolean = (this["historyLimited"] as? JsonPrimitive)?.booleanOrNull ?: false
 
 private fun CanonicalMessageV2CommitResult.wireOutcome(facts: Int): String =
     when (this) {

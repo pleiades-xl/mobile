@@ -46,6 +46,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.expand
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -106,8 +107,8 @@ object RaftMessageActionCardDefaults {
 enum class RaftMessageActionCardStatusTone(internal val color: Color) {
     /** `bg-inactive`: nothing to do (View only, Declined, Paused). */
     Neutral(RaftUiPalette.inactive),
-    /** Raft yellow in every theme, as [RaftStatusVariant.Primary]: a status light ignores the theme. */
-    Primary(RaftUiPalette.selected),
+    /** raft-ui 0.39 `bg-presence-busy`, as [RaftStatusVariant.Primary]: a status light ignores the theme. */
+    Primary(RaftUiPalette.presenceBusy),
     Information(RaftUiPalette.info),
 
     /** `bg-attention`, the pink pixel: the card waits on the reader (Confirm again). */
@@ -240,14 +241,19 @@ private fun RaftMessageActionCardHeader(
 private fun RaftMessageActionCardCollapseTrigger(open: Boolean, onExpandedChange: (Boolean) -> Unit, label: String?) {
     val colors = RaftTheme.colors
     val source = remember { MutableInteractionSource() }
-    val pressed = raftIsPressed(source)
+    // `hover:bg-fill-medium hover:text-foreground active:bg-fill-medium`.
+    val isPressed = raftIsPressed(source)
+    val isHovered = raftIsHovered(source)
+    val pressed = isPressed || isHovered
+    val overlay = rememberRaftStateOverlay(source, RaftHoverTier.Medium)
     val turn by animateFloatAsState(if (open) 180f else 0f, tween(RaftMessageActionCardDefaults.FoldMillis))
     Box(
         Modifier
             // `-mr-1`: the toggle's tile reaches 4dp into the header's padding.
             .offset(x = 4.dp)
             .size(RaftMessageActionCardDefaults.HeaderIconSize)
-            .background(if (pressed) colors.fillMedium else Color.Transparent, RoundedCornerShape(RaftRadius.Chip))
+            .raftStateOverlay(overlay, RaftRadius.Chip)
+            .raftPointerHover(source)
             .clickable(source, indication = null, role = Role.Button) { onExpandedChange(!open) }
             .semantics {
                 if (label != null) contentDescription = label
@@ -447,6 +453,20 @@ fun RaftMessageActionCardHint(
     modifier: Modifier = Modifier,
     label: String? = null,
 ) {
+    RaftMessageActionCardHint(AnnotatedString(text), modifier, label)
+}
+
+/**
+ * [RaftMessageActionCardHint] with rich [text] (an action card's note: names as mentions), cut
+ * at [maxLines] with an ellipsis.
+ */
+@Composable
+fun RaftMessageActionCardHint(
+    text: AnnotatedString,
+    modifier: Modifier = Modifier,
+    label: String? = null,
+    maxLines: Int = Int.MAX_VALUE,
+) {
     val colors = RaftTheme.colors
     val typography = RaftTheme.typography
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -465,6 +485,8 @@ fun RaftMessageActionCardHint(
                 .padding(start = 2.dp + 10.dp),
             style = typography.footnote,
             color = colors.foregroundMuted,
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }

@@ -32,7 +32,8 @@ class CanonicalMessageV2ReplyThreadDurableTest {
         val h = harness(flagOn = true)
         h.loader.loadReplyThreadOnEnter(partition, "thread-1", parent) { true }
 
-        assertEquals(listOf("channels/thread-1", "channels/channel-1", "messages/channel/thread-1"), h.network.paths)
+        // Phase 2b: the page is the thread store's own request; the writer then has the server confirm the parent.
+        assertEquals(listOf("messages/channel/thread-1", "channels/thread-1", "channels/channel-1"), h.network.paths)
         val frame = h.store.snapshots.single()
         assertEquals(threadScope, frame.scope)
         assertEquals(listOf("r20", "r30", "r40"), frame.envelopes.map { it.fact.id })
@@ -70,7 +71,7 @@ class CanonicalMessageV2ReplyThreadDurableTest {
         // Twin of the positive: identical page, but the server says the thread hangs off `root-2`.
         val h = harness(flagOn = true, threadParentMessageId = "root-2")
         h.loader.loadReplyThreadOnEnter(partition, "thread-1", parent) { true }
-        assertEquals(listOf("channels/thread-1"), h.network.paths)
+        assertEquals(listOf("messages/channel/thread-1", "channels/thread-1"), h.network.paths)
         assertEquals(0, h.store.snapshots.size)
         assertTrue(h.logs.any { "scopeKind=thread outcome=canonical_v2_thread_parent_mismatch" in it }, h.logs.toString())
     }
@@ -87,8 +88,9 @@ class CanonicalMessageV2ReplyThreadDurableTest {
             page = replyPage(replyNode(20), adjacentPageNode("r30", 30, channelId = "thread-1", threadId = "thread-9")),
         )
         nested.loader.loadReplyThreadOnEnter(partition, "thread-1", parent) { true }
-        assertEquals(0, nested.store.snapshots.size)
-        assertTrue(nested.logs.any { "outcome=canonical_v2_thread_nested_reply" in it }, nested.logs.toString())
+        // Phase 2b: the nested reply alone is left out (and the claim split around it); the other reply is stored.
+        assertEquals(listOf("r20"), nested.store.snapshots.single().envelopes.map { it.fact.id })
+        assertTrue(nested.logs.any { "reason=canonical_v2_thread_nested_reply" in it }, nested.logs.toString())
     }
 
     @Test
@@ -161,9 +163,9 @@ class CanonicalMessageV2ReplyThreadDurableTest {
         val h = harness(flagOn = true)
         h.seedChannelWindow()
         val channelPage = adjacentPageOf(adjacentPageNode("m5", 5), adjacentPageNode("m10", 10))
-        h.writer.extendWithAdjacentPage(partition, "channel-1", ThreadDurablePageDirection.Older, 20, channelPage, 3, parent) { true }
+        h.writer.extendWithAdjacentPage(partition, "channel-1", ThreadDurablePageDirection.Older, 20, channelPage, 3, parent, null) { true }
         assertTrue(h.logs.last().endsWith("scopeKind=thread direction=older outcome=no_window"), h.logs.toString())
-        h.writer.extendWithAdjacentPage(partition, "channel-1", ThreadDurablePageDirection.Older, 20, channelPage, 3, null) { true }
+        h.writer.extendWithAdjacentPage(partition, "channel-1", ThreadDurablePageDirection.Older, 20, channelPage, 3, null, null) { true }
         assertTrue(h.logs.last().endsWith("direction=older outcome=committed facts=2"), h.logs.toString())
     }
 
@@ -184,6 +186,7 @@ class CanonicalMessageV2ReplyThreadDurableTest {
                 page,
                 limit,
                 replyParent,
+                null,
             ) { true }
 
         suspend fun seedChannelWindow() {

@@ -3,6 +3,8 @@ package build.raft.app.data.realtime
 import build.raft.app.toRaftAvatarLabel
 import build.raft.app.MemberKindWireContract
 import build.raft.app.RaftThreadSurfaceKind
+import build.raft.app.data.TaskSourceMessageIdAbsent
+import build.raft.app.data.reportedSourceMessageId
 import build.raft.app.data.SettingsServerSidebarPinnedItem
 import build.raft.app.data.ServerPushMode
 import build.raft.app.data.PushPreviewMode
@@ -17,6 +19,7 @@ import build.raft.app.strictMessageTypeOrNull
 import build.raft.app.strictTaskStatusOrNull
 import build.raft.app.model.AgentProfile
 import build.raft.app.model.AgentCreated
+import build.raft.app.model.AgentActivitySubscribed
 import build.raft.app.model.AgentStatus
 import build.raft.app.model.AgentToolStuck
 import build.raft.app.model.AgentWakeCrashLoop
@@ -93,6 +96,8 @@ import build.raft.app.data.toScopeReadUpdated
 import build.raft.app.data.toMessageMetadata
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.Serializable
+import build.raft.app.network.sync.decodeCanonicalMessageWire
+import build.raft.app.network.sync.ProductionFace
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -203,6 +208,34 @@ class RealtimeEventMapper(
             }
             .getOrNull()
 
+    /**
+     * Message storage Phase 3b: decode each resume row once, fail-open (a refused row is just absent). The server's
+     * resume rows never carry `randomId` (its sync select has no such column), so an absent key is decoded as an
+     * explicit null here; whoever stores the fact must treat that randomId as unknown.
+     */
+    private fun SyncResumeResponse.withResumeCanonical(element: JsonObject): SyncResumeResponse {
+        val rows = element["messages"] as? kotlinx.serialization.json.JsonArray ?: return this
+        val carries = ArrayList<build.raft.app.canonical.message.CanonicalMessageCarry>(rows.size)
+        val misses = ArrayList<String?>()
+        rows.forEach { raw ->
+            val row = raw as? JsonObject
+            val carry = runCatching {
+                row ?: return@runCatching null
+                val withRandomId = if (row.containsKey("randomId")) row else JsonObject(row + ("randomId" to JsonNull))
+                decodeCanonicalMessageWire(withRandomId, ProductionFace.EnrichedUpdated)
+            }.getOrNull()
+            if (carry != null) {
+                carries += carry
+            } else {
+                misses += (row?.get("channelId") as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it.isNotBlank() }
+            }
+        }
+        if (misses.isNotEmpty()) {
+            runCatching { diagnosticsLogger("sync_resume_canonical_decode rows=${rows.size} decoded=${carries.size}") }
+        }
+        return copy(decodedCanonical = carries, canonicalDecodeMisses = misses)
+    }
+
     private fun mapElement(eventName: String, element: JsonObject): RealtimeEvent? = try {
         when (eventName) {
             RealtimeSocketEvents.MessageNew ->
@@ -247,12 +280,20 @@ class RealtimeEventMapper(
                 decodeOrNull(AgentSeenDto.serializer(), element)?.toDomain()
             RealtimeSocketEvents.AgentActivity ->
                 decodeOrNull(AgentActivityDto.serializer(), element)?.toDomain()
+            RealtimeSocketEvents.AgentActivityState ->
+                decodeOrNull(AgentActivityStateDto.serializer(), element)?.toDomain()
+            RealtimeSocketEvents.AgentActivitySubscribed ->
+                decodeOrNull(AgentActivitySubscribedDto.serializer(), element)?.let { dto ->
+                    AgentActivitySubscribed(dto.agentIds.map(String::trim).filter(String::isNotEmpty).distinct())
+                }
             // Agent typing line (slock packages/shared/src/agentTyping.ts AgentTypingEvent).
             RealtimeSocketEvents.AgentTyping ->
                 decodeOrNull(AgentTypingWire.serializer(), element)?.toAgentTypingUpdated()
             RealtimeSocketEvents.AgentSession ->
                 decodeSubjectRefresh(element, RealtimeRefreshScope.Agents, eventName)
             RealtimeSocketEvents.AgentCreated ->
+                decodeSubjectRefresh(element, RealtimeRefreshScope.Agents, eventName)
+            RealtimeSocketEvents.AgentUpdated ->
                 decodeSubjectRefresh(element, RealtimeRefreshScope.Agents, eventName)
             RealtimeSocketEvents.AgentDeleted ->
                 decodeSubjectRefresh(element, RealtimeRefreshScope.Agents, eventName)
@@ -308,6 +349,7 @@ class RealtimeEventMapper(
                 decodeSubjectRefresh(element, RealtimeRefreshScope.Reminders, eventName)
             RealtimeSocketEvents.SyncResumeResponse ->
                 decodeOrNull(SyncResumeResponseDto.serializer(), element)?.toDomainOrRecovery(diagnosticsLogger)
+                    ?.let { mapped -> if (mapped is SyncResumeResponse) mapped.withResumeCanonical(element) else mapped }
             RealtimeSocketEvents.Heartbeat ->
                 decodeOrNull(HeartbeatDto.serializer(), element)?.let { Heartbeat(it.seq) }
             RealtimeSocketEvents.ReadStateUpdated ->
@@ -620,6 +662,9 @@ private data class TaskInfoWireDto(
     val description: String? = null,
     val readOnlyReason: String? = null,
     val hostMessageId: String? = null,
+    // slock `projectTaskCreated` / the `task:updated` task DTO: the message the task hangs under
+    // (default: the field is missing; an explicit null decodes as null).
+    val sourceMessageId: String? = TaskSourceMessageIdAbsent,
     val conversationChannelId: String? = null,
     val conversationAnchored: Boolean? = null,
     val conversationReplyCount: Int? = null,
@@ -649,6 +694,20 @@ private data class TaskDeletedDto(
 private data class AgentSeenDto(
     val agentId: String,
     val lastSeenAt: String,
+)
+
+/** Shared `AgentActivityStatePayload` (botiverse/slock 968d102d `agentActivitySubscriptions.ts`). */
+@Serializable
+private data class AgentActivityStateDto(
+    val agentId: String,
+    val state: String,
+    val activity: String? = null,
+    val serverSeq: Long,
+)
+
+@Serializable
+private data class AgentActivitySubscribedDto(
+    val agentIds: List<String> = emptyList(),
 )
 
 @Serializable
@@ -800,6 +859,9 @@ private data class ReadStateUpdatedDto(
     val maxReadSeq: Long? = null,
     val readStateVersion: Long,
     val unreadCount: JsonElement? = null,
+    // botiverse/slock #11795: `markedUnread: true` only when the scope is marked unread (absent = not).
+    // Raw like unreadCount: a malformed mark is dropped, never the watermark it rides on.
+    val markedUnread: JsonElement? = null,
 )
 
 @Serializable
@@ -808,6 +870,9 @@ private data class ReadStateScopeWireDto(
     val maxReadSeq: Long? = null,
     val readStateVersion: Long,
     val unreadCount: JsonElement? = null,
+    // botiverse/slock #11795: `markedUnread: true` only when the scope is marked unread (absent = not).
+    // Raw like unreadCount: a malformed mark is dropped, never the watermark it rides on.
+    val markedUnread: JsonElement? = null,
 )
 
 @Serializable
@@ -1148,10 +1213,13 @@ private fun TaskInfoWireDto.toDomain(
         readOnlyReason = resolvedReadOnlyReason,
         channelType = channelType?.trim()?.takeIf { it.isNotBlank() },
         hostMessageId = hostMessageId?.takeIf { it.isNotBlank() }?.let(::MessageId),
+        sourceMessageId = sourceMessageId.reportedSourceMessageId(),
+        sourceMessageReported = sourceMessageId != TaskSourceMessageIdAbsent,
         conversationChannelId = conversationChannelId?.takeIf { it.isNotBlank() }?.let(::ChannelId),
         conversationAnchored = taskV2,
         conversationReplyCount = conversationReplyCount?.coerceAtLeast(0) ?: 0,
         isLegacy = isLegacy == true,
+        createdAt = createdAt?.trim()?.takeIf { it.isNotBlank() },
     )
 }
 
@@ -1201,6 +1269,31 @@ private fun AgentActivityDto.toDomain(): MemberPresenceUpdated? {
             timestamp = timestamp,
             serverSeq = serverSeq
         ),
+    )
+}
+
+/**
+ * The coarse state as a presence fact: the detailed activity it came from when that is a status the app
+ * knows (working / thinking keep their own dot), else the coarse state itself (busy = working).
+ */
+private fun AgentActivityStateDto.toDomain(): MemberPresenceUpdated? {
+    val id = agentId.trim().takeIf(String::isNotEmpty) ?: return null
+    val coarse =
+        when (state) {
+            "offline" -> AgentStatus.Offline
+            "online" -> AgentStatus.Online
+            "busy" -> AgentStatus.Working
+            "error" -> AgentStatus.Error
+            else -> return null
+        }
+    val status = AgentStatus.fromAgentActivityWireValue(activity)?.takeIf { it.presence == coarse.presence } ?: coarse
+    return MemberPresenceUpdated(
+        memberId = MemberId(id),
+        presence = status.presence,
+        kind = MemberKind.Agent,
+        agentStatus = status,
+        serverSeq = serverSeq,
+        coarseState = true,
     )
 }
 
@@ -1588,6 +1681,12 @@ private fun JsonElement?.readStateUnreadCountOrNull(): Int? {
     return value.content.toIntOrNull()?.takeIf { it >= 0 }
 }
 
+// botiverse/slock #11795 (web readStateSync `markedUnread === true`): only the JSON literal true marks.
+private fun JsonElement?.isReadStateMarkedUnread(): Boolean {
+    val value = this as? JsonPrimitive ?: return false
+    return !value.isString && value.content == "true"
+}
+
 private fun ReadStateUpdatedDto.toDomain(): PerReceiverReadStateChanged? {
     val cleanScopeId = scopeId.takeIf { it.isNotBlank() } ?: return null
     val cleanMaxReadSeq = maxReadSeq?.takeIf { it >= 0L } ?: return null
@@ -1599,7 +1698,8 @@ private fun ReadStateUpdatedDto.toDomain(): PerReceiverReadStateChanged? {
                 scopeId = ChannelId(cleanScopeId),
                 maxReadSeq = cleanMaxReadSeq,
                 readStateVersion = readStateVersion,
-                unreadCount = unreadCount.readStateUnreadCountOrNull()
+                unreadCount = unreadCount.readStateUnreadCountOrNull(),
+                markedUnread = markedUnread.isReadStateMarkedUnread()
             )
         )
     )
@@ -1614,7 +1714,8 @@ private fun ReadStateUpdatedBulkDto.toDomain(): PerReceiverReadStateChanged? {
             scopeId = ChannelId(cleanScopeId),
             maxReadSeq = cleanMaxReadSeq,
             readStateVersion = scope.readStateVersion,
-            unreadCount = scope.unreadCount.readStateUnreadCountOrNull()
+            unreadCount = scope.unreadCount.readStateUnreadCountOrNull(),
+            markedUnread = scope.markedUnread.isReadStateMarkedUnread()
         )
     }
     if (cleanScopes.isEmpty()) return null

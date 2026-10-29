@@ -7,6 +7,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -104,7 +105,7 @@ fun RaftTaskStatusPixel(status: RaftTaskStatus, modifier: Modifier = Modifier) {
  *
  * With [onClick] it is the status editor's trigger (web InlineBadgeEditor with `badgeStatus`):
  * a 12dp chevron in `foreground-muted` after the label, `fill-pressed` laid over it while
- * pressed, a focus ring, 44dp touch height; [enabled] = false keeps the look and drops the tap
+ * pressed or under a mouse / trackpad, a focus ring, 44dp touch height; [enabled] = false keeps the look and drops the tap
  * (a read-only status still reads as the status). [contentDescription] names the trigger for
  * screen readers ("Status: In Progress").
  */
@@ -123,21 +124,22 @@ fun RaftTaskStatusBadge(
     val shape = RoundedCornerShape(RaftRadius.Chip)
     val clickable = onClick != null && enabled
     val source = interactionSource ?: remember { MutableInteractionSource() }
-    val isPressed = raftIsPressed(source)
+    // task-card-status.recipe.ts: `enabled:hover:overlay-medium enabled:active:overlay-medium`.
+    val overlay = rememberRaftStateOverlay(source, RaftHoverTier.Medium, enabled = clickable)
     val isFocused = raftIsFocused(source)
-    val pressed = clickable && isPressed
     val focused = clickable && isFocused
     Row(
         modifier =
             modifier
                 .then(if (clickable) Modifier.raftTouchTarget(true, source, onClick!!) else Modifier)
                 .raftFocusRing(focused, RaftRadius.Chip, colors)
-                .height(size.height)
+                // At least the chip's height: large text grows it instead of clipping the label.
+                .heightIn(min = size.height)
                 .background(status.softColor(colors), shape)
-                .raftPressOverlay(pressed, colors.fillPressed, RaftRadius.Chip)
+                .raftStateOverlay(overlay, shape)
                 .then(
                     if (clickable) {
-                        Modifier.clickable(source, indication = null, role = Role.Button, onClick = onClick!!)
+                        Modifier.raftPointerHover(source).clickable(source, indication = null, role = Role.Button, onClick = onClick!!)
                     } else {
                         Modifier
                     }

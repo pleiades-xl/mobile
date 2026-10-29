@@ -7,12 +7,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import build.raft.app.base.Utils
 import build.raft.app.components.RaftBrutalBadge
 import build.raft.app.components.RaftBrutalTone
 import build.raft.app.data.SharedApiEnvironmentStore
 import build.raft.app.data.SharedSettingsApiEnvironmentOption
-import build.raft.app.data.RaftSharedStoreRegistry
+import build.raft.app.data.RaftAppScopeApiEnvironment
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.absoluteOffset
@@ -23,20 +22,30 @@ import androidx.compose.ui.AbsoluteAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
-import build.raft.app.compat.pager.LocalActivity
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import build.raft.app.compat.json.JSONObject
-import build.raft.app.compat.pager.Pager
 import kotlin.math.roundToInt
 
 internal const val RAFT_EMBEDDED_CHILD_PAGE_PARAM = "slockEmbeddedChildPage"
 
 private val RaftEnvironmentIndicatorMaxWidth = 144.dp
 private val RaftEnvironmentIndicatorEdgeMargin = 6.dp
+
+private var raftEnvironmentIndicatorHiddenForCapture = false
+
+/**
+ * Store-screenshot capture on a non-production server (e.g. a staging demo server): the host app
+ * hides the indicator for the whole process before the first page: iOS from the
+ * `RaftHideEnvironmentIndicator` launch argument / user default, Android from the same-named
+ * launch intent extra. Nothing persists it.
+ */
+fun setRaftEnvironmentIndicatorHiddenForCapture(hidden: Boolean) {
+    raftEnvironmentIndicatorHiddenForCapture = hidden
+}
 
 internal data class RaftEnvironmentIndicatorDragBounds(
     val hostWidthPx: Float,
@@ -58,17 +67,19 @@ internal fun RaftEnvironmentIndicatorHost(
     enabled: Boolean = true,
     content: @Composable () -> Unit,
 ) {
-    if (!enabled) {
+    if (!enabled || raftEnvironmentIndicatorHiddenForCapture) {
         content()
         return
     }
 
-    val pager = LocalActivity.current.getPager() as Pager
-    val bridge = remember(pager.pagerId) { Utils.bridgeModule(pager.pagerId) }
-    val environmentStore =
-        remember(bridge) {
-            RaftSharedStoreRegistry.get(bridge).apiEnvironmentStore
-        }
+    // Only the app-scope API environment setting: building the shared store provider here would
+    // open the database above the app shell's launch gate (a downgrade then crashes in SQLDelight
+    // instead of showing the "database is newer than the app" page).
+    val environmentStore = remember { raftEnvironmentIndicatorEnvironmentStoreOrNull() }
+    if (environmentStore == null) {
+        content()
+        return
+    }
     val environment by environmentStore.state.collectAsState()
     val label = raftEnvironmentIndicatorLabel(environment)
     if (label == null) {
@@ -153,6 +164,20 @@ internal fun RaftEnvironmentIndicatorHost(
         )
     }
 }
+
+/** The indicator's only input: the app-scope API environment, never the shared store provider. */
+internal fun raftEnvironmentIndicatorEnvironmentStoreOrNull(
+    environmentStore: () -> SharedApiEnvironmentStore = RaftAppScopeApiEnvironment::store,
+): SharedApiEnvironmentStore? =
+    try {
+        environmentStore().also { it.current() }
+    } catch (failure: Exception) {
+        raftLogWarn(
+            tag = "RaftEnvironmentIndicator",
+            message = "environment_indicator_unavailable type=${failure::class.simpleName}",
+        )
+        null
+    }
 
 internal fun raftEnvironmentIndicatorLabel(
     environment: SharedSettingsApiEnvironmentOption,

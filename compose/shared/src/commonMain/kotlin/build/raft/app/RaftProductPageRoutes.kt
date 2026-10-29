@@ -62,6 +62,9 @@ internal fun SettingsNativeDetailPage.productSettingsTab(): RaftSettingsTab? =
         SettingsNativeDetailPage.Mobile -> RaftSettingsTab.Mobile
         SettingsNativeDetailPage.Server -> RaftSettingsTab.Server
         SettingsNativeDetailPage.About -> RaftSettingsTab.About
+        // The shared contract has `theme` (SETTINGS_PAGE_TABS); RaftSettingsTab does not mirror it yet,
+        // so no page_viewed rather than a wrong tab.
+        SettingsNativeDetailPage.Theme,
         SettingsNativeDetailPage.Developer,
         SettingsNativeDetailPage.OpenSourceLicenses,
         SettingsNativeDetailPage.ApiEnvironment,
@@ -79,7 +82,8 @@ internal fun SettingsWebViewSurface.productPageView(): RaftProductPageView? =
         SettingsWebViewSurface.Feedback -> RaftProductPageView(RaftPageRoute.Settings, RaftSettingsTab.Feedback)
         SettingsWebViewSurface.Computers -> RaftProductPageView(RaftPageRoute.Computers)
         SettingsWebViewSurface.ReleaseNotes -> RaftProductPageView(RaftPageRoute.ReleaseNotes)
-        SettingsWebViewSurface.Onboarding -> null
+        SettingsWebViewSurface.Onboarding,
+        SettingsWebViewSurface.ArtifactViewer -> null
     }
 
 /**
@@ -125,7 +129,8 @@ internal fun authenticatedProductPageView(
         AuthenticatedProductRoute.ChannelSettings,
         AuthenticatedProductRoute.JointChannelConnections,
         AuthenticatedProductRoute.ThreadForwardBundle,
-        AuthenticatedProductRoute.FilePreview -> null
+        AuthenticatedProductRoute.FilePreview,
+        AuthenticatedProductRoute.ArtifactViewer -> null
     }
 
 private val productPageRouteJson = Json { ignoreUnknownKeys = true }
