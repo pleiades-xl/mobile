@@ -230,14 +230,36 @@ extension UIColor {
 final class RaftShakeWindow: UIWindow {
     override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
         guard motion == .motionShake else { return super.motionEnded(motion, with: event) }
-        RaftIosDiagnosticsRecord("info", "RaftShakeShare", "shake_share")
+        RaftIosDiagnosticsRecordCriticalSynchronously("RaftShakeShare", "shake_share")
         RaftLogShare.present()
+    }
+
+    /// Self-build diagnostics (iPhone Duo dead taps, 2026-10-29): every touch-down the system hands
+    /// this window, where it landed and the view chain it hit, written at once. A tap that never
+    /// shows up here never reached the app.
+    override func sendEvent(_ event: UIEvent) {
+        if event.type == .touches, let touches = event.allTouches {
+            for touch in touches where touch.phase == .began {
+                let point = touch.location(in: self)
+                var chain: [String] = []
+                var hit = touch.view
+                while let current = hit, chain.count < 5 {
+                    chain.append(String(describing: type(of: current)))
+                    hit = current.superview
+                }
+                RaftIosDiagnosticsRecordCriticalSynchronously(
+                    "RaftTouchProbe",
+                    "touch_down x=\(Int(point.x)) y=\(Int(point.y)) view=\(chain.joined(separator: "<"))"
+                )
+            }
+        }
+        super.sendEvent(event)
     }
 }
 
 /// iOS hands the shake gesture to the first responder only, which Raft's views never pass on (and
 /// with nothing focused there is none), so the accelerometer detects the shake itself: three
-/// readings over 2.2 g within 0.8 s.
+/// readings over 1.8 g within 0.8 s.
 final class RaftShakeDetector {
     static let shared = RaftShakeDetector()
     private let motion = CMMotionManager()
@@ -249,20 +271,26 @@ final class RaftShakeDetector {
         motion.accelerometerUpdateInterval = 1.0 / 30.0
         motion.startAccelerometerUpdates(to: .main) { [weak self] data, _ in
             guard let self, let a = data?.acceleration else { return }
-            guard (a.x * a.x + a.y * a.y + a.z * a.z).squareRoot() > 2.2 else { return }
+            guard (a.x * a.x + a.y * a.y + a.z * a.z).squareRoot() > 1.8 else { return }
             let now = Date().timeIntervalSince1970
             self.peaks = self.peaks.filter { now - $0 < 0.8 } + [now]
             guard self.peaks.count >= 3, now - self.lastShare > 3 else { return }
             self.peaks.removeAll()
             self.lastShare = now
-            RaftIosDiagnosticsRecord("info", "RaftShakeShare", "shake_share source=accelerometer")
+            RaftIosDiagnosticsRecordCriticalSynchronously("RaftShakeShare", "shake_share source=accelerometer")
             RaftLogShare.present()
         }
     }
 }
 
 enum RaftLogShare {
+    /// The diagnostics queue writes entries asynchronously: wait a moment so the latest ones (the
+    /// taps just before the share) are in the files.
     static func present() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { presentNow() }
+    }
+
+    private static func presentNow() {
         let files = FileManager.default
         guard let support = files.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
         let root = support.appendingPathComponent("raft_diagnostics_logs", isDirectory: true)
