@@ -637,8 +637,8 @@ private fun raftRailSidebarToggleItem(toggle: RaftRailSidebarToggle): RaftAppRai
 
 /**
  * The rail as the side column (self-build): stacked against the bottom, away from the camera at
- * the top. Top to bottom: the page's actions, the server, Settings, the destinations, Search, then
- * Back at the foot. Help, Computers, Apps and the bell are left out.
+ * the top. Top to bottom: the server, Settings, the destinations, Search, then Back at the foot.
+ * Help, Computers, Apps and the bell are left out; pages keep their own buttons in their headers.
  */
 @Composable
 private fun RaftSideDock(
@@ -673,7 +673,6 @@ private fun RaftSideDock(
                 verticalArrangement = Arrangement.spacedBy(RaftAppRailDefaults.ItemGap, Alignment.Bottom),
             ) {
                 CompositionLocalProvider(LocalRaftContentColor provides colors.foregroundOnFrame) {
-                    controls.actions.forEach { RaftSideDockAction(it) }
                     header()
                     bottomItems
                         .filter { RaftAppDestination.fromId(it.key)?.route != RaftNavRoute.Menu }
