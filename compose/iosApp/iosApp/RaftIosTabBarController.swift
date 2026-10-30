@@ -559,8 +559,25 @@ final class RaftGestureProbe: NSObject {
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.scan() }
     }
 
+    private var lastHits = ""
+
     private func scan() {
         guard let window = anchor?.window else { return }
+        // Which view the window hit-tests at points down the inner rail (x 30 pt): an interop
+        // UIKit view left over a Compose control makes Compose hand the touch over (cancel).
+        let hits = stride(from: 60, through: 330, by: 45).map { y -> String in
+            var names: [String] = []
+            var view = window.hitTest(CGPoint(x: 30, y: y), with: nil)
+            while let current = view, names.count < 6 {
+                names.append(String(describing: type(of: current)))
+                view = current.superview
+            }
+            return "y\(y)=\(names.joined(separator: "<"))"
+        }.joined(separator: " | ")
+        if hits != lastHits {
+            lastHits = hits
+            RaftIosDiagnosticsRecord("info", "RaftTouchProbe", "rail_hit_test window=\(Int(window.bounds.width))x\(Int(window.bounds.height)) \(hits)")
+        }
         var stack: [UIView] = [window]
         while let view = stack.popLast() {
             for recognizer in view.gestureRecognizers ?? [] where watched.insert(ObjectIdentifier(recognizer)).inserted {
