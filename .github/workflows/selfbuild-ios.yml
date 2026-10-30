@@ -1,0 +1,91 @@
+name: Self-build iOS (Xcode 27.1, unsigned)
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      configurations:
+        default: '["Release"]'
+      heap:
+        description: Gradle -Xmx, e.g. 12g (relies on swap on the 7 GB runner)
+        default: ""
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: ${{ fromJSON(inputs.configurations || '["Release"]') }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Xcode and SDK
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.1.app
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Gradle heap
+        env:
+          HEAP: ${{ inputs.heap || '12g' }}
+        run: |
+          mkdir -p ~/.gradle
+          echo "org.gradle.jvmargs=-Xmx$HEAP -Xss4m -Dfile.encoding=UTF-8 -Dkotlin.daemon.jvm.options\\=\"-Xmx$HEAP,-Xss4m\"" >> ~/.gradle/gradle.properties
+          cat ~/.gradle/gradle.properties
+
+      - name: Shared framework placeholder
+        working-directory: compose
+        run: ./gradlew :shared:generateDummyFramework --no-daemon --console=plain
+
+      - name: Pod install
+        working-directory: compose/iosApp
+        run: pod install
+
+      - name: Build for iPhone (${{ matrix.configuration }}, unsigned)
+        working-directory: compose/iosApp
+        run: |
+          xcodebuild \
+            -workspace iosApp.xcworkspace \
+            -scheme iosApp \
+            -configuration ${{ matrix.configuration }} \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            ENABLE_DEBUG_DYLIB=NO \
+            build > "$GITHUB_WORKSPACE/xcodebuild.log" 2>&1 || true
+          tail -30 "$GITHUB_WORKSPACE/xcodebuild.log"
+          grep -q "BUILD SUCCEEDED" "$GITHUB_WORKSPACE/xcodebuild.log"
+
+      - name: Errors
+        if: failure()
+        run: |
+          grep -nE "(^|[[:space:]])e: |: error:|FAILURE:|Execution failed|OutOfMemory" xcodebuild.log | grep -v "Using response file" | tail -80 || true
+
+      - name: Zip app
+        run: |
+          app=compose/iosApp/build/DerivedData/Build/Products/${{ matrix.configuration }}-iphoneos/iosApp.app
+          ditto -c -k --keepParent "$app" "Raft-${{ matrix.configuration }}.zip"
+          ls -lh "Raft-${{ matrix.configuration }}.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Raft-${{ matrix.configuration }}
+          path: Raft-${{ matrix.configuration }}.zip
+          compression-level: 0
+          retention-days: 1
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: xcodebuild-log-${{ matrix.configuration }}
+          path: xcodebuild.log
+          retention-days: 1
