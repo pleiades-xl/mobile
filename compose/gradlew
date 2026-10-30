@@ -116,6 +116,10 @@ esac
 
 
 
+# Self-build (Xcode Cloud): Xcode's build phases see no shell profile; ci_post_clone.sh leaves the
+# JDK it installed here.
+if [ -z "$JAVA_HOME" ] && [ -f "$HOME/.raft-java-home" ]; then JAVA_HOME=$(cat "$HOME/.raft-java-home"); fi
+
 # Determine the Java command to use to start the JVM.
 if [ -n "$JAVA_HOME" ] ; then
     if [ -x "$JAVA_HOME/jre/sh/java" ] ; then
