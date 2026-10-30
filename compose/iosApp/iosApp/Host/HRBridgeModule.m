@@ -2405,6 +2405,14 @@ static BOOL RaftThreadImageCompressionPathInside(NSString *rootPath, NSString *c
     return [candidatePath hasPrefix:prefix];
 }
 
+/// Self-build: realpath(3) for both sides of the containment check. `URLByResolvingSymlinksInPath`
+/// may leave `/var` on one path and `/private/var` on the other, which refused every picked image
+/// in the app's own Caches (anyRaft, iOS 27).
+static NSString *RaftThreadImageCompressionRealPath(NSString *path) {
+    char resolved[PATH_MAX];
+    return realpath(path.fileSystemRepresentation, resolved) ? [NSString stringWithUTF8String:resolved] : path;
+}
+
 static NSURL *RaftThreadImageCompressionSourceURL(NSString *fileRef, NSArray<NSURL *> *roots) {
     NSString *raw = RaftBridgeString(fileRef);
     if (raw.length == 0 ||
@@ -2418,25 +2426,30 @@ static NSURL *RaftThreadImageCompressionSourceURL(NSString *fileRef, NSArray<NSU
         NSURL *candidate = [NSURL URLWithString:raw];
         if (!candidate.isFileURL || candidate.host.length > 0 || candidate.query.length > 0 ||
             candidate.fragment.length > 0) {
+            RaftIosDiagnosticsRecord(@"warn", @"RaftImageCompress", @"source_unparsed");
             return nil;
         }
         url = candidate;
     }
-    if (!url || !url.isFileURL) return nil;
-    NSURL *resolved = [[[url URLByResolvingSymlinksInPath] standardizedURL] copy];
-    if (!resolved.path.length) return nil;
+    if (!url || !url.isFileURL || !url.path.length) return nil;
+    NSString *path = RaftThreadImageCompressionRealPath(url.path);
     NSDictionary<NSFileAttributeKey, id> *attributes =
-        [NSFileManager.defaultManager attributesOfItemAtPath:resolved.path error:nil];
+        [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
     if (![attributes[NSFileType] isEqualToString:NSFileTypeRegular] ||
         [attributes[NSFileSize] unsignedLongLongValue] == 0) {
+        RaftIosDiagnosticsRecord(@"warn", @"RaftImageCompress", [NSString stringWithFormat:
+            @"source_not_regular type=%@ size=%@", attributes[NSFileType], attributes[NSFileSize]]);
         return nil;
     }
     for (NSURL *rootURL in roots) {
-        NSString *rootPath = [[[rootURL URLByResolvingSymlinksInPath] standardizedURL] path];
-        if (rootPath.length > 0 && RaftThreadImageCompressionPathInside(rootPath, resolved.path)) {
-            return resolved;
+        NSString *rootPath = RaftThreadImageCompressionRealPath(rootURL.path);
+        if (rootPath.length > 0 && RaftThreadImageCompressionPathInside(rootPath, path)) {
+            return [NSURL fileURLWithPath:path];
         }
     }
+    RaftIosDiagnosticsRecord(@"warn", @"RaftImageCompress", [NSString stringWithFormat:
+        @"source_outside_roots path=%@ roots=%@", path,
+        [[roots valueForKey:@"path"] componentsJoinedByString:@","]]);
     return nil;
 }
 
