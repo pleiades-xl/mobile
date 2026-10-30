@@ -560,6 +560,7 @@ final class RaftGestureProbe: NSObject {
     }
 
     private var lastHits = ""
+    private var lastLayers = ""
 
     private func scan() {
         guard let window = anchor?.window else { return }
@@ -577,6 +578,31 @@ final class RaftGestureProbe: NSObject {
         if hits != lastHits {
             lastHits = hits
             RaftIosDiagnosticsRecord("info", "RaftTouchProbe", "rail_hit_test window=\(Int(window.bounds.width))x\(Int(window.bounds.height)) \(hits)")
+        }
+        // Compose's touch layers and what hangs under them (native text input views count as
+        // "interop" for a tap: a tap released over one is cancelled for Compose).
+        var layers: [String] = []
+        var stack: [UIView] = [window]
+        while let view = stack.popLast() {
+            if String(describing: type(of: view)).contains("OverlayInputView") {
+                for sub in view.subviews {
+                    var inner: [String] = []
+                    var queue: [(UIView, Int)] = [(sub, 0)]
+                    while !queue.isEmpty, inner.count < 6 {
+                        let (node, depth) = queue.removeFirst()
+                        let f = node.convert(node.bounds, to: window)
+                        inner.append("\(String(repeating: ".", count: depth))\(type(of: node)) \(Int(f.minX)),\(Int(f.minY)),\(Int(f.width))x\(Int(f.height)) ui=\(node.isUserInteractionEnabled) hidden=\(node.isHidden) fr=\(node.isFirstResponder)")
+                        if depth < 2 { queue.append(contentsOf: node.subviews.map { ($0, depth + 1) }) }
+                    }
+                    layers.append(inner.joined(separator: " / "))
+                }
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        let layerText = layers.joined(separator: " || ")
+        if layerText != lastLayers {
+            lastLayers = layerText
+            RaftIosDiagnosticsRecord("info", "RaftTouchProbe", "compose_input_subviews count=\(layers.count) \(layerText)")
         }
         var stack: [UIView] = [window]
         while let view = stack.popLast() {
