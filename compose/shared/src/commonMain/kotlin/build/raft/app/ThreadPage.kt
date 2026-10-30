@@ -6569,8 +6569,11 @@ private fun SharedThreadRouteContentContent(
         }
     }
     val initialRouteIdentity = retainedRouteIdentity
+    // Keyed by the data source too: a store kept from an older data source (server switch, layout
+    // switch) checks sends against that source's identity and rejects every one
+    // (owner_changed_before_admission, iPhone Duo 2026-10-28).
     val threadViewModel: SharedThreadViewModel =
-        viewModel(key = "shared-thread-${initialRouteIdentity.instanceKey}") {
+        viewModel(key = "shared-thread-${initialRouteIdentity.instanceKey}-${dataSource.hashCode()}") {
             SharedThreadViewModel(
                 dataSource = dataSource,
                 initialPayload = initialPayload,
