@@ -608,9 +608,74 @@ final class RaftGestureProbe: NSObject {
         while let view = stack.popLast() {
             for recognizer in view.gestureRecognizers ?? [] where watched.insert(ObjectIdentifier(recognizer)).inserted {
                 recognizer.addTarget(self, action: #selector(changed(_:)))
+                if String(describing: type(of: view)).contains("OverlayInputView"),
+                   String(describing: type(of: recognizer)).contains("kobjc") {
+                    hookComposeRecognizer(recognizer)
+                }
             }
             stack.append(contentsOf: view.subviews)
         }
+    }
+
+    /// Compose's own touch recognizer (CMP's private TouchesGestureRecognizer) cancels a tap when
+    /// UIKit cancels the touches, when the touch-down hit a view other than Compose's (interop or
+    /// native text input), or when another recognizer (the left-edge back swipe) is still tracking
+    /// the finger at release. Log each of those per touch so a dead tap names its cause.
+    private var hookedClasses = Set<ObjectIdentifier>()
+
+    private func hookComposeRecognizer(_ recognizer: UIGestureRecognizer) {
+        let cls: AnyClass = type(of: recognizer)
+        guard hookedClasses.insert(ObjectIdentifier(cls)).inserted else { return }
+        hook(cls, #selector(UIGestureRecognizer.touchesBegan(_:with:))) { gr, touches, event in
+            guard let view = gr.view, let touch = touches.first else { return "began" }
+            let point = touch.location(in: view)
+            let hit = view.hitTest(point, with: event)
+            return "began x=\(Int(point.x)) y=\(Int(point.y)) hit=\(hit.map { String(describing: type(of: $0)) } ?? "nil") own=\(hit === view)"
+        }
+        hook(cls, #selector(UIGestureRecognizer.touchesEnded(_:with:))) { gr, _, _ in
+            "ended trackers=[\(Self.trackers(besides: gr))]"
+        }
+        hook(cls, #selector(UIGestureRecognizer.touchesCancelled(_:with:))) { gr, _, _ in
+            "uikit_cancelled trackers=[\(Self.trackers(besides: gr))]"
+        }
+    }
+
+    /// Other recognizers in the window still holding touches (not failed, cancelled or ended).
+    private static func trackers(besides recognizer: UIGestureRecognizer) -> String {
+        guard let window = recognizer.view?.window else { return "" }
+        var found: [String] = []
+        var stack: [UIView] = [window]
+        while let view = stack.popLast() {
+            for other in view.gestureRecognizers ?? [] where other !== recognizer && other.numberOfTouches > 0 {
+                guard ![.failed, .cancelled, .ended].contains(other.state) else { continue }
+                found.append("\(type(of: other))@\(type(of: view)) state=\(other.state.rawValue) enabled=\(other.isEnabled)")
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return found.joined(separator: ", ")
+    }
+
+    /// Wraps a touches method the class defines itself (never an inherited UIKit one).
+    private func hook(
+        _ cls: AnyClass,
+        _ selector: Selector,
+        _ describe: @escaping (UIGestureRecognizer, Set<UITouch>, UIEvent) -> String
+    ) {
+        var count: UInt32 = 0
+        guard let methods = class_copyMethodList(cls, &count) else { return }
+        defer { free(methods) }
+        guard let method = (0..<Int(count)).map({ methods[$0] }).first(where: { method_getName($0) == selector }) else {
+            RaftIosDiagnosticsRecord("warn", "RaftTouchProbe", "cmp_hook_missing \(cls) \(selector)")
+            return
+        }
+        typealias Imp = @convention(c) (UIGestureRecognizer, Selector, NSSet, UIEvent) -> Void
+        let original = unsafeBitCast(method_getImplementation(method), to: Imp.self)
+        let block: @convention(block) (UIGestureRecognizer, NSSet, UIEvent) -> Void = { recognizer, touches, event in
+            let text = describe(recognizer, touches as? Set<UITouch> ?? [], event)
+            original(recognizer, selector, touches, event)
+            RaftIosDiagnosticsRecord("info", "RaftTouchProbe", "cmp_touches \(text) state=\(recognizer.state.rawValue)")
+        }
+        method_setImplementation(method, imp_implementationWithBlock(block))
     }
 
     @objc private func changed(_ recognizer: UIGestureRecognizer) {
