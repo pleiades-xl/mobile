@@ -35,6 +35,7 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import build.raft.designsystem.gesture.raftKeepsEdgeTouches
 import build.raft.designsystem.theme.LocalRaftContentColor
 import build.raft.designsystem.theme.RaftTheme
 import build.raft.designsystem.theme.RaftThemeDecorSlot
@@ -90,7 +91,7 @@ fun RaftAppRail(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val colors = RaftTheme.colors
-    Row(modifier.fillMaxHeight()) {
+    Row(modifier.fillMaxHeight().raftKeepsEdgeTouches()) {
         Column(
             Modifier
                 .fillMaxHeight()
