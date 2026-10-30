@@ -3,6 +3,7 @@ import SafariServices
 import shared
 import SwiftUI
 import UIKit
+import CoreMotion
 
 // task #471: scene plumbing for iPad multi-window.
 //
@@ -53,6 +54,7 @@ final class RaftIosSceneDelegate: UIResponder, UIWindowSceneDelegate {
             window.overrideUserInterfaceStyle = UIUserInterfaceStyle(
                 rawValue: Int(RaftAppAppearanceRuntime.shared.hostStyleCode)
             ) ?? .unspecified
+            RaftShakeDetector.shared.start()
             self.window = window
             RaftIosAppearanceHost.attach()
             window.makeKeyAndVisible()
@@ -219,5 +221,114 @@ extension UIColor {
             blue: CGFloat(value & 0xFF) / 255.0,
             alpha: CGFloat((value >> 24) & 0xFF) / 255.0
         )
+    }
+}
+
+/// Self-build (xuheng-li 2026-10-28): shake the phone, or long-press the server button, to share
+/// the app's diagnostics log files, the newest launches in full (the Settings export keeps only
+/// the last ~120 KB).
+///
+/// iOS hands the shake gesture to the first responder only, which Raft's views never pass on (and
+/// with nothing focused there is none), so the accelerometer detects the shake itself: three
+/// readings over 1.8 g within 0.8 s.
+final class RaftShakeDetector {
+    static let shared = RaftShakeDetector()
+    private let motion = CMMotionManager()
+    private var peaks: [TimeInterval] = []
+    private var lastShare: TimeInterval = 0
+
+    func start() {
+        guard motion.isAccelerometerAvailable, !motion.isAccelerometerActive else { return }
+        motion.accelerometerUpdateInterval = 1.0 / 30.0
+        motion.startAccelerometerUpdates(to: .main) { [weak self] data, _ in
+            guard let self, let a = data?.acceleration else { return }
+            guard (a.x * a.x + a.y * a.y + a.z * a.z).squareRoot() > 1.8 else { return }
+            let now = Date().timeIntervalSince1970
+            self.peaks = self.peaks.filter { now - $0 < 0.8 } + [now]
+            guard self.peaks.count >= 3, now - self.lastShare > 3 else { return }
+            self.peaks.removeAll()
+            self.lastShare = now
+            RaftIosDiagnosticsRecordCriticalSynchronously("RaftShakeShare", "shake_share source=accelerometer")
+            RaftLogShare.present()
+        }
+    }
+}
+
+enum RaftLogShare {
+    /// The diagnostics queue writes entries asynchronously: wait a moment so the latest ones (the
+    /// taps just before the share) are in the files.
+    static func present() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { presentNow() }
+    }
+
+    private static func presentNow() {
+        let files = FileManager.default
+        guard let support = files.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+        let root = support.appendingPathComponent("raft_diagnostics_logs", isDirectory: true)
+        let launches = ((try? files.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix("launch-") }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+            .prefix(2)
+        let out = files.temporaryDirectory.appendingPathComponent("raft-logs-\(Int(Date().timeIntervalSince1970))", isDirectory: true)
+        try? files.createDirectory(at: out, withIntermediateDirectories: true)
+        var copies: [URL] = []
+        for launch in launches {
+            for file in (try? files.contentsOfDirectory(at: launch, includingPropertiesForKeys: nil)) ?? [] {
+                let copy = out.appendingPathComponent("\(launch.lastPathComponent)-\(file.lastPathComponent)")
+                if (try? files.copyItem(at: file, to: copy)) != nil { copies.append(copy) }
+            }
+        }
+        let window = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow }
+            .first
+        var presenter = window?.rootViewController
+        while let next = presenter?.presentedViewController { presenter = next }
+        guard !copies.isEmpty, let presenter, !(presenter is UIActivityViewController) else { return }
+        let sheet = UIActivityViewController(activityItems: copies, applicationActivities: nil)
+        sheet.popoverPresentationController?.sourceView = presenter.view
+        sheet.popoverPresentationController?.sourceRect = CGRect(x: presenter.view.bounds.midX, y: presenter.view.bounds.midY, width: 1, height: 1)
+        presenter.present(sheet, animated: true)
+    }
+}
+
+/// Local simulator debugging only: act out a fold from the command line,
+/// `xcrun simctl spawn <udid> notifyutil -p dev.vgent.raft.fold` (window narrow <-> full)
+/// or `... dev.vgent.raft.rotate` (portrait <-> landscape).
+enum RaftDebugFold {
+    static var narrow = false
+    static var landscape = false
+
+    /// The window on screen; not necessarily the one this scene delegate made.
+    static var window: UIWindow? {
+        UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows).first { $0.isKeyWindow }
+    }
+
+    static func install() {
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        CFNotificationCenterAddObserver(center, nil, { _, _, _, _, _ in
+            DispatchQueue.main.async { RaftDebugFold.fold() }
+        }, "dev.vgent.raft.fold" as CFString, nil, .deliverImmediately)
+        CFNotificationCenterAddObserver(center, nil, { _, _, _, _, _ in
+            DispatchQueue.main.async { RaftDebugFold.rotate() }
+        }, "dev.vgent.raft.rotate" as CFString, nil, .deliverImmediately)
+    }
+
+    static func fold() {
+        guard let window, let screen = window.windowScene?.screen else { return }
+        narrow.toggle()
+        var frame = screen.bounds
+        if narrow { frame.size.width = 420 }
+        window.frame = frame
+        RaftIosDiagnosticsRecordCriticalSynchronously("RaftTouchProbe", "debug_fold narrow=\(narrow) frame=\(frame) window=\(type(of: window))")
+    }
+
+    static func rotate() {
+        guard #available(iOS 16.0, *), let scene = window?.windowScene else { return }
+        landscape.toggle()
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: landscape ? .landscapeLeft : .portrait)) { error in
+            RaftIosDiagnosticsRecordCriticalSynchronously("RaftTouchProbe", "debug_rotate error=\(error)")
+        }
+        RaftIosDiagnosticsRecordCriticalSynchronously("RaftTouchProbe", "debug_rotate landscape=\(landscape)")
     }
 }
