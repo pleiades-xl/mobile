@@ -1,0 +1,41 @@
+# Self-build: an interactive debug session on a Codemagic Mac (started through the API).
+# The machine starts a user-mode sshd on localhost and tunnels it back to claw-server, so the
+# session is reachable as `ssh -p 2299 builder@localhost` there. It holds for up to 2 hours.
+# Secure app variables (set through the API): TUNNEL_KEY (private key allowed only to open the
+# tunnel on claw-server), SESSION_PUB (public key allowed to log in to this machine).
+workflows:
+  hold:
+    name: Debug session (holds up to 2 h)
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      xcode: 27.1
+      cocoapods: default
+      java: 17
+    scripts:
+      - name: Tunnel back to claw-server
+        script: |
+          set -e
+          d="$HOME/session-ssh"; mkdir -p "$d"; cd "$d"
+          ssh-keygen -q -t ed25519 -N "" -f hostkey
+          printf '%s\n' "$SESSION_PUB" > authorized_keys
+          printf '%s\n' "$TUNNEL_KEY" > tunnel_key; chmod 600 tunnel_key authorized_keys
+          cat > sshd_config <<CFG
+          Port 2222
+          ListenAddress 127.0.0.1
+          HostKey $d/hostkey
+          AuthorizedKeysFile $d/authorized_keys
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PidFile $d/sshd.pid
+          StrictModes no
+          CFG
+          /usr/sbin/sshd -f sshd_config
+          nohup ssh -i tunnel_key -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 \
+            -o ExitOnForwardFailure=yes -N -R 127.0.0.1:2299:127.0.0.1:2222 xuheng@34.10.18.13 \
+            > tunnel.log 2>&1 &
+          sleep 5; cat tunnel.log || true
+      - name: Hold
+        script: |
+          echo "Session open; release by creating ~/session-ssh/done"
+          for i in $(seq 1 690); do [ -f "$HOME/session-ssh/done" ] && break; sleep 10; done
