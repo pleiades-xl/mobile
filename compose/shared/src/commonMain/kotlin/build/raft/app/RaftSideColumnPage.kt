@@ -245,7 +245,9 @@ internal fun raftSideColumnControls(
     enabled: Boolean = true,
 ): Boolean {
     val host = LocalRaftSideColumnHost.current
-    if (host == null || !enabled || !LocalRaftPageActive.current) return false
+    // Self-build: with the rail docked in the column, pages keep their own Back and actions in
+    // their headers (one gear, one Search); the column's Back is the wide history's.
+    if (host == null || host.dock != null || !enabled || !LocalRaftPageActive.current) return false
     val entry = remember(host) { RaftSideColumnHostState.Entry() }
     val controls = RaftSideColumnControls(primary = listOfNotNull(back), actions = actions)
     SideEffect { entry.controls = controls }
