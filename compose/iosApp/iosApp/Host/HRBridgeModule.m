@@ -4236,6 +4236,11 @@ static NSDictionary *RaftFeedbackDiagnosticsBindingPayload(NSDictionary *binding
         fileRef.length > 0 &&
         [fileRef rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location == NSNotFound;
     if (!validRequest) {
+        // Self-build diagnostics (anyRaft image send, 2026-10-30): which check refused it.
+        RaftIosDiagnosticsRecord(@"warn", @"RaftImageCompress", [NSString stringWithFormat:
+            @"invalid_request idLen=%lu nameSafe=%d mime=%@ refLen=%lu",
+            (unsigned long)requestId.length, RaftThreadImageCompressionSafeName(fileName), mimeType,
+            (unsigned long)fileRef.length]);
         [self raft_dispatchThreadImageCompressionFailure:callback];
         return;
     }
@@ -4302,6 +4307,13 @@ static NSDictionary *RaftFeedbackDiagnosticsBindingPayload(NSDictionary *binding
                     return;
                 }
                 NSURL *sourceURL = RaftThreadImageCompressionSourceURL(fileRef, roots);
+                if (!sourceURL || !RaftThreadImageCompressionInputIsImage(fileName, mimeType, sourceURL)) {
+                    // Self-build diagnostics: where the picked file lives, relative to the app home.
+                    NSString *where = [fileRef stringByReplacingOccurrencesOfString:NSHomeDirectory() withString:@"~"];
+                    RaftIosDiagnosticsRecord(@"warn", @"RaftImageCompress", [NSString stringWithFormat:
+                        @"source_rejected inRoots=%d mime=%@ ref=%@", sourceURL != nil, mimeType,
+                        [where stringByDeletingLastPathComponent]]);
+                }
                 if (!sourceURL || !RaftThreadImageCompressionInputIsImage(fileName, mimeType, sourceURL) ||
                     [operation isCancelled] || !weakSelf ||
                     ![weakSelf raft_isCurrentThreadImageCompressionOperation:operation]) {
