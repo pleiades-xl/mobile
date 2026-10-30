@@ -348,15 +348,32 @@ final class RaftVoiceInput: NSObject {
     private let bubble = UILabel()
     private var session: RaftVoiceSession?
     private var busy = false
+    /// The text field that had focus when recording started; the text goes there.
+    private weak var target: UIResponder?
+
+    private static let localeKey = "RaftVoiceInputLocale"
+    private static let centerKey = "RaftVoiceInputButtonCenter"
+
+    /// Chinese unless the user switched to English (long press).
+    private var localeIdentifier: String {
+        get { UserDefaults.standard.string(forKey: Self.localeKey) ?? "zh-CN" }
+        set { UserDefaults.standard.set(newValue, forKey: Self.localeKey) }
+    }
 
     func install(in window: UIWindow) {
-        guard button.superview !== window else { return }
+        if button.superview === window {
+            button.center = clamped(button.center, in: window)
+            return
+        }
         button.setImage(UIImage(systemName: "mic.fill"), for: .normal)
         button.tintColor = .white
         button.backgroundColor = .black
         button.layer.cornerRadius = 28
+        button.frame = CGRect(x: 0, y: 0, width: 56, height: 56)
         button.accessibilityLabel = "Voice input"
         button.addTarget(self, action: #selector(tapped), for: .touchUpInside)
+        button.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(dragged(_:))))
+        button.addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(switchLanguage(_:))))
         bubble.numberOfLines = 4
         bubble.font = .systemFont(ofSize: 15)
         bubble.textColor = .white
@@ -364,25 +381,39 @@ final class RaftVoiceInput: NSObject {
         bubble.layer.cornerRadius = 12
         bubble.clipsToBounds = true
         bubble.isHidden = true
-        for view in [button, bubble] as [UIView] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            window.addSubview(view)
+        window.addSubview(bubble)
+        window.addSubview(button)
+        // On the right edge, halfway up: clear of the composer and its send button. Draggable.
+        let saved = UserDefaults.standard.string(forKey: Self.centerKey).map(NSCoder.cgPoint(for:))
+        button.center = clamped(saved ?? CGPoint(x: window.bounds.maxX - 48, y: window.bounds.midY), in: window)
+    }
+
+    private func clamped(_ point: CGPoint, in window: UIWindow) -> CGPoint {
+        let inset = window.safeAreaInsets
+        return CGPoint(
+            x: min(max(point.x, inset.left + 32), window.bounds.maxX - inset.right - 32),
+            y: min(max(point.y, inset.top + 32), window.bounds.maxY - inset.bottom - 32)
+        )
+    }
+
+    @objc private func dragged(_ pan: UIPanGestureRecognizer) {
+        guard let window = button.window else { return }
+        let move = pan.translation(in: window)
+        pan.setTranslation(.zero, in: window)
+        button.center = clamped(CGPoint(x: button.center.x + move.x, y: button.center.y + move.y), in: window)
+        layoutBubble()
+        if pan.state == .ended {
+            UserDefaults.standard.set(NSCoder.string(for: button.center), forKey: Self.centerKey)
         }
-        let guide = window.safeAreaLayoutGuide
-        NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 56),
-            button.heightAnchor.constraint(equalToConstant: 56),
-            button.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -20),
-            button.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -88),
-            bubble.trailingAnchor.constraint(equalTo: button.trailingAnchor),
-            bubble.bottomAnchor.constraint(equalTo: button.topAnchor, constant: -10),
-            bubble.widthAnchor.constraint(lessThanOrEqualToConstant: 420),
-        ])
+    }
+
+    @objc private func switchLanguage(_ press: UILongPressGestureRecognizer) {
+        guard press.state == .began, session == nil, !busy else { return }
+        localeIdentifier = localeIdentifier.hasPrefix("zh") ? "en-US" : "zh-CN"
+        flash(localeIdentifier.hasPrefix("zh") ? "中文" : "English")
     }
 
     @objc private func tapped() {
-        window?.bringSubviewToFront(button)
-        window?.bringSubviewToFront(bubble)
         if busy { return }
         if let session {
             self.session = nil
@@ -394,34 +425,54 @@ final class RaftVoiceInput: NSObject {
                 busy = false
                 setRecording(false)
                 if text.isEmpty { hide(); return }
-                if RaftVoiceInput.type(text) {
+                if type(text) {
                     hide()
                 } else {
                     UIPasteboard.general.string = text
-                    show("No text field is focused; copied to the clipboard.")
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.hide() }
+                    flash("Copied to the clipboard: tap a text field first to type it in.")
                 }
             }
             return
         }
+        target = focusedResponder()
         busy = true
         Task { @MainActor in
             do {
-                let session = try await RaftVoiceSession.start { [weak self] text in
+                let session = try await RaftVoiceSession.start(locale: Locale(identifier: localeIdentifier)) { [weak self] text in
                     DispatchQueue.main.async { self?.show(text.isEmpty ? "Listening…" : text) }
                 }
                 self.session = session
                 setRecording(true)
-                show("Listening…")
+                show(localeIdentifier.hasPrefix("zh") ? "请说…" : "Listening…")
             } catch {
-                show("Voice input unavailable: \(error.localizedDescription)")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in self?.hide() }
+                flash("Voice input unavailable: \(error.localizedDescription)")
             }
             busy = false
         }
     }
 
-    private var window: UIWindow? { button.window }
+    /// The focused text field in any of this scene's windows.
+    private func focusedResponder() -> UIResponder? {
+        func find(_ view: UIView) -> UIResponder? {
+            if view.isFirstResponder { return view }
+            for sub in view.subviews {
+                if let found = find(sub) { return found }
+            }
+            return nil
+        }
+        for window in button.window?.windowScene?.windows ?? [] {
+            if let found = find(window) { return found }
+        }
+        return nil
+    }
+
+    /// Types [text] into the field focused when recording started (or the one focused now).
+    private func type(_ text: String) -> Bool {
+        guard let responder = target ?? focusedResponder(), let input = responder as? UIKeyInput else { return false }
+        if !responder.isFirstResponder { _ = responder.becomeFirstResponder() }
+        input.insertText(text)
+        return true
+    }
 
     private func setRecording(_ on: Bool) {
         button.backgroundColor = on ? .systemRed : .black
@@ -431,10 +482,32 @@ final class RaftVoiceInput: NSObject {
     private func show(_ text: String) {
         bubble.text = "  \(text)  "
         bubble.isHidden = false
+        layoutBubble()
+    }
+
+    private func flash(_ text: String) {
+        show(text)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            if self?.session == nil { self?.hide() }
+        }
     }
 
     private func hide() {
         bubble.isHidden = true
+    }
+
+    /// Beside the button, on the side with more room.
+    private func layoutBubble() {
+        guard let window = button.window, !bubble.isHidden else { return }
+        window.bringSubviewToFront(bubble)
+        window.bringSubviewToFront(button)
+        let size = bubble.sizeThatFits(CGSize(width: 360, height: 200))
+        let width = min(size.width, 360)
+        let height = min(size.height + 12, 120)
+        let onLeft = button.center.x > window.bounds.midX
+        let x = onLeft ? button.frame.minX - 10 - width : button.frame.maxX + 10
+        let y = min(max(button.center.y - height / 2, 8), window.bounds.maxY - height - 8)
+        bubble.frame = CGRect(x: x, y: y, width: width, height: height)
     }
 
     /// Removes fillers, adds punctuation and paragraphs with the on-device model; the raw text
@@ -456,25 +529,6 @@ final class RaftVoiceInput: NSObject {
             return text
         }
     }
-
-    /// Types [text] into the first responder (the focused text field). False when none takes text.
-    static func type(_ text: String) -> Bool {
-        RaftFirstResponder.current = nil
-        UIApplication.shared.sendAction(#selector(UIResponder.raft_captureFirstResponder), to: nil, from: nil, for: nil)
-        guard let input = RaftFirstResponder.current as? UIKeyInput else { return false }
-        input.insertText(text)
-        return true
-    }
-}
-
-private enum RaftFirstResponder {
-    static weak var current: UIResponder?
-}
-
-extension UIResponder {
-    @objc func raft_captureFirstResponder() {
-        RaftFirstResponder.current = self
-    }
 }
 
 /// One dictation: the microphone into SpeechAnalyzer, reporting the running text.
@@ -492,17 +546,12 @@ final class RaftVoiceSession {
         self.input = input
     }
 
-    static func start(onText: @escaping (String) -> Void) async throws -> RaftVoiceSession {
+    static func start(locale preferred: Locale, onText: @escaping (String) -> Void) async throws -> RaftVoiceSession {
         guard await AVAudioApplication.requestRecordPermission() else {
             throw RaftVoiceError("Microphone access is off (Settings → anyRaft)")
         }
-        let preferred = Locale(identifier: Locale.preferredLanguages.first ?? "zh-CN")
-        var supported = await SpeechTranscriber.supportedLocale(equivalentTo: preferred)
-        if supported == nil {
-            supported = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: "zh-CN"))
-        }
-        guard let locale = supported else {
-            throw RaftVoiceError("This language is not supported")
+        guard let locale = await SpeechTranscriber.supportedLocale(equivalentTo: preferred) else {
+            throw RaftVoiceError("\(preferred.identifier) is not supported")
         }
         let transcriber = SpeechTranscriber(
             locale: locale,
