@@ -198,6 +198,9 @@ final class RaftIosTabBarController: UIViewController {
         super.viewDidLayoutSubviews()
         reportBand()
         keepRailTouches()
+        if #available(iOS 26.1, *), ProcessInfo.processInfo.isiOSAppOnVision, let window = view.window {
+            RaftVoiceInput.shared.install(in: window)
+        }
     }
 
     /// Compose's own edge back gesture (CMP `UIKitBackGestureRecognizer`, added to the window's

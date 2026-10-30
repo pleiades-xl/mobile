@@ -3,6 +3,9 @@ import SafariServices
 import shared
 import SwiftUI
 import UIKit
+import FoundationModels
+import Speech
+import AVFoundation
 import CoreMotion
 
 // task #471: scene plumbing for iPad multi-window.
@@ -331,4 +334,249 @@ enum RaftDebugFold {
         }
         RaftIosDiagnosticsRecordCriticalSynchronously("RaftTouchProbe", "debug_rotate landscape=\(landscape)")
     }
+}
+
+/// Self-build (xuheng-li 2026-10-30): voice input for Apple Vision Pro, which takes no third-party
+/// keyboards. A floating mic button: tap to talk (on-device SpeechAnalyzer, live text in a bubble),
+/// tap again to stop; the on-device model (Foundation Models) tidies the text, which is then typed
+/// into the focused text field, as a keyboard would.
+@available(iOS 26.0, *)
+final class RaftVoiceInput: NSObject {
+    static let shared = RaftVoiceInput()
+
+    private let button = UIButton(type: .system)
+    private let bubble = UILabel()
+    private var session: RaftVoiceSession?
+    private var busy = false
+
+    func install(in window: UIWindow) {
+        guard button.superview !== window else { return }
+        button.setImage(UIImage(systemName: "mic.fill"), for: .normal)
+        button.tintColor = .white
+        button.backgroundColor = .black
+        button.layer.cornerRadius = 28
+        button.accessibilityLabel = "Voice input"
+        button.addTarget(self, action: #selector(tapped), for: .touchUpInside)
+        bubble.numberOfLines = 4
+        bubble.font = .systemFont(ofSize: 15)
+        bubble.textColor = .white
+        bubble.backgroundColor = UIColor.black.withAlphaComponent(0.8)
+        bubble.layer.cornerRadius = 12
+        bubble.clipsToBounds = true
+        bubble.isHidden = true
+        for view in [button, bubble] as [UIView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            window.addSubview(view)
+        }
+        let guide = window.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: 56),
+            button.heightAnchor.constraint(equalToConstant: 56),
+            button.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -20),
+            button.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -88),
+            bubble.trailingAnchor.constraint(equalTo: button.trailingAnchor),
+            bubble.bottomAnchor.constraint(equalTo: button.topAnchor, constant: -10),
+            bubble.widthAnchor.constraint(lessThanOrEqualToConstant: 420),
+        ])
+    }
+
+    @objc private func tapped() {
+        window?.bringSubviewToFront(button)
+        window?.bringSubviewToFront(bubble)
+        if busy { return }
+        if let session {
+            self.session = nil
+            busy = true
+            show("…")
+            Task { @MainActor in
+                let raw = await session.stop()
+                let text = await RaftVoiceInput.tidy(raw)
+                busy = false
+                setRecording(false)
+                if text.isEmpty { hide(); return }
+                if RaftVoiceInput.type(text) {
+                    hide()
+                } else {
+                    UIPasteboard.general.string = text
+                    show("No text field is focused; copied to the clipboard.")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.hide() }
+                }
+            }
+            return
+        }
+        busy = true
+        Task { @MainActor in
+            do {
+                let session = try await RaftVoiceSession.start { [weak self] text in
+                    DispatchQueue.main.async { self?.show(text.isEmpty ? "Listening…" : text) }
+                }
+                self.session = session
+                setRecording(true)
+                show("Listening…")
+            } catch {
+                show("Voice input unavailable: \(error.localizedDescription)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in self?.hide() }
+            }
+            busy = false
+        }
+    }
+
+    private var window: UIWindow? { button.window }
+
+    private func setRecording(_ on: Bool) {
+        button.backgroundColor = on ? .systemRed : .black
+        button.setImage(UIImage(systemName: on ? "stop.fill" : "mic.fill"), for: .normal)
+    }
+
+    private func show(_ text: String) {
+        bubble.text = "  \(text)  "
+        bubble.isHidden = false
+    }
+
+    private func hide() {
+        bubble.isHidden = true
+    }
+
+    /// Removes fillers, adds punctuation and paragraphs with the on-device model; the raw text
+    /// when the model is unavailable or fails.
+    static func tidy(_ raw: String) async -> String {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, case .available = SystemLanguageModel.default.availability else { return text }
+        let session = LanguageModelSession(instructions: """
+            You tidy dictated text. Rewrite the user's dictation as clean written text in the same \
+            language (keep mixed Chinese and English as spoken): remove fillers and repetitions \
+            (嗯、啊、那个、就是说, um, uh), fix punctuation, split paragraphs or lists where the \
+            speaker clearly enumerates. Do not add, drop or answer anything. Output only the text.
+            """)
+        do {
+            let tidied = try await session.respond(to: text).content
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return tidied.isEmpty ? text : tidied
+        } catch {
+            return text
+        }
+    }
+
+    /// Types [text] into the first responder (the focused text field). False when none takes text.
+    static func type(_ text: String) -> Bool {
+        RaftFirstResponder.current = nil
+        UIApplication.shared.sendAction(#selector(UIResponder.raft_captureFirstResponder), to: nil, from: nil, for: nil)
+        guard let input = RaftFirstResponder.current as? UIKeyInput else { return false }
+        input.insertText(text)
+        return true
+    }
+}
+
+private enum RaftFirstResponder {
+    static weak var current: UIResponder?
+}
+
+extension UIResponder {
+    @objc func raft_captureFirstResponder() {
+        RaftFirstResponder.current = self
+    }
+}
+
+/// One dictation: the microphone into SpeechAnalyzer, reporting the running text.
+@available(iOS 26.0, *)
+final class RaftVoiceSession {
+    private let engine = AVAudioEngine()
+    private let analyzer: SpeechAnalyzer
+    private let input: AsyncStream<AnalyzerInput>.Continuation
+    private var finalized = ""
+    private var volatile = ""
+    private var results: Task<Void, Never>?
+
+    private init(analyzer: SpeechAnalyzer, input: AsyncStream<AnalyzerInput>.Continuation) {
+        self.analyzer = analyzer
+        self.input = input
+    }
+
+    static func start(onText: @escaping (String) -> Void) async throws -> RaftVoiceSession {
+        guard await AVAudioApplication.requestRecordPermission() else {
+            throw RaftVoiceError("Microphone access is off (Settings → anyRaft)")
+        }
+        let preferred = Locale(identifier: Locale.preferredLanguages.first ?? "zh-CN")
+        var supported = await SpeechTranscriber.supportedLocale(equivalentTo: preferred)
+        if supported == nil {
+            supported = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: "zh-CN"))
+        }
+        guard let locale = supported else {
+            throw RaftVoiceError("This language is not supported")
+        }
+        let transcriber = SpeechTranscriber(
+            locale: locale,
+            transcriptionOptions: [],
+            reportingOptions: [.volatileResults],
+            attributeOptions: []
+        )
+        if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            try await request.downloadAndInstall()
+        }
+        let analyzer = SpeechAnalyzer(modules: [transcriber])
+        let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+        let session = RaftVoiceSession(analyzer: analyzer, input: continuation)
+        session.results = Task {
+            do {
+                for try await result in transcriber.results {
+                    let text = String(result.text.characters)
+                    if result.isFinal {
+                        session.finalized += text
+                        session.volatile = ""
+                    } else {
+                        session.volatile = text
+                    }
+                    onText(session.finalized + session.volatile)
+                }
+            } catch {}
+        }
+        try await analyzer.start(inputSequence: stream)
+
+        let audio = AVAudioSession.sharedInstance()
+        try audio.setCategory(.record, mode: .measurement, options: .duckOthers)
+        try audio.setActive(true, options: .notifyOthersOnDeactivation)
+        let node = session.engine.inputNode
+        let micFormat = node.outputFormat(forBus: 0)
+        let targetFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) ?? micFormat
+        let converter = AVAudioConverter(from: micFormat, to: targetFormat)
+        node.installTap(onBus: 0, bufferSize: 4096, format: micFormat) { buffer, _ in
+            guard let converter, micFormat != targetFormat else {
+                continuation.yield(AnalyzerInput(buffer: buffer))
+                return
+            }
+            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * targetFormat.sampleRate / micFormat.sampleRate) + 1
+            guard let out = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
+            var fed = false
+            var error: NSError?
+            converter.convert(to: out, error: &error) { _, status in
+                if fed {
+                    status.pointee = .noDataNow
+                    return nil
+                }
+                fed = true
+                status.pointee = .haveData
+                return buffer
+            }
+            if error == nil, out.frameLength > 0 { continuation.yield(AnalyzerInput(buffer: out)) }
+        }
+        session.engine.prepare()
+        try session.engine.start()
+        return session
+    }
+
+    /// Stops the microphone and returns the whole transcript.
+    func stop() async -> String {
+        engine.stop()
+        engine.inputNode.removeTap(onBus: 0)
+        input.finish()
+        try? await analyzer.finalizeAndFinishThroughEndOfInput()
+        await results?.value
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        return finalized + volatile
+    }
+}
+
+struct RaftVoiceError: LocalizedError {
+    let errorDescription: String?
+    init(_ message: String) { errorDescription = message }
 }

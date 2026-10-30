@@ -100,6 +100,10 @@
             <key>UIImageName</key>
             <string>RaftLaunchLogo</string>
         </dict>
+        <key>NSMicrophoneUsageDescription</key>
+        <string>anyRaft uses the microphone for voice input.</string>
+        <key>NSSpeechRecognitionUsageDescription</key>
+        <string>anyRaft turns what you say into text on this device.</string>
         <key>ITSAppUsesNonExemptEncryption</key>
         <false/>
     </dict>
