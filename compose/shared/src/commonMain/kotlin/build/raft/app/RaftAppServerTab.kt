@@ -210,6 +210,7 @@ internal fun RaftAppServerMenuOverlay(
             RaftServerMenuEntry.Apps to stringResource(Res.string.tab_apps),
             RaftServerMenuEntry.Settings to stringResource(Res.string.tab_settings),
         )
+    val railInSideColumn = raftSideColumnActive()
     RaftFloatingOverlayHost(
         onDismiss = state::dismiss,
         dismissActivationDelayMillis = RaftFloatingOverlayClickTriggeredDismissDelayMillis,
@@ -217,13 +218,15 @@ internal fun RaftAppServerMenuOverlay(
         RaftDesignSystemTheme {
             RaftMobileNavServerPopover(
                 state = state,
-                modifier = if (anchor == RaftServerMenuAnchor.RailHeader) Modifier.padding(start = RaftAppRailOuterWidth) else Modifier,
+                modifier = if (anchor == RaftServerMenuAnchor.RailHeader && !railInSideColumn) Modifier.padding(start = RaftAppRailOuterWidth) else Modifier,
                 bottomInset = bottomInset,
                 topInset = topInset,
                 screenHeight = screenHeight,
                 alignment =
                     when (anchor) {
-                        RaftServerMenuAnchor.TopBar, RaftServerMenuAnchor.RailHeader -> Alignment.TopStart
+                        RaftServerMenuAnchor.TopBar -> Alignment.TopStart
+                        // Self-build: the rail sits in the side column at the end (RaftSideDock).
+                        RaftServerMenuAnchor.RailHeader -> if (railInSideColumn) Alignment.TopEnd else Alignment.TopStart
                         RaftServerMenuAnchor.BottomBar -> Alignment.BottomCenter
                     },
             ) {
