@@ -1,5 +1,10 @@
 package build.raft.app
 
+import build.raft.designsystem.components.RaftSideAction
+import build.raft.designsystem.tokens.RaftStroke
+import build.raft.designsystem.theme.RaftTheme
+import build.raft.designsystem.theme.LocalRaftContentColor
+import androidx.compose.runtime.CompositionLocalProvider
 import build.raft.designsystem.components.raftSafeAreaHorizontalPadding
 import build.raft.app.resources.*
 import androidx.compose.ui.text.TextStyle
@@ -535,6 +540,15 @@ internal fun RaftNavigationRailTabBar(
     // collapse `Toggle`: the app's wide layout has no collapsible sidebar (web
     // SidebarToggleRailItem), so it is left out.
     val select = onBottomItemSelect ?: onSelect
+    // Self-build (xuheng-li 2026-10-30): on iPhone Duo's inner screen held sideways the rail moves
+    // into the system's side column and its own column goes.
+    if (header != null) {
+        val docked =
+            raftSideColumnDock { controls ->
+                RaftSideDock(controls, items, onSelect, bottomItems, select, header, bottomSafeArea)
+            }
+        if (docked) return
+    }
     val attentionDescriptions = raftNavRailAttentionDescriptions()
     RaftDesignSystemTheme {
         RaftAppRail(
@@ -565,6 +579,75 @@ internal fun RaftNavigationRailTabBar(
             }
         }
     }
+}
+
+/**
+ * The rail as the side column (self-build): stacked against the bottom, away from the camera at
+ * the top. Top to bottom: the page's actions, the server, Settings, the destinations, Search, then
+ * Back at the foot. Help, Computers, Apps and the bell are left out.
+ */
+@Composable
+private fun RaftSideDock(
+    controls: RaftSideColumnControls,
+    items: List<RaftBottomTabItemPayload>,
+    onSelect: (String) -> Unit,
+    bottomItems: List<RaftBottomTabItemPayload>,
+    onBottomItemSelect: (String) -> Unit,
+    header: @Composable () -> Unit,
+    bottomSafeArea: Dp,
+) {
+    RaftDesignSystemTheme {
+        val colors = RaftTheme.colors
+        val seam: @Composable () -> Unit = {
+            Box(
+                Modifier
+                    .padding(vertical = RaftAppRailDefaults.Inset)
+                    .width(RaftAppRailDefaults.ItemSize)
+                    .height(RaftStroke.Hairline)
+                    .background(colors.lineSeam)
+            )
+        }
+        Row(Modifier.fillMaxSize()) {
+            Box(Modifier.width(RaftStroke.Hairline).fillMaxHeight().background(colors.lineSeam))
+            Column(
+                Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .background(colors.layerFrame)
+                    .padding(bottom = RaftAppRailDefaults.Inset + bottomSafeArea),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(RaftAppRailDefaults.ItemGap, Alignment.Bottom),
+            ) {
+                CompositionLocalProvider(LocalRaftContentColor provides colors.foregroundOnFrame) {
+                    controls.actions.forEach { RaftSideDockAction(it) }
+                    header()
+                    bottomItems
+                        .filter { RaftAppDestination.fromId(it.key)?.route != RaftNavRoute.Menu }
+                        .forEach { RaftNavigationRailTabItem(item = it, onSelect = onBottomItemSelect) }
+                    seam()
+                    items
+                        .filter { it.key != AppShellRailSearchKey && RaftAppDestination.fromId(it.key)?.route != RaftNavRoute.Page }
+                        .forEach { RaftNavigationRailTabItem(item = it, onSelect = onSelect) }
+                    seam()
+                    items.firstOrNull { it.key == AppShellRailSearchKey }?.let { RaftNavigationRailTabItem(item = it, onSelect = onSelect) }
+                    controls.primary.forEach { RaftSideDockAction(it) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RaftSideDockAction(action: RaftSideAction) {
+    RaftAppRailItem(
+        label = action.label,
+        selected = false,
+        onClick = action.onClick,
+        icon = { action.icon(RaftAppRailDefaults.IconSize) },
+        enabled = action.enabled,
+        attention = action.attention,
+        attentionDescription = action.attentionDescription,
+    )
 }
 
 /** The screen-reader words for a rail item's dot, by its destination's badge source. */

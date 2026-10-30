@@ -1,5 +1,7 @@
 package build.raft.app
 
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.foundation.layout.width
 import build.raft.designsystem.components.LocalRaftFrameInsets
 import build.raft.designsystem.components.RaftFrameInsets
 import androidx.compose.foundation.background
@@ -137,6 +139,12 @@ internal class RaftSideColumnHostState {
     /** Back for a page whose own header has none: the wide layout's history (the inner screen). */
     internal var fallbackBack by mutableStateOf<RaftSideAction?>(null)
 
+    /**
+     * Self-build (xuheng-li 2026-10-30): the wide layout's rail, drawn as the column instead of the
+     * page's buttons, which it places among its own ([raftSideColumnDock]).
+     */
+    internal var dock by mutableStateOf<(@Composable (RaftSideColumnControls) -> Unit)?>(null)
+
     val controls: RaftSideColumnControls
         get() {
             val latest = entries.lastOrNull()?.controls ?: RaftSideColumnControls()
@@ -200,6 +208,7 @@ internal fun RaftSideColumnScaffold(
             )
         }
         val controls = host.controls
+        val dock = host.dock
         Box(
             Modifier
                 .align(if (onRight) AbsoluteAlignment.TopRight else AbsoluteAlignment.TopLeft)
@@ -207,15 +216,19 @@ internal fun RaftSideColumnScaffold(
                 // The column is transparent over the page's paper, not the frame.
                 .background(RaftColor.Canvas),
         ) {
-            RaftSideActionColumn(
-                primary = controls.primary,
-                actions = controls.actions,
-                side = posture.stripEdge,
-                width = posture.stripWidth,
-                // Back or the tab bar, never both: a page with Back has no tab bar under it.
-                bottomReserved = if (controls.primary.isEmpty()) posture.nativeTabBarHeight else 0.dp,
-                keepOut = posture.keepOut,
-            )
+            if (dock != null) {
+                Box(Modifier.width(posture.stripWidth).fillMaxHeight()) { dock(controls) }
+            } else {
+                RaftSideActionColumn(
+                    primary = controls.primary,
+                    actions = controls.actions,
+                    side = posture.stripEdge,
+                    width = posture.stripWidth,
+                    // Back or the tab bar, never both: a page with Back has no tab bar under it.
+                    bottomReserved = if (controls.primary.isEmpty()) posture.nativeTabBarHeight else 0.dp,
+                    keepOut = posture.keepOut,
+                )
+            }
         }
     }
 }
@@ -252,6 +265,21 @@ internal fun raftSideColumnFallbackBack(back: RaftSideAction): Boolean {
     val host = LocalRaftSideColumnHost.current ?: return false
     SideEffect { host.fallbackBack = back }
     DisposableEffect(host) { onDispose { host.fallbackBack = null } }
+    return true
+}
+
+/**
+ * Self-build: draws [dock] as the enclosing side column, with the page's controls. True when there
+ * is a column to draw it in; the caller then draws nothing in its own place.
+ */
+@Composable
+internal fun raftSideColumnDock(dock: @Composable (RaftSideColumnControls) -> Unit): Boolean {
+    val host = LocalRaftSideColumnHost.current ?: return false
+    val current by rememberUpdatedState(dock)
+    DisposableEffect(host) {
+        host.dock = { controls -> current(controls) }
+        onDispose { host.dock = null }
+    }
     return true
 }
 
