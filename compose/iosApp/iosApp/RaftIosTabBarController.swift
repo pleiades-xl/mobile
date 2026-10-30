@@ -177,7 +177,6 @@ final class RaftIosTabBarController: UIViewController {
             object: nil
         )
         applyVisibility(false, animated: false)
-        RaftGestureProbe.shared.start(in: view)
 
         // Replays the current shared state.
         bridge.attachListener(listener: stateListener)
@@ -496,7 +495,8 @@ private final class RaftIosTabBarOverlayView: UIView {
     }
 
     private static func rect(_ r: CGRect) -> String {
-        "\(Int(r.minX)),\(Int(r.minY)),\(Int(r.width))x\(Int(r.height))"
+        // Not Int(...): a null or infinite rect would trap.
+        "\(r.minX.rounded()),\(r.minY.rounded()),\(r.width.rounded())x\(r.height.rounded())"
     }
 }
 
@@ -563,153 +563,6 @@ private final class RaftIosTabSlotViewController: UIViewController {
             }
         }
         return nil
-    }
-}
-
-/// Self-build diagnostics (iPhone Duo dead rail taps, 2026-10-30): after unfolding with a finger
-/// down, taps in the rail's upper part are cancelled ~0.1 s after the press. Log every gesture
-/// recognizer in the window that begins or recognizes, so the one taking the touch is named.
-final class RaftGestureProbe: NSObject {
-    static let shared = RaftGestureProbe()
-    private var watched = Set<ObjectIdentifier>()
-    private var timer: Timer?
-    private weak var anchor: UIView?
-
-    func start(in view: UIView) {
-        anchor = view
-        guard timer == nil else { return }
-        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.scan() }
-    }
-
-    private var lastHits = ""
-    private var lastLayers = ""
-
-    private func scan() {
-        guard let window = anchor?.window else { return }
-        // Which view the window hit-tests at points down the inner rail (x 30 pt): an interop
-        // UIKit view left over a Compose control makes Compose hand the touch over (cancel).
-        let hits = stride(from: 60, through: 330, by: 45).map { y -> String in
-            var names: [String] = []
-            var view = window.hitTest(CGPoint(x: 30, y: y), with: nil)
-            while let current = view, names.count < 6 {
-                names.append(String(describing: type(of: current)))
-                view = current.superview
-            }
-            return "y\(y)=\(names.joined(separator: "<"))"
-        }.joined(separator: " | ")
-        if hits != lastHits {
-            lastHits = hits
-            RaftIosDiagnosticsRecord("info", "RaftTouchProbe", "rail_hit_test window=\(Int(window.bounds.width))x\(Int(window.bounds.height)) \(hits)")
-        }
-        // Compose's touch layers and what hangs under them (native text input views count as
-        // "interop" for a tap: a tap released over one is cancelled for Compose).
-        var layers: [String] = []
-        var layerStack: [UIView] = [window]
-        while let view = layerStack.popLast() {
-            if String(describing: type(of: view)).contains("OverlayInputView") {
-                for sub in view.subviews {
-                    var inner: [String] = []
-                    var queue: [(UIView, Int)] = [(sub, 0)]
-                    while !queue.isEmpty, inner.count < 6 {
-                        let (node, depth) = queue.removeFirst()
-                        let f = node.convert(node.bounds, to: window)
-                        inner.append("\(String(repeating: ".", count: depth))\(type(of: node)) \(Int(f.minX)),\(Int(f.minY)),\(Int(f.width))x\(Int(f.height)) ui=\(node.isUserInteractionEnabled) hidden=\(node.isHidden) fr=\(node.isFirstResponder)")
-                        if depth < 2 { queue.append(contentsOf: node.subviews.map { ($0, depth + 1) }) }
-                    }
-                    layers.append(inner.joined(separator: " / "))
-                }
-            }
-            layerStack.append(contentsOf: view.subviews)
-        }
-        let layerText = layers.joined(separator: " || ")
-        if layerText != lastLayers {
-            lastLayers = layerText
-            RaftIosDiagnosticsRecord("info", "RaftTouchProbe", "compose_input_subviews count=\(layers.count) \(layerText)")
-        }
-        var stack: [UIView] = [window]
-        while let view = stack.popLast() {
-            for recognizer in view.gestureRecognizers ?? [] where watched.insert(ObjectIdentifier(recognizer)).inserted {
-                recognizer.addTarget(self, action: #selector(changed(_:)))
-                if String(describing: type(of: view)).contains("OverlayInputView"),
-                   String(describing: type(of: recognizer)).contains("kobjc") {
-                    hookComposeRecognizer(recognizer)
-                }
-            }
-            stack.append(contentsOf: view.subviews)
-        }
-    }
-
-    /// Compose's own touch recognizer (CMP's private TouchesGestureRecognizer) cancels a tap when
-    /// UIKit cancels the touches, when the touch-down hit a view other than Compose's (interop or
-    /// native text input), or when another recognizer (the left-edge back swipe) is still tracking
-    /// the finger at release. Log each of those per touch so a dead tap names its cause.
-    private var hookedClasses = Set<ObjectIdentifier>()
-
-    private func hookComposeRecognizer(_ recognizer: UIGestureRecognizer) {
-        let cls: AnyClass = type(of: recognizer)
-        guard hookedClasses.insert(ObjectIdentifier(cls)).inserted else { return }
-        hook(cls, #selector(UIGestureRecognizer.touchesBegan(_:with:))) { gr, touches, event in
-            guard let view = gr.view, let touch = touches.first else { return "began" }
-            let point = touch.location(in: view)
-            let hit = view.hitTest(point, with: event)
-            return "began x=\(Int(point.x)) y=\(Int(point.y)) hit=\(hit.map { String(describing: type(of: $0)) } ?? "nil") own=\(hit === view)"
-        }
-        hook(cls, #selector(UIGestureRecognizer.touchesEnded(_:with:))) { gr, _, _ in
-            "ended trackers=[\(Self.trackers(besides: gr))]"
-        }
-        hook(cls, #selector(UIGestureRecognizer.touchesCancelled(_:with:))) { gr, _, _ in
-            "uikit_cancelled trackers=[\(Self.trackers(besides: gr))]"
-        }
-    }
-
-    /// Other recognizers in the window still holding touches (not failed, cancelled or ended).
-    private static func trackers(besides recognizer: UIGestureRecognizer) -> String {
-        guard let window = recognizer.view?.window else { return "" }
-        var found: [String] = []
-        var stack: [UIView] = [window]
-        while let view = stack.popLast() {
-            for other in view.gestureRecognizers ?? [] where other !== recognizer && other.numberOfTouches > 0 {
-                guard ![.failed, .cancelled, .ended].contains(other.state) else { continue }
-                found.append("\(type(of: other))@\(type(of: view)) state=\(other.state.rawValue) enabled=\(other.isEnabled)")
-            }
-            stack.append(contentsOf: view.subviews)
-        }
-        return found.joined(separator: ", ")
-    }
-
-    /// Wraps a touches method the class defines itself (never an inherited UIKit one).
-    private func hook(
-        _ cls: AnyClass,
-        _ selector: Selector,
-        _ describe: @escaping (UIGestureRecognizer, Set<UITouch>, UIEvent) -> String
-    ) {
-        var count: UInt32 = 0
-        guard let methods = class_copyMethodList(cls, &count) else { return }
-        defer { free(methods) }
-        guard let method = (0..<Int(count)).map({ methods[$0] }).first(where: { method_getName($0) == selector }) else {
-            RaftIosDiagnosticsRecord("warn", "RaftTouchProbe", "cmp_hook_missing \(cls) \(selector)")
-            return
-        }
-        typealias Imp = @convention(c) (UIGestureRecognizer, Selector, NSSet, UIEvent) -> Void
-        let original = unsafeBitCast(method_getImplementation(method), to: Imp.self)
-        let block: @convention(block) (UIGestureRecognizer, NSSet, UIEvent) -> Void = { recognizer, touches, event in
-            let text = describe(recognizer, touches as? Set<UITouch> ?? [], event)
-            original(recognizer, selector, touches, event)
-            RaftIosDiagnosticsRecord("info", "RaftTouchProbe", "cmp_touches \(text) state=\(recognizer.state.rawValue)")
-        }
-        method_setImplementation(method, imp_implementationWithBlock(block))
-    }
-
-    @objc private func changed(_ recognizer: UIGestureRecognizer) {
-        guard recognizer.state == .began || recognizer.state == .ended else { return }
-        let point = recognizer.location(in: recognizer.view?.window)
-        let host = recognizer.view.map { String(describing: type(of: $0)) } ?? "-"
-        RaftIosDiagnosticsRecord(
-            "info",
-            "RaftTouchProbe",
-            "gesture \(type(of: recognizer)) state=\(recognizer.state == .began ? "began" : "recognized") " +
-                "cancels=\(recognizer.cancelsTouchesInView) view=\(host) x=\(Int(point.x)) y=\(Int(point.y))"
-        )
     }
 }
 
