@@ -168,6 +168,7 @@ final class RaftIosTabBarController: UIViewController {
             object: nil
         )
         applyVisibility(false, animated: false)
+        RaftGestureProbe.shared.start(in: view)
 
         // Replays the current shared state.
         bridge.attachListener(listener: stateListener)
@@ -540,5 +541,44 @@ private final class RaftIosTabSlotViewController: UIViewController {
             }
         }
         return nil
+    }
+}
+
+/// Self-build diagnostics (iPhone Duo dead rail taps, 2026-10-30): after unfolding with a finger
+/// down, taps in the rail's upper part are cancelled ~0.1 s after the press. Log every gesture
+/// recognizer in the window that begins or recognizes, so the one taking the touch is named.
+final class RaftGestureProbe: NSObject {
+    static let shared = RaftGestureProbe()
+    private var watched = Set<ObjectIdentifier>()
+    private var timer: Timer?
+    private weak var anchor: UIView?
+
+    func start(in view: UIView) {
+        anchor = view
+        guard timer == nil else { return }
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.scan() }
+    }
+
+    private func scan() {
+        guard let window = anchor?.window else { return }
+        var stack: [UIView] = [window]
+        while let view = stack.popLast() {
+            for recognizer in view.gestureRecognizers ?? [] where watched.insert(ObjectIdentifier(recognizer)).inserted {
+                recognizer.addTarget(self, action: #selector(changed(_:)))
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+    }
+
+    @objc private func changed(_ recognizer: UIGestureRecognizer) {
+        guard recognizer.state == .began || recognizer.state == .ended else { return }
+        let point = recognizer.location(in: recognizer.view?.window)
+        let host = recognizer.view.map { String(describing: type(of: $0)) } ?? "-"
+        RaftIosDiagnosticsRecord(
+            "info",
+            "RaftTouchProbe",
+            "gesture \(type(of: recognizer)) state=\(recognizer.state == .began ? "began" : "recognized") " +
+                "cancels=\(recognizer.cancelsTouchesInView) view=\(host) x=\(Int(point.x)) y=\(Int(point.y))"
+        )
     }
 }
