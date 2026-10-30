@@ -174,7 +174,7 @@ internal fun RaftAppShellSurface(
             modifier =
                 modifier
                     .then(focusDismissModifier)
-                    .raftShellTouchProbe()
+                    .raftShellTouchProbe { focusOwnerRegistry?.hasActiveOwner == true }
                     .fillMaxSize()
                     .background(RaftColor.SurfaceWhite)
         ) {
@@ -442,7 +442,7 @@ private fun RaftAppShellNetworkBanner() {
 }
 
 /** Self-build diagnostics (iPhone Duo dead taps, 2026-10-29): every touch that reaches the shell. */
-private fun Modifier.raftShellTouchProbe(): Modifier =
+private fun Modifier.raftShellTouchProbe(inputFocused: () -> Boolean): Modifier =
     pointerInput(Unit) {
         awaitPointerEventScope {
             while (true) {
@@ -452,7 +452,8 @@ private fun Modifier.raftShellTouchProbe(): Modifier =
                 raftLogInfo(
                     "RaftTouchProbe",
                     "shell_pointer_$phase x=${change.position.x.toInt()} y=${change.position.y.toInt()} " +
-                        "pointers=${event.changes.size} pressed=${event.changes.count { it.pressed }} id=${change.id.value}"
+                        "pointers=${event.changes.size} pressed=${event.changes.count { it.pressed }} id=${change.id.value} " +
+                        "inputFocused=${inputFocused()} consumedAtInitial=${change.isConsumed} native=${event.nativeEvent}"
                 )
                 val final = awaitPointerEvent(PointerEventPass.Final).changes.firstOrNull { it.id == change.id }
                 if (final != null) raftLogInfo("RaftTouchProbe", "shell_pointer_${phase}_final consumed=${final.isConsumed}")

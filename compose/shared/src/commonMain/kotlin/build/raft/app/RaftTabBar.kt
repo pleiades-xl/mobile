@@ -32,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
+import build.raft.app.compat.ui.nativeEvent
 import androidx.compose.ui.graphics.Color
 import build.raft.app.compat.pager.LocalActivity
 import androidx.compose.ui.semantics.contentDescription
@@ -566,7 +567,10 @@ private fun RaftNavigationRailTabItem(
     RaftAppRailItem(
         label = item.label,
         selected = item.selected,
-        onClick = { onSelect(item.key) },
+        onClick = {
+            raftLogInfo("RaftTouchProbe", "rail_item_click key=${item.key}")
+            onSelect(item.key)
+        },
         modifier = Modifier.raftRailItemTouchProbe(item.key),
         icon = { ink ->
             RaftLucideIcon(
@@ -650,13 +654,15 @@ private fun Modifier.raftRailItemTouchProbe(key: String): Modifier =
     pointerInput(key) {
         awaitPointerEventScope {
             while (true) {
+                val initial = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+                val atInitial = initial.changes.firstOrNull { it.pressed != it.previousPressed }?.isConsumed
                 val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Final)
                 val change = event.changes.firstOrNull { it.pressed != it.previousPressed } ?: continue
                 run {
                     raftLogInfo(
                         "RaftTouchProbe",
-                        "rail_item_${if (change.pressed) "down" else "up"} key=$key consumed=${change.isConsumed} " +
-                            "x=${change.position.x.toInt()} y=${change.position.y.toInt()} size=${size.width}x${size.height} pointers=${event.changes.size}"
+                        "rail_item_${if (change.pressed) "down" else "up"} key=$key consumedAtInitial=$atInitial consumed=${change.isConsumed} " +
+                            "x=${change.position.x.toInt()} y=${change.position.y.toInt()} size=${size.width}x${size.height} pointers=${event.changes.size} native=${event.nativeEvent}"
                     )
                 }
             }
