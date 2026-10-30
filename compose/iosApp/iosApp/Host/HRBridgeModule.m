@@ -1373,6 +1373,18 @@ RaftIosRetireThreadComposerTemporaryFileRefs(
             [rejected addObject:ref];
             continue;
         }
+        // Self-build (anyRaft image send, 2026-10-30): a composer draft save (session = draft key)
+        // retired a just-picked image before the file preview's Done compressed it. Keep files
+        // younger than ten minutes for draft keys; the OS clears Caches if they are ever orphaned.
+        NSDate *modified = [fileManager attributesOfItemAtPath:ownedPath error:nil][NSFileModificationDate];
+        BOOL draftKey = [cleanSessionId containsString:@"send="];
+        RaftIosDiagnosticsRecord(@"warn", @"RaftImageCompress", [NSString stringWithFormat:
+            @"retire_request draftKey=%d ageSec=%.0f leaf=%@", draftKey,
+            modified ? -modified.timeIntervalSinceNow : -1.0, ownedPath.lastPathComponent]);
+        if (draftKey && modified && -modified.timeIntervalSinceNow < 600) {
+            [rejected addObject:ref];
+            continue;
+        }
         [admitted addObject:ref];
 
         NSString *parent = [ownedPath stringByDeletingLastPathComponent];
