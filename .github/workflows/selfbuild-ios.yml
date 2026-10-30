@@ -81,9 +81,11 @@ jobs:
           name: Raft-${{ matrix.configuration }}
           path: Raft-${{ matrix.configuration }}.zip
           compression-level: 0
+          retention-days: 1
 
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: xcodebuild-log-${{ matrix.configuration }}
           path: xcodebuild.log
+          retention-days: 1

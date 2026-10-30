@@ -582,8 +582,8 @@ final class RaftGestureProbe: NSObject {
         // Compose's touch layers and what hangs under them (native text input views count as
         // "interop" for a tap: a tap released over one is cancelled for Compose).
         var layers: [String] = []
-        var stack: [UIView] = [window]
-        while let view = stack.popLast() {
+        var layerStack: [UIView] = [window]
+        while let view = layerStack.popLast() {
             if String(describing: type(of: view)).contains("OverlayInputView") {
                 for sub in view.subviews {
                     var inner: [String] = []
@@ -597,7 +597,7 @@ final class RaftGestureProbe: NSObject {
                     layers.append(inner.joined(separator: " / "))
                 }
             }
-            stack.append(contentsOf: view.subviews)
+            layerStack.append(contentsOf: view.subviews)
         }
         let layerText = layers.joined(separator: " || ")
         if layerText != lastLayers {
