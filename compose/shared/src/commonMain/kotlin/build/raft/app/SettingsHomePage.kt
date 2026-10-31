@@ -5038,6 +5038,9 @@ private fun RaftAppShellReadyContent(
     // "Message not found" page. The resolve runs in the shell scope so a session/key change
     // after the take cannot drop the link half-way.
     val messageLinkSessionReady = authoritativeHomeStartAllowed && readySession != null
+    // Self-build: relayed pushes ask whether the app's own banner covers their server.
+    RaftMessageLinkIngress.currentServerSlug =
+        readySession?.servers?.firstOrNull { it.id == readySession?.currentServerId }?.slug
     LaunchedEffect(pendingMessageLink?.id, messageLinkSessionReady) {
         val pending = pendingMessageLink
         if (!raftMessageLinkShouldTake(pending, messageLinkSessionReady)) return@LaunchedEffect

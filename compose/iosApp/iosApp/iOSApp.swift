@@ -593,14 +593,15 @@ final class RaftIosAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
     ) {
         // Self-build: a push from the anyRaft relay (a Raft Web Push) carries only its message link.
         // Silent for the conversation on screen; with "Foreground message banners" on, the app shows
-        // its own banner, so iOS only plays the sound / vibration; otherwise iOS shows it.
+        // its own banner for the selected server, so iOS only plays the sound / vibration; otherwise
+        // (setting off, or another server) iOS shows it.
         if let url = notification.request.content.userInfo["url"] as? String,
            notification.request.content.userInfo["serverId"] == nil {
             let links = RaftMessageLinkIngress.shared
             if links.targetsVisibleConversation(url: url) {
                 completionHandler([])
             } else {
-                completionHandler(links.foregroundBannersEnabled() ? [.sound] : [.banner, .list, .sound])
+                completionHandler(links.appBannerCovers(url: url) ? [.sound] : [.banner, .list, .sound])
             }
             return
         }

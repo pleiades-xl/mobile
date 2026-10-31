@@ -319,11 +319,22 @@ object RaftMessageLinkIngress {
         }
     }
 
-    /** Self-build: the "Foreground message banners" setting, which shows the app's own banner. */
-    fun foregroundBannersEnabled(): Boolean =
-        runCatching {
-            KeyValueChatLayoutPreferenceStore(raftSharedPreferenceStore()).readForegroundMessageBannersEnabledSync()
-        }.getOrDefault(false)
+    /** Self-build: the slug of the server the app shell has selected (set by the shell). */
+    @kotlin.concurrent.Volatile
+    internal var currentServerSlug: String? = null
+
+    /**
+     * Self-build: whether the app's own banner ("Foreground message banners") shows the message a
+     * relayed push links to. It only covers the selected server, whose realtime the app follows.
+     */
+    fun appBannerCovers(url: String): Boolean {
+        val enabled =
+            runCatching {
+                KeyValueChatLayoutPreferenceStore(raftSharedPreferenceStore()).readForegroundMessageBannersEnabledSync()
+            }.getOrDefault(false)
+        val slug = currentServerSlug ?: return false
+        return enabled && parseRaftMessageLink(url, appScopeWebUrlOrNull())?.serverSlug == slug
+    }
 
     /** Whether [url] is a message link the app takes, without queueing it. */
     fun isMessageLink(url: String, configuredWebUrl: String? = null): Boolean =
