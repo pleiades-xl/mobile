@@ -1,5 +1,6 @@
 package build.raft.app.data
 
+import build.raft.app.model.ServerId
 import build.raft.app.network.RaftKtorCallKind
 import build.raft.app.network.RaftKtorProcessClients
 import build.raft.app.network.RaftRequestPriority
@@ -13,6 +14,7 @@ import io.ktor.http.content.TextContent
 import io.ktor.http.isSuccess
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -22,13 +24,15 @@ import kotlinx.serialization.json.putJsonObject
  * Self-build (xuheng-li 2026-10-31): Raft pushes only to its own app, so anyRaft takes Raft's Web
  * Push instead. The relay (push.vgent.dev on claw-server) gives this device a Web Push endpoint and
  * keys; the app subscribes them at Raft with its own session, which never leaves the phone; the
- * relay forwards each push to APNs with the message link, which a tap opens.
+ * relay forwards each push to APNs with the message link, which a tap opens. Raft keeps Web Push
+ * subscriptions per server, so the endpoint is subscribed on every server of the account.
  */
 internal object RaftPushRelay {
     private const val RegisterUrl = "https://push.vgent.dev/register"
     private const val LogTag = "RaftPushRelay"
     private val json = Json { ignoreUnknownKeys = true }
     private var endpoint: String? = null
+    private var serverIds: List<String> = emptyList()
 
     suspend fun subscribe(networkClient: RaftNetworkClient, registrationJson: String) {
         runCatching {
@@ -54,15 +58,23 @@ internal object RaftPushRelay {
                     put("auth", device.getValue("auth"))
                 }
             }
-            val result =
-                networkClient.request(
-                    priority = DataRequestPriority.Background,
-                    path = "push/subscribe",
-                    method = "POST",
-                    bodyText = subscription.toString()
-                )
-            if (result.isSuccessful) endpoint = device.getValue("endpoint").jsonPrimitive.content
-            raftLogInfo(LogTag, "subscribe code=${result.code}")
+            val servers = networkClient.request(priority = DataRequestPriority.Background, path = "servers")
+            val ids =
+                json.parseToJsonElement(servers.bodyText ?: "[]").jsonArray
+                    .mapNotNull { it.jsonObject["id"]?.jsonPrimitive?.content }
+            val codes =
+                ids.map { id ->
+                    networkClient.request(
+                        priority = DataRequestPriority.Background,
+                        path = "push/subscribe",
+                        method = "POST",
+                        serverIdOverride = ServerId(id),
+                        bodyText = subscription.toString()
+                    ).code
+                }
+            endpoint = device.getValue("endpoint").jsonPrimitive.content
+            serverIds = ids
+            raftLogInfo(LogTag, "subscribe servers=${ids.size} codes=$codes")
         }.onFailure { raftLogWarn(LogTag, "subscribe_failed ${it::class.simpleName}") }
     }
 
@@ -70,14 +82,17 @@ internal object RaftPushRelay {
         val current = endpoint ?: return
         endpoint = null
         runCatching {
-            val result =
-                networkClient.request(
-                    priority = DataRequestPriority.Foreground,
-                    path = "push/subscribe",
-                    method = "DELETE",
-                    bodyText = buildJsonObject { put("endpoint", current) }.toString()
-                )
-            raftLogInfo(LogTag, "unsubscribe code=${result.code}")
+            val codes =
+                serverIds.map { id ->
+                    networkClient.request(
+                        priority = DataRequestPriority.Foreground,
+                        path = "push/subscribe",
+                        method = "DELETE",
+                        serverIdOverride = ServerId(id),
+                        bodyText = buildJsonObject { put("endpoint", current) }.toString()
+                    ).code
+                }
+            raftLogInfo(LogTag, "unsubscribe codes=$codes")
         }
     }
 }
