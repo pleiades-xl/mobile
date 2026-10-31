@@ -4,6 +4,7 @@ import build.raft.app.RaftDatabaseLaunchGate
 import build.raft.app.RaftEnvironmentIndicatorHost
 import build.raft.app.RAFT_EMBEDDED_CHILD_PAGE_PARAM
 import build.raft.app.RaftSearchTabHandoff
+import build.raft.app.RaftWideHandoff
 import build.raft.app.RaftSearchTabHandoffAction
 import build.raft.app.RaftSearchTabHandoffRole
 import build.raft.app.RaftSearchTabQueryRequest
@@ -133,6 +134,12 @@ internal abstract class BasePager : ComposeContainer() {
         }
         onRaftPageDidAppear(isInitialAppearance = initialAppearance)
         handleSearchTabHandoff(initialAppearance)
+        // Self-build: while a conversation moves into the wide layout, pages over the shell close.
+        if (!initialAppearance && RaftWideHandoff.closesPages &&
+            raftSearchTabHandoffRole == RaftSearchTabHandoffRole.PopToShell
+        ) {
+            acquireModule<RouterModule>(RouterModule.MODULE_NAME).closePage()
+        }
     }
 
     /**

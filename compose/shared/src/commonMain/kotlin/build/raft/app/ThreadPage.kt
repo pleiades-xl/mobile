@@ -4551,6 +4551,29 @@ private fun ThreadPageScreen(
             )
         bridge.log("adaptive_initiate_outcome outcome=$outcome identity=${identity.key}")
     }
+    // Self-build (xuheng-li 2026-10-30): pushed on a narrow window (iPhone Duo's outer screen), the
+    // conversation moves into the wide layout's detail pane when the window goes wide (unfold);
+    // the shell opens it ([RaftWideHandoff]). Only after a narrow fact, so a page pushed on a wide
+    // window stays where it is.
+    var sawNarrowPane by remember { mutableStateOf(false) }
+    LaunchedEffect(adaptivePaneEvent, isStandaloneThreadPage) {
+        val event = adaptivePaneEvent ?: return@LaunchedEffect
+        if (adaptiveInitiationEnabled || !isStandaloneThreadPage) return@LaunchedEffect
+        if (event.posture == RaftAdaptivePanePosture.Unknown) return@LaunchedEffect
+        if (reduceRaftAdaptivePane(adaptivePaneState, event).layout != RaftAdaptivePaneLayout.DualPane) {
+            sawNarrowPane = true
+            return@LaunchedEffect
+        }
+        if (!sawNarrowPane || !AppShellChildTabRegistry.hasEntries()) return@LaunchedEffect
+        if (!KeyValueChatLayoutPreferenceStore(raftSharedPreferenceStore()).readDesktopModeOnLargeScreenSync()) {
+            return@LaunchedEffect
+        }
+        val launchPayload = parsedPayload.toWireThreadLaunchPayloadOrNull() ?: return@LaunchedEffect
+        if (RaftWideHandoff.request(launchPayload)) {
+            bridge.log("thread_wide_handoff pager=${pager.pagerId}")
+            pager.acquireModule<RouterModule>(RouterModule.MODULE_NAME).closePage()
+        }
+    }
     val authStore = remember(sharedStores, storeScope) { sharedStores.authStore(storeScope) }
     val serverMembersStore = remember(sharedStores, storeScope) { sharedStores.serverMembersStore(storeScope) }
     val sharedHomeStore = remember(sharedStores, storeScope) { sharedStores.sharedHomeStore(storeScope) }
