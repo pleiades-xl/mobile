@@ -500,3 +500,17 @@ fun getLinkerArgs(): List<String> {
 tasks.matching { it.name == "desktopTest" || it.name == "compileTestKotlinDesktop" }.configureEach {
     enabled = false
 }
+
+// Self-build (opt-in: `raft.releaseBinaryCache=true` in ~/.gradle/gradle.properties): the compiler
+// keeps an optimized cache per third-party library for Release links, so a rebuild re-optimizes only
+// the project's own code (one-line change on an M2: 17 -> 6 min). Libraries are then optimized on
+// their own, without whole-program inlining across them.
+if (providers.gradleProperty("raft.releaseBinaryCache").orNull == "true") {
+    val cacheHome = gradle.gradleUserHomeDir
+    kotlin.targets.withType<org.jetbrains.kotlin.gradle.plugin.mpp.KotlinNativeTarget>().configureEach {
+        binaries.all {
+            binaryOption("enableReleaseBinaryCache", "true")
+            freeCompilerArgs += listOf("-Xauto-cache-from=$cacheHome/caches", "-Xauto-cache-dir=$cacheHome/konan-release-cache")
+        }
+    }
+}
