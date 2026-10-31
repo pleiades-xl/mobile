@@ -654,6 +654,12 @@ final class RaftIosAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
         let userInfo = notification.request.content.userInfo
+        // Self-build: a push from the anyRaft relay (a Raft Web Push, carrying only the message link)
+        // shows in the background only; in the app the realtime banners already cover it.
+        if userInfo["url"] is String, userInfo["serverId"] == nil {
+            completionHandler([])
+            return
+        }
         // A Settings test (slock docs/contracts/notifications.md §6): confirm it is being shown.
         if let testId = userInfo["testId"] as? String, !testId.isEmpty {
             RaftNotificationTestAck.shared.ack(testId: testId, shown: true)
@@ -696,6 +702,12 @@ final class RaftIosAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let content = response.notification.request.content
+        // Self-build: a relayed push opens its message link, the same path as a Universal Link.
+        if let url = content.userInfo["url"] as? String, content.userInfo["serverId"] == nil {
+            _ = RaftMessageLinkIngress.shared.accept(url: url, source: "push_relay", configuredWebUrl: nil)
+            completionHandler()
+            return
+        }
         // task #483: a notification whose serverId maps to exactly one live
         // shell targets only that shell; anything else broadcasts as before.
         // Message-less notices (contract §4.1) may name the server only in `route`; the open payload itself
