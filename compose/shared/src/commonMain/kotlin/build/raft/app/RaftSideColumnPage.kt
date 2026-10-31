@@ -175,18 +175,15 @@ internal fun RaftSideColumnScaffold(
     posture: RaftSideColumnPosture,
     content: @Composable () -> Unit,
 ) {
-    if (!posture.sideColumn) {
-        CompositionLocalProvider(
-            LocalRaftSideColumnPosture provides posture,
-            LocalRaftSideColumnHost provides null,
-            content = content,
-        )
-        return
-    }
+    // One structure with and without the column: the posture arrives after the page's first
+    // composition, and a different tree would remount the page (a file preview then disposed its
+    // session and retired the just-picked image; anyRaft, 2026-10-30).
     val host = remember { RaftSideColumnHostState() }
+    val column = posture.sideColumn
     val onRight = posture.stripEdge == RaftSideActionColumnSide.Right
-    val left = if (onRight) 0.dp else posture.stripWidth
-    val right = if (onRight) posture.stripWidth else 0.dp
+    val left = if (column && !onRight) posture.stripWidth else 0.dp
+    val right = if (column && onRight) posture.stripWidth else 0.dp
+    val frameInsets = if (column) RaftFrameInsets(left = left, right = right) else LocalRaftFrameInsets.current
     Box(Modifier.fillMaxSize()) {
         Box(
             Modifier
@@ -201,12 +198,13 @@ internal fun RaftSideColumnScaffold(
             // tooltips flip away from it. Physical, never mirrored. The camera sits inside the column's
             // own band, so the page has no top inset of its own.
             CompositionLocalProvider(
-                LocalRaftFrameInsets provides RaftFrameInsets(left = left, right = right),
+                LocalRaftFrameInsets provides frameInsets,
                 LocalRaftSideColumnPosture provides posture,
-                LocalRaftSideColumnHost provides host,
+                LocalRaftSideColumnHost provides host.takeIf { column },
                 content = content,
             )
         }
+        if (!column) return@Box
         val controls = host.controls
         val dock = host.dock
         Box(
