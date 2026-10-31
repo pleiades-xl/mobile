@@ -294,48 +294,6 @@ enum RaftLogShare {
     }
 }
 
-/// Local simulator debugging only: act out a fold from the command line,
-/// `xcrun simctl spawn <udid> notifyutil -p dev.vgent.raft.fold` (window narrow <-> full)
-/// or `... dev.vgent.raft.rotate` (portrait <-> landscape).
-enum RaftDebugFold {
-    static var narrow = false
-    static var landscape = false
-
-    /// The window on screen; not necessarily the one this scene delegate made.
-    static var window: UIWindow? {
-        UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-            .flatMap(\.windows).first { $0.isKeyWindow }
-    }
-
-    static func install() {
-        let center = CFNotificationCenterGetDarwinNotifyCenter()
-        CFNotificationCenterAddObserver(center, nil, { _, _, _, _, _ in
-            DispatchQueue.main.async { RaftDebugFold.fold() }
-        }, "dev.vgent.raft.fold" as CFString, nil, .deliverImmediately)
-        CFNotificationCenterAddObserver(center, nil, { _, _, _, _, _ in
-            DispatchQueue.main.async { RaftDebugFold.rotate() }
-        }, "dev.vgent.raft.rotate" as CFString, nil, .deliverImmediately)
-    }
-
-    static func fold() {
-        guard let window, let screen = window.windowScene?.screen else { return }
-        narrow.toggle()
-        var frame = screen.bounds
-        if narrow { frame.size.width = 420 }
-        window.frame = frame
-        RaftIosDiagnosticsRecordCriticalSynchronously("RaftTouchProbe", "debug_fold narrow=\(narrow) frame=\(frame) window=\(type(of: window))")
-    }
-
-    static func rotate() {
-        guard #available(iOS 16.0, *), let scene = window?.windowScene else { return }
-        landscape.toggle()
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: landscape ? .landscapeLeft : .portrait)) { error in
-            RaftIosDiagnosticsRecordCriticalSynchronously("RaftTouchProbe", "debug_rotate error=\(error)")
-        }
-        RaftIosDiagnosticsRecordCriticalSynchronously("RaftTouchProbe", "debug_rotate landscape=\(landscape)")
-    }
-}
-
 /// Self-build (xuheng-li 2026-10-30): voice input for Apple Vision Pro, which takes no third-party
 /// keyboards. A floating mic button: tap to talk (on-device SpeechAnalyzer, live text in a bubble),
 /// tap again to stop; the on-device model (Foundation Models) tidies the text, which is then typed

@@ -1373,9 +1373,6 @@ RaftIosRetireThreadComposerTemporaryFileRefs(
             [rejected addObject:ref];
             continue;
         }
-        // Self-build diagnostics: which session retires which file.
-        RaftIosDiagnosticsRecord(@"info", @"RaftImageCompress", [NSString stringWithFormat:
-            @"retire_request session=%@ leaf=%@", cleanSessionId, ownedPath.lastPathComponent]);
         [admitted addObject:ref];
 
         NSString *parent = [ownedPath stringByDeletingLastPathComponent];
@@ -2408,14 +2405,6 @@ static BOOL RaftThreadImageCompressionPathInside(NSString *rootPath, NSString *c
     return [candidatePath hasPrefix:prefix];
 }
 
-/// Self-build: realpath(3) for both sides of the containment check. `URLByResolvingSymlinksInPath`
-/// may leave `/var` on one path and `/private/var` on the other, which refused every picked image
-/// in the app's own Caches (anyRaft, iOS 27).
-static NSString *RaftThreadImageCompressionRealPath(NSString *path) {
-    char resolved[PATH_MAX];
-    return realpath(path.fileSystemRepresentation, resolved) ? [NSString stringWithUTF8String:resolved] : path;
-}
-
 static NSURL *RaftThreadImageCompressionSourceURL(NSString *fileRef, NSArray<NSURL *> *roots) {
     NSString *raw = RaftBridgeString(fileRef);
     if (raw.length == 0 ||
@@ -2429,30 +2418,25 @@ static NSURL *RaftThreadImageCompressionSourceURL(NSString *fileRef, NSArray<NSU
         NSURL *candidate = [NSURL URLWithString:raw];
         if (!candidate.isFileURL || candidate.host.length > 0 || candidate.query.length > 0 ||
             candidate.fragment.length > 0) {
-            RaftIosDiagnosticsRecord(@"warn", @"RaftImageCompress", @"source_unparsed");
             return nil;
         }
         url = candidate;
     }
-    if (!url || !url.isFileURL || !url.path.length) return nil;
-    NSString *path = RaftThreadImageCompressionRealPath(url.path);
+    if (!url || !url.isFileURL) return nil;
+    NSURL *resolved = [[[url URLByResolvingSymlinksInPath] standardizedURL] copy];
+    if (!resolved.path.length) return nil;
     NSDictionary<NSFileAttributeKey, id> *attributes =
-        [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
+        [NSFileManager.defaultManager attributesOfItemAtPath:resolved.path error:nil];
     if (![attributes[NSFileType] isEqualToString:NSFileTypeRegular] ||
         [attributes[NSFileSize] unsignedLongLongValue] == 0) {
-        RaftIosDiagnosticsRecord(@"warn", @"RaftImageCompress", [NSString stringWithFormat:
-            @"source_not_regular type=%@ size=%@", attributes[NSFileType], attributes[NSFileSize]]);
         return nil;
     }
     for (NSURL *rootURL in roots) {
-        NSString *rootPath = RaftThreadImageCompressionRealPath(rootURL.path);
-        if (rootPath.length > 0 && RaftThreadImageCompressionPathInside(rootPath, path)) {
-            return [NSURL fileURLWithPath:path];
+        NSString *rootPath = [[[rootURL URLByResolvingSymlinksInPath] standardizedURL] path];
+        if (rootPath.length > 0 && RaftThreadImageCompressionPathInside(rootPath, resolved.path)) {
+            return resolved;
         }
     }
-    RaftIosDiagnosticsRecord(@"warn", @"RaftImageCompress", [NSString stringWithFormat:
-        @"source_outside_roots path=%@ roots=%@", path,
-        [[roots valueForKey:@"path"] componentsJoinedByString:@","]]);
     return nil;
 }
 
@@ -4252,11 +4236,6 @@ static NSDictionary *RaftFeedbackDiagnosticsBindingPayload(NSDictionary *binding
         fileRef.length > 0 &&
         [fileRef rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location == NSNotFound;
     if (!validRequest) {
-        // Self-build diagnostics (anyRaft image send, 2026-10-30): which check refused it.
-        RaftIosDiagnosticsRecord(@"warn", @"RaftImageCompress", [NSString stringWithFormat:
-            @"invalid_request idLen=%lu nameSafe=%d mime=%@ refLen=%lu",
-            (unsigned long)requestId.length, RaftThreadImageCompressionSafeName(fileName), mimeType,
-            (unsigned long)fileRef.length]);
         [self raft_dispatchThreadImageCompressionFailure:callback];
         return;
     }
@@ -4323,13 +4302,6 @@ static NSDictionary *RaftFeedbackDiagnosticsBindingPayload(NSDictionary *binding
                     return;
                 }
                 NSURL *sourceURL = RaftThreadImageCompressionSourceURL(fileRef, roots);
-                if (!sourceURL || !RaftThreadImageCompressionInputIsImage(fileName, mimeType, sourceURL)) {
-                    // Self-build diagnostics: where the picked file lives, relative to the app home.
-                    NSString *where = [fileRef stringByReplacingOccurrencesOfString:NSHomeDirectory() withString:@"~"];
-                    RaftIosDiagnosticsRecord(@"warn", @"RaftImageCompress", [NSString stringWithFormat:
-                        @"source_rejected inRoots=%d mime=%@ ref=%@", sourceURL != nil, mimeType,
-                        [where stringByDeletingLastPathComponent]]);
-                }
                 if (!sourceURL || !RaftThreadImageCompressionInputIsImage(fileName, mimeType, sourceURL) ||
                     [operation isCancelled] || !weakSelf ||
                     ![weakSelf raft_isCurrentThreadImageCompressionOperation:operation]) {
