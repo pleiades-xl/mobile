@@ -221,6 +221,13 @@ enum RaftIosPushHost {
         // Product analytics: this open came from a notification (`app_opened.via`). Reported
         // before the activation it belongs to, so not deferred to the main queue.
         RaftIosProductEventsHost.shared.noteNotificationOpen()
+        // Self-build: a relayed push (Raft Web Push) carries only its message link; it opens like a
+        // Universal Link, on every path a tap arrives by (warm tap, cold launch).
+        if let url = userInfo["url"] as? String, userInfo["serverId"] == nil {
+            let accepted = RaftMessageLinkIngress.shared.accept(url: url, source: "push_relay_\(source)", configuredWebUrl: nil)
+            RaftIosDiagnosticsRecord("info", "SlockIosPush", "relay_notification_open accepted=\(accepted) source=\(source)")
+            return
+        }
         runOnMain {
             guard let payload = sanitizedSystemNotificationOpenPayload(
                 userInfo: userInfo,
@@ -607,12 +614,6 @@ final class RaftIosAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let content = response.notification.request.content
-        // Self-build: a relayed push opens its message link, the same path as a Universal Link.
-        if let url = content.userInfo["url"] as? String, content.userInfo["serverId"] == nil {
-            _ = RaftMessageLinkIngress.shared.accept(url: url, source: "push_relay", configuredWebUrl: nil)
-            completionHandler()
-            return
-        }
         // task #483: a notification whose serverId maps to exactly one live
         // shell targets only that shell; anything else broadcasts as before.
         let serverId = (content.userInfo["serverId"] as? String)?
