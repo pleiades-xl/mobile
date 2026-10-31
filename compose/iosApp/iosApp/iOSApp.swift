@@ -661,10 +661,17 @@ final class RaftIosAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
         let userInfo = notification.request.content.userInfo
-        // Self-build: a push from the anyRaft relay (a Raft Web Push, carrying only the message link)
-        // shows in the background only; in the app the realtime banners already cover it.
-        if userInfo["url"] is String, userInfo["serverId"] == nil {
-            completionHandler([])
+        // Self-build: a push from the anyRaft relay (a Raft Web Push) carries only its message link.
+        // Silent for the conversation on screen; with "Foreground message banners" on, the app shows
+        // its own banner for the selected server, so iOS only plays the sound / vibration; otherwise
+        // (setting off, or another server) iOS shows it.
+        if let url = userInfo["url"] as? String, userInfo["serverId"] == nil {
+            let links = RaftMessageLinkIngress.shared
+            if links.targetsVisibleConversation(url: url) {
+                completionHandler([])
+            } else {
+                completionHandler(links.appBannerCovers(url: url) ? [.sound] : [.banner, .list, .sound])
+            }
             return
         }
         // A Settings test (slock docs/contracts/notifications.md §6): confirm it is being shown.
