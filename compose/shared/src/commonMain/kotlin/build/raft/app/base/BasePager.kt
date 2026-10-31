@@ -25,6 +25,7 @@ import build.raft.app.data.RaftProductEvents
 import build.raft.app.data.RaftProductPageView
 import build.raft.app.data.RaftStoreThreading
 import build.raft.app.data.RaftSharedStoreRegistry
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -79,6 +80,16 @@ internal abstract class BasePager : ComposeContainer() {
                     )
                 }
             RaftPageLayersContent(layers = layers, content = content)
+            // Self-build: while a conversation is handed to the shell ([RaftWideHandoff]), the visible
+            // page over the shell closes, and each page under it as it reappears.
+            val handoff = RaftWideHandoff.pending
+            LaunchedEffect(handoff, raftPageVisible) {
+                if (handoff != null && raftPageVisible && RaftWideHandoff.closesPages &&
+                    raftSearchTabHandoffRole == RaftSearchTabHandoffRole.PopToShell
+                ) {
+                    acquireModule<RouterModule>(RouterModule.MODULE_NAME).closePage()
+                }
+            }
         }
     }
 
@@ -136,12 +147,6 @@ internal abstract class BasePager : ComposeContainer() {
         }
         onRaftPageDidAppear(isInitialAppearance = initialAppearance)
         handleSearchTabHandoff(initialAppearance)
-        // Self-build: while a conversation moves into the wide layout, pages over the shell close.
-        if (!initialAppearance && RaftWideHandoff.closesPages &&
-            raftSearchTabHandoffRole == RaftSearchTabHandoffRole.PopToShell
-        ) {
-            acquireModule<RouterModule>(RouterModule.MODULE_NAME).closePage()
-        }
     }
 
     /**
