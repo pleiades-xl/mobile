@@ -584,6 +584,13 @@ final class RaftIosAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
+        // Self-build: a push from the anyRaft relay (a Raft Web Push, carrying only the message link)
+        // shows in the background only; in the app the realtime banners already cover it.
+        if notification.request.content.userInfo["url"] is String,
+           notification.request.content.userInfo["serverId"] == nil {
+            completionHandler([])
+            return
+        }
         if RaftIosPushHost.targetsVisibleConversation(userInfo: notification.request.content.userInfo) {
             // The user is already looking at this conversation: no banner or sound, same as the in-app banner.
             RaftIosDiagnosticsRecord("info", "SlockIosPush", "system_notification_suppressed reason=visible_conversation")
@@ -600,6 +607,12 @@ final class RaftIosAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let content = response.notification.request.content
+        // Self-build: a relayed push opens its message link, the same path as a Universal Link.
+        if let url = content.userInfo["url"] as? String, content.userInfo["serverId"] == nil {
+            _ = RaftMessageLinkIngress.shared.accept(url: url, source: "push_relay", configuredWebUrl: nil)
+            completionHandler()
+            return
+        }
         // task #483: a notification whose serverId maps to exactly one live
         // shell targets only that shell; anything else broadcasts as before.
         let serverId = (content.userInfo["serverId"] as? String)?

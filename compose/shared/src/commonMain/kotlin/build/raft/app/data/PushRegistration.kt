@@ -179,20 +179,25 @@ internal interface RaftPushRegistrationApi {
 internal class RaftPushRegistrationNetworkApi(
     private val networkClient: RaftNetworkClient
 ) : RaftPushRegistrationApi {
-    override suspend fun upsert(payloadJson: String): HomeNetworkResponse =
-        networkClient.request(
+    override suspend fun upsert(payloadJson: String): HomeNetworkResponse {
+        // Self-build: Raft's own APNs push cannot reach anyRaft; its Web Push through the relay can.
+        RaftPushRelay.subscribe(networkClient, payloadJson)
+        return networkClient.request(
             priority = DataRequestPriority.Background,
             path = "push/registrations",
             method = "POST",
             bodyText = payloadJson
         )
+    }
 
-    override suspend fun unbind(installationId: String): HomeNetworkResponse =
-        networkClient.request(
+    override suspend fun unbind(installationId: String): HomeNetworkResponse {
+        RaftPushRelay.unsubscribe(networkClient)
+        return networkClient.request(
             priority = DataRequestPriority.Foreground,
             path = "push/registrations/$installationId",
             method = "DELETE"
         )
+    }
 
     override suspend fun deliveryStatus(installationId: String): HomeNetworkResponse =
         networkClient.request(
