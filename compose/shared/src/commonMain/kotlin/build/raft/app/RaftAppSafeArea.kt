@@ -223,8 +223,20 @@ private fun raftHostWindowIdEnsuringObserver(): String {
     return windowId
 }
 
+/**
+ * Self-build (xuheng-li 2026-10-30): beside iPhone Duo's side column a page has no top inset, so
+ * its far top corner is the screen's rounded one; headers keep this much clear of it.
+ */
+internal val RaftSideColumnCornerClearance = 12.dp
+
 @Composable
 internal fun raftTopSafeAreaPadding(): Dp {
+    val inset = raftHostTopSafeAreaPadding()
+    return if (LocalRaftSideColumnPosture.current.sideColumn) maxOf(inset, RaftSideColumnCornerClearance) else inset
+}
+
+@Composable
+private fun raftHostTopSafeAreaPadding(): Dp {
     val windowId = raftHostWindowIdEnsuringObserver()
     val pageData = (LocalActivity.current.getPager() as Pager).pageData
     val params = pageData.params
