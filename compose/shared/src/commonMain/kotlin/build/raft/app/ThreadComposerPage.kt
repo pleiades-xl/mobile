@@ -20,6 +20,9 @@ import build.raft.designsystem.components.RaftEmbeddedControls
 import build.raft.designsystem.components.RaftComposerAttachment
 import build.raft.designsystem.components.RaftComposerAttachmentFile
 import build.raft.designsystem.components.RaftComposerAttachmentGap
+import build.raft.designsystem.components.RaftComposerAttachmentTileSize
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import build.raft.designsystem.components.RaftComposerAttachmentImage
 import build.raft.designsystem.components.RaftComposerAttachmentRemove
 import build.raft.designsystem.components.RaftComposerAttachmentRemoveOverhang
@@ -4491,12 +4494,16 @@ internal fun ComposerAttachmentTray(
     onEvent: (action: String, attachmentId: String) -> Unit
 ) {
     // raft-ui `ComposerAttachments` (`flex-wrap gap-2 pt-1.5 pe-1.5`): the top and end room
-    // keeps each tile's overhanging remove sticker inside the tray.
+    // keeps each tile's overhanging remove sticker inside the tray. Self-build: on a phone a file
+    // tile fills a row, so the tray stops at two and a half rows and scrolls; it no longer pushes
+    // the text field off the screen.
     RaftDesignSystemTheme {
         Column(
             modifier =
                 Modifier
                     .fillMaxWidth()
+                    .heightIn(max = ComposerAttachmentTrayMaxHeight)
+                    .verticalScroll(rememberScrollState())
                     .padding(top = RaftComposerAttachmentRemoveOverhang, end = RaftComposerAttachmentRemoveOverhang),
             verticalArrangement = Arrangement.spacedBy(RaftComposerAttachmentGap)
         ) {
@@ -4520,6 +4527,9 @@ internal fun ComposerAttachmentTray(
         }
     }
 }
+
+private val ComposerAttachmentTrayMaxHeight =
+    RaftComposerAttachmentRemoveOverhang + RaftComposerAttachmentTileSize * 2.5f + RaftComposerAttachmentGap * 2
 
 /**
  * One tile of the tray on raft-ui `ComposerAttachment` (web MessageInput `SortableAttachmentChip`):
