@@ -2,7 +2,9 @@ package build.raft.app
 
 import build.raft.app.data.RaftClientConfigAppHosts
 import build.raft.app.data.RaftSharedKeyValueStoreProvider
+import build.raft.app.data.KeyValueChatLayoutPreferenceStore
 import build.raft.app.data.SharedApiEnvironmentStore
+import build.raft.app.data.raftSharedPreferenceStore
 import build.raft.app.model.ConversationKind
 import build.raft.app.network.raftProcessIsForeground
 import kotlin.time.Clock
@@ -316,6 +318,12 @@ object RaftMessageLinkIngress {
             route.surfaceKind != RaftThreadSurfaceKind.ReplyThread && route.timelineChannelId == link.channelId
         }
     }
+
+    /** Self-build: the "Foreground message banners" setting, which shows the app's own banner. */
+    fun foregroundBannersEnabled(): Boolean =
+        runCatching {
+            KeyValueChatLayoutPreferenceStore(raftSharedPreferenceStore()).readForegroundMessageBannersEnabledSync()
+        }.getOrDefault(false)
 
     /** Whether [url] is a message link the app takes, without queueing it. */
     fun isMessageLink(url: String, configuredWebUrl: String? = null): Boolean =
