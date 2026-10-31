@@ -179,9 +179,11 @@ internal interface RaftPushRegistrationApi {
 internal class RaftPushRegistrationNetworkApi(
     private val networkClient: RaftNetworkClient
 ) : RaftPushRegistrationApi {
+    suspend fun relay(payloadJson: String) = RaftPushRelay.subscribe(networkClient, payloadJson)
+
     override suspend fun upsert(payloadJson: String): HomeNetworkResponse {
         // Self-build: Raft's own APNs push cannot reach anyRaft; its Web Push through the relay can.
-        RaftPushRelay.subscribe(networkClient, payloadJson)
+        relay(payloadJson)
         return networkClient.request(
             priority = DataRequestPriority.Background,
             path = "push/registrations",
@@ -846,6 +848,8 @@ internal class RaftPushRegistrationCoordinator(
             confirmedAt != null && clockMillis() - confirmedAt in 0 until PUSH_REGISTRATION_REFRESH_INTERVAL_MILLIS
         return if (sameBinding && confirmationFresh && !forceNextUpsert) {
             infoLogger("registration_skip reason=unchanged trigger=$reason")
+            // Self-build: the push relay subscription is renewed once per launch all the same.
+            if (!RaftPushRelay.subscribed) (apiProvider() as? RaftPushRegistrationNetworkApi)?.relay(pendingPayload)
             true
         } else {
             if (sameBinding) {
