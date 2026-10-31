@@ -33,6 +33,7 @@ internal object RaftPushRelay {
     private val json = Json { ignoreUnknownKeys = true }
     private var endpoint: String? = null
     private var serverIds: List<String> = emptyList()
+    val subscribed: Boolean get() = endpoint != null
 
     suspend fun subscribe(networkClient: RaftNetworkClient, registrationJson: String) {
         runCatching {
