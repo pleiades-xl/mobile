@@ -4774,6 +4774,9 @@ private fun RaftAppShellReadyContent(
                 }
         }
         bridge.setConversationForwardGestureEnabled(false)
+        // Self-build: opened while pages cover the shell (a notification, a message link): those
+        // pages close and the shell opens it ([RaftWideHandoff]), instead of one more page per tap.
+        if (!pageVisible && RaftWideHandoff.request(launchPayload, waitForWide = false)) return
         pager.openStandaloneThreadLaunchPayload(launchPayload, navigationStoreScope)
     }
 
@@ -5311,19 +5314,19 @@ private fun RaftAppShellReadyContent(
         onSearchHandoffApplied()
     }
 
-    // Self-build (xuheng-li 2026-10-30): a conversation pushed on the narrow window handed itself
-    // over when the window went wide ([RaftWideHandoff]). Once the shell is on top and wide, show it
-    // in the detail pane; if the layout does not turn wide, push it again rather than lose it.
+    // Self-build: a conversation handed to the shell while pages covered it ([RaftWideHandoff]):
+    // pushed on the narrow window before it went wide, or opened by a notification / message link.
+    // Once the shell is on top, show it in the wide detail pane, else push it (after a moment for an
+    // unfold, so the wide layout can arrive first).
     val wideHandoff = RaftWideHandoff.pending
     LaunchedEffect(wideHandoff, pageVisible, desktopModeOnLargeScreen, readyServerId) {
         val launchPayload = wideHandoff ?: return@LaunchedEffect
         if (!pageVisible) return@LaunchedEffect
-        if (openLaunchPayloadInAdaptiveDetail(launchPayload) == null) {
-            delay(1_500)
-            pager.openStandaloneThreadLaunchPayload(launchPayload, navigationStoreScope)
-        }
-        bridge.log("app_shell_wide_handoff threadId=${launchPayload.threadId.orEmpty()}")
+        val inDetail = openLaunchPayloadInAdaptiveDetail(launchPayload) != null
+        if (!inDetail && RaftWideHandoff.waitForWide) delay(1_500)
         RaftWideHandoff.clear()
+        if (!inDetail) pager.openStandaloneThreadLaunchPayload(launchPayload, navigationStoreScope)
+        bridge.log("app_shell_handoff threadId=${launchPayload.threadId.orEmpty()} inDetail=$inDetail")
     }
 
     val handleAppShellBack by rememberUpdatedState {

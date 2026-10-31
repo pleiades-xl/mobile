@@ -4569,9 +4569,9 @@ private fun ThreadPageScreen(
             return@LaunchedEffect
         }
         val launchPayload = parsedPayload.toWireThreadLaunchPayloadOrNull() ?: return@LaunchedEffect
-        if (RaftWideHandoff.request(launchPayload)) {
+        // The page closes itself through the handoff (BasePager).
+        if (RaftWideHandoff.request(launchPayload, waitForWide = true)) {
             bridge.log("thread_wide_handoff pager=${pager.pagerId}")
-            pager.acquireModule<RouterModule>(RouterModule.MODULE_NAME).closePage()
         }
     }
     val authStore = remember(sharedStores, storeScope) { sharedStores.authStore(storeScope) }
