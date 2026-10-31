@@ -4,6 +4,7 @@ import build.raft.app.data.RaftClientConfigAppHosts
 import build.raft.app.data.RaftSharedKeyValueStoreProvider
 import build.raft.app.data.SharedApiEnvironmentStore
 import build.raft.app.model.ConversationKind
+import build.raft.app.network.raftProcessIsForeground
 import kotlin.time.Clock
 import kotlinx.atomicfu.locks.SynchronizedObject
 import kotlinx.atomicfu.locks.synchronized
@@ -296,6 +297,24 @@ object RaftMessageLinkIngress {
                 "kind=${link.routeKind.name} thread=${link.isThread} msg=${link.messageId != null}"
         )
         return true
+    }
+
+    /**
+     * Self-build: whether a relayed push's message link is for the conversation on screen, which
+     * then stays silent in the foreground (as [raftSystemNotificationTargetsVisibleConversation]
+     * does for Raft's own pushes). The link has no thread id: a thread matches by its parent
+     * message, a channel or DM by its channel.
+     */
+    fun targetsVisibleConversation(url: String): Boolean {
+        if (!raftProcessIsForeground()) return false
+        val link = parseRaftMessageLink(url, appScopeWebUrlOrNull()) ?: return false
+        val route = RaftVisibleConversationRegistry.snapshot()?.visibleRouteIdentity ?: return false
+        val parent = link.threadParentMessageId
+        return if (parent != null) {
+            route.parentKey == "${link.channelId}:$parent"
+        } else {
+            route.surfaceKind != RaftThreadSurfaceKind.ReplyThread && route.timelineChannelId == link.channelId
+        }
     }
 
     /** Whether [url] is a message link the app takes, without queueing it. */

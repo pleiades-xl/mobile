@@ -591,11 +591,12 @@ final class RaftIosAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        // Self-build: a push from the anyRaft relay (a Raft Web Push, carrying only the message link)
-        // shows in the background only; in the app the realtime banners already cover it.
-        if notification.request.content.userInfo["url"] is String,
+        // Self-build: a push from the anyRaft relay (a Raft Web Push) carries only its message link;
+        // like Raft's own pushes it shows unless it is for the conversation on screen.
+        if let url = notification.request.content.userInfo["url"] as? String,
            notification.request.content.userInfo["serverId"] == nil {
-            completionHandler([])
+            let onScreen = RaftMessageLinkIngress.shared.targetsVisibleConversation(url: url)
+            completionHandler(onScreen ? [] : [.banner, .list, .sound])
             return
         }
         if RaftIosPushHost.targetsVisibleConversation(userInfo: notification.request.content.userInfo) {
