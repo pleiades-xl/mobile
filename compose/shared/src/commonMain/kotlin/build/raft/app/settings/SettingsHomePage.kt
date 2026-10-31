@@ -209,6 +209,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -3435,6 +3436,21 @@ private fun RaftAppShellReadyContent(
             AppShellSearchHandoffTarget.SearchTab -> openSearchTab(source = source)
             AppShellSearchHandoffTarget.RailInlineSearch -> railInlineSecondaryDestination = AppShellRailSearchKey
         }
+    }
+
+    // Self-build (xuheng-li 2026-10-30): a conversation pushed on the narrow window handed itself
+    // over when the window went wide ([RaftWideHandoff]). Once the shell is on top and wide, show it
+    // in the detail pane; if the layout does not turn wide, push it again rather than lose it.
+    val wideHandoff = RaftWideHandoff.pending
+    LaunchedEffect(wideHandoff, pageVisible, desktopModeOnLargeScreen, readyServerId) {
+        val launchPayload = wideHandoff ?: return@LaunchedEffect
+        if (!pageVisible) return@LaunchedEffect
+        if (openLaunchPayloadInAdaptiveDetail(launchPayload) == null) {
+            delay(1_500)
+            pager.openStandaloneThreadLaunchPayload(launchPayload, navigationStoreScope)
+        }
+        bridge.log("app_shell_wide_handoff threadId=${launchPayload.threadId.orEmpty()}")
+        RaftWideHandoff.clear()
     }
 
     val handleAppShellBackState = rememberUpdatedState {
