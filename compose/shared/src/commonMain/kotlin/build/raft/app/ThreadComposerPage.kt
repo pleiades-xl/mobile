@@ -20,9 +20,10 @@ import build.raft.designsystem.components.RaftEmbeddedControls
 import build.raft.designsystem.components.RaftComposerAttachment
 import build.raft.designsystem.components.RaftComposerAttachmentFile
 import build.raft.designsystem.components.RaftComposerAttachmentGap
-import build.raft.designsystem.components.RaftComposerAttachmentTileSize
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.horizontalScroll
 import build.raft.designsystem.components.RaftComposerAttachmentImage
 import build.raft.designsystem.components.RaftComposerAttachmentRemove
 import build.raft.designsystem.components.RaftComposerAttachmentRemoveOverhang
@@ -4494,42 +4495,48 @@ internal fun ComposerAttachmentTray(
     onEvent: (action: String, attachmentId: String) -> Unit
 ) {
     // raft-ui `ComposerAttachments` (`flex-wrap gap-2 pt-1.5 pe-1.5`): the top and end room
-    // keeps each tile's overhanging remove sticker inside the tray. Self-build: on a phone a file
-    // tile fills a row, so the tray stops at two and a half rows and scrolls; it no longer pushes
-    // the text field off the screen.
+    // keeps each tile's overhanging remove sticker inside the tray. Self-build (xuheng-li): one row
+    // that scrolls sideways, with a thin indicator when it overflows, so any number of files keeps
+    // the text field on the screen.
     RaftDesignSystemTheme {
-        Column(
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = ComposerAttachmentTrayMaxHeight)
-                    .verticalScroll(rememberScrollState())
-                    .padding(top = RaftComposerAttachmentRemoveOverhang, end = RaftComposerAttachmentRemoveOverhang),
-            verticalArrangement = Arrangement.spacedBy(RaftComposerAttachmentGap)
-        ) {
-            composerAttachmentRows(attachments).forEach { rowAttachments ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(RaftComposerAttachmentGap)
-                ) {
-                    rowAttachments.forEach { attachment ->
-                        ComposerAttachmentPreviewChip(
-                            attachment = attachment,
-                            enabled = enabled,
-                            previewEnabled = previewEnabled,
-                            onPreview = { onEvent("previewAttachment", attachment.id) },
-                            onRemove = { onEvent("removeAttachment", attachment.id) },
-                            onRetry = { onEvent("retryAttachments", attachment.id) }
-                        )
-                    }
+        val scroll = rememberScrollState()
+        Column(Modifier.fillMaxWidth()) {
+            Row(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(scroll)
+                        .padding(top = RaftComposerAttachmentRemoveOverhang, end = RaftComposerAttachmentRemoveOverhang),
+                horizontalArrangement = Arrangement.spacedBy(RaftComposerAttachmentGap)
+            ) {
+                attachments.forEach { attachment ->
+                    ComposerAttachmentPreviewChip(
+                        attachment = attachment,
+                        enabled = enabled,
+                        previewEnabled = previewEnabled,
+                        onPreview = { onEvent("previewAttachment", attachment.id) },
+                        onRemove = { onEvent("removeAttachment", attachment.id) },
+                        onRetry = { onEvent("retryAttachments", attachment.id) }
+                    )
                 }
             }
+            if (scroll.maxValue > 0) ComposerAttachmentScrollIndicator(scroll)
         }
     }
 }
 
-private val ComposerAttachmentTrayMaxHeight =
-    RaftComposerAttachmentRemoveOverhang + RaftComposerAttachmentTileSize * 2.5f + RaftComposerAttachmentGap * 2
+/** Where the tray's row is scrolled to: a thin track with a thumb the size of the visible part. */
+@Composable
+private fun ComposerAttachmentScrollIndicator(scroll: ScrollState) {
+    BoxWithConstraints(Modifier.fillMaxWidth().padding(top = 4.dp).height(3.dp)) {
+        val viewport = scroll.viewportSize.toFloat()
+        val thumb = maxWidth * (viewport / (viewport + scroll.maxValue))
+        val offsetX = (maxWidth - thumb) * (scroll.value.toFloat() / scroll.maxValue)
+        val shape = RoundedCornerShape(2.dp)
+        Box(Modifier.fillMaxSize().background(RaftColor.TextMutedGray.copy(alpha = 0.2f), shape))
+        Box(Modifier.offset(x = offsetX).width(thumb).fillMaxHeight().background(RaftColor.TextMutedGray, shape))
+    }
+}
 
 /**
  * One tile of the tray on raft-ui `ComposerAttachment` (web MessageInput `SortableAttachmentChip`):
