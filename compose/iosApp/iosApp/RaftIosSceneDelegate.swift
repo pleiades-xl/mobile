@@ -254,8 +254,21 @@ extension UIColor {
 enum RaftIosMessageLinkOpen {
     static func accept(_ url: String, source: String) -> Bool {
         let accepted = RaftMessageLinkIngress.shared.accept(url: url, source: source, configuredWebUrl: nil)
-        if accepted { DispatchQueue.main.async(execute: popToShell) }
+        if accepted { DispatchQueue.main.async(execute: popToShellWhenActive) }
         return accepted
+    }
+
+    /// A link that brings the app back from the background arrives before the app is active, and
+    /// UIKit drops a navigation change made then: the pages close once the app is active.
+    private static func popToShellWhenActive() {
+        guard UIApplication.shared.applicationState != .active else { return popToShell() }
+        var observer: NSObjectProtocol?
+        observer = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { _ in
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            popToShell()
+        }
     }
 
     private static func popToShell() {
