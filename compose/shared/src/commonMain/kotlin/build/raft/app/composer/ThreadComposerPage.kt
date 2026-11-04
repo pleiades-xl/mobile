@@ -75,6 +75,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -5053,7 +5055,7 @@ internal fun ComposerAttachmentTray(
     // raft-ui `ComposerAttachments` (`gap-2 pt-1.5 pe-1.5`): the top and end room keeps each
     // tile's overhanging remove sticker inside the tray. One row that scrolls sideways (#4067): on
     // a phone a file tile fills a wrapped row, and a few of them pushed the text field off the
-    // screen. The tile cut off at the edge shows there is more.
+    // screen. Self-build: a thin indicator shows where the row is scrolled to when it overflows.
     RaftDesignSystemTheme {
         // web MessageInput `SortableAttachment` (dnd-kit, horizontal): the tiles reorder by drag.
         // On a touch screen a 500ms hold lifts a tile (raft-ui touch-drag), so a sideways swipe
@@ -5076,56 +5078,76 @@ internal fun ComposerAttachmentTray(
         val canReorder = reorderEnabled && enabled && attachments.size > 1
         // The drag's order; a tile the state hasn't synced yet (added this frame) shows at its end.
         val shown = reorderState.order.filter { it in byId } + ids.filterNot { it in reorderState.order }
-        Row(
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .raftReorderableViewport(reorderState, scrollState)
-                    .horizontalScroll(scrollState)
-                    .padding(top = RaftComposerAttachmentRemoveOverhang, end = RaftComposerAttachmentRemoveOverhang),
-            horizontalArrangement = Arrangement.spacedBy(RaftComposerAttachmentGap)
-        ) {
-            shown.forEach { id ->
-                val attachment = byId.getValue(id)
-                key(id) {
-                    ComposerAttachmentPreviewChip(
-                        attachment = attachment,
-                        enabled = enabled,
-                        previewEnabled = previewEnabled,
-                        modifier =
-                            Modifier
-                                .testTag(ComposerAttachmentTileTagPrefix + id)
-                                .raftReorderableItem(
-                                    state = reorderState,
-                                    key = id,
-                                    onOrderChange = { commit(it) },
-                                    enabled = canReorder,
-                                    liftedRadius = RaftRadius.Control,
-                                ),
-                        // A screen reader focuses the tile (the remove sticker is its own control):
-                        // Move left / Move right sit there. Toward the start / the end: left /
-                        // right unless right-to-left.
-                        tileModifier =
-                            if (canReorder) {
+        Column(Modifier.fillMaxWidth()) {
+            Row(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .raftReorderableViewport(reorderState, scrollState)
+                        .horizontalScroll(scrollState)
+                        .padding(top = RaftComposerAttachmentRemoveOverhang, end = RaftComposerAttachmentRemoveOverhang),
+                horizontalArrangement = Arrangement.spacedBy(RaftComposerAttachmentGap)
+            ) {
+                shown.forEach { id ->
+                    val attachment = byId.getValue(id)
+                    key(id) {
+                        ComposerAttachmentPreviewChip(
+                            attachment = attachment,
+                            enabled = enabled,
+                            previewEnabled = previewEnabled,
+                            modifier =
                                 Modifier
-                                    .semantics(mergeDescendants = true) {}
-                                    .raftReorderableActions(
+                                    .testTag(ComposerAttachmentTileTagPrefix + id)
+                                    .raftReorderableItem(
                                         state = reorderState,
                                         key = id,
                                         onOrderChange = { commit(it) },
-                                        moveUpLabel = if (rtl) moveRight else moveLeft,
-                                        moveDownLabel = if (rtl) moveLeft else moveRight,
-                                    )
-                            } else {
-                                Modifier
-                            },
-                        onPreview = { onEvent("previewAttachment", attachment.id) },
-                        onRemove = { onEvent("removeAttachment", attachment.id) },
-                        onRetry = { onEvent("retryAttachments", attachment.id) }
-                    )
+                                        enabled = canReorder,
+                                        liftedRadius = RaftRadius.Control,
+                                    ),
+                            // A screen reader focuses the tile (the remove sticker is its own control):
+                            // Move left / Move right sit there. Toward the start / the end: left /
+                            // right unless right-to-left.
+                            tileModifier =
+                                if (canReorder) {
+                                    Modifier
+                                        .semantics(mergeDescendants = true) {}
+                                        .raftReorderableActions(
+                                            state = reorderState,
+                                            key = id,
+                                            onOrderChange = { commit(it) },
+                                            moveUpLabel = if (rtl) moveRight else moveLeft,
+                                            moveDownLabel = if (rtl) moveLeft else moveRight,
+                                        )
+                                } else {
+                                    Modifier
+                                },
+                            onPreview = { onEvent("previewAttachment", attachment.id) },
+                            onRemove = { onEvent("removeAttachment", attachment.id) },
+                            onRetry = { onEvent("retryAttachments", attachment.id) }
+                        )
+                    }
                 }
             }
+            // maxValue is Int.MAX_VALUE until the row is measured: no indicator for that frame.
+            if (scrollState.viewportSize > 0 && scrollState.maxValue in 1 until Int.MAX_VALUE) {
+                ComposerAttachmentScrollIndicator(scrollState)
+            }
         }
+    }
+}
+
+
+/** Where the tray's row is scrolled to: a thin track with a thumb the size of the visible part. */
+@Composable
+private fun ComposerAttachmentScrollIndicator(scroll: ScrollState) {
+    BoxWithConstraints(Modifier.fillMaxWidth().padding(top = 4.dp).height(3.dp)) {
+        val viewport = scroll.viewportSize.toFloat()
+        val thumb = maxWidth * (viewport / (viewport + scroll.maxValue))
+        val offsetX = (maxWidth - thumb) * (scroll.value.toFloat() / scroll.maxValue)
+        val shape = RoundedCornerShape(2.dp)
+        Box(Modifier.fillMaxSize().background(RaftColor.TextMutedGray.copy(alpha = 0.2f), shape))
+        Box(Modifier.offset(x = offsetX).width(thumb).fillMaxHeight().background(RaftColor.TextMutedGray, shape))
     }
 }
 
