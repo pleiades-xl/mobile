@@ -156,6 +156,7 @@ import build.raft.app.model.TaskDeleted
 import build.raft.app.model.ThreadFollowersUpdated
 import build.raft.app.model.TaskSummary
 import build.raft.app.model.TaskUpdated
+import build.raft.app.network.raftProcessIsForeground
 import build.raft.app.network.RaftRequestTimeoutException
 import build.raft.app.network.sync.ProcessDiagnosticFeatureFlagOverrides
 import build.raft.app.data.currentFeatureFlagClientContext
@@ -751,6 +752,10 @@ private fun ThreadPageScreen(
             return@LaunchedEffect
         }
         if (!sawNarrowPane || !AppShellChildTabRegistry.hasEntries()) return@LaunchedEffect
+        // Going to the background, iOS lays the window out at other sizes for its app-switcher
+        // snapshots: that is not an unfold, and a handoff then replaced the conversation a
+        // notification opened on the way back.
+        if (!raftProcessIsForeground()) return@LaunchedEffect
         if (!KeyValueChatLayoutPreferenceStore(raftSharedPreferenceStore()).readDesktopModeOnLargeScreenSync()) {
             return@LaunchedEffect
         }
