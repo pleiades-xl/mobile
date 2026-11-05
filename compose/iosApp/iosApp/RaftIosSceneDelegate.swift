@@ -352,11 +352,15 @@ enum RaftLogShare {
                 if (try? files.copyItem(at: file, to: copy)) != nil { copies.append(copy) }
             }
         }
-        let window = UIApplication.shared.connectedScenes
-            .compactMap { ($0 as? UIWindowScene)?.keyWindow }
-            .first
-        var presenter = window?.rootViewController
+        // iPhone Duo has a scene per screen: present on the one in use, not the folded-away one.
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+        var presenter = scene?.keyWindow?.rootViewController
         while let next = presenter?.presentedViewController { presenter = next }
+        RaftIosDiagnosticsRecordCriticalSynchronously(
+            "RaftShareLogs",
+            "share_logs_present files=\(copies.count) presenter=\(presenter.map { String(describing: type(of: $0)) } ?? "none")"
+        )
         guard !copies.isEmpty, let presenter, !(presenter is UIActivityViewController) else { return }
         let sheet = UIActivityViewController(activityItems: copies, applicationActivities: nil)
         sheet.popoverPresentationController?.sourceView = presenter.view
