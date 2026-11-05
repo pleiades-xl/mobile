@@ -47,6 +47,11 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import build.raft.app.compat.json.JSONObject
 import build.raft.app.compat.pager.Pager
 import build.raft.designsystem.components.RaftUnreadCount
@@ -676,7 +681,9 @@ private fun RaftSideDock(
                     header()
                     bottomItems
                         .filter { RaftAppDestination.fromId(it.key)?.route != RaftNavRoute.Menu }
-                        .forEach { RaftNavigationRailTabItem(item = it, onSelect = onBottomItemSelect) }
+                        .forEach {
+                            RaftNavigationRailTabItem(item = it, onSelect = onBottomItemSelect, modifier = Modifier.raftShareLogsOnLongPress())
+                        }
                     seam()
                     items
                         .filter { it.key != AppShellRailSearchKey && RaftAppDestination.fromId(it.key)?.route != RaftNavRoute.Page }
@@ -689,6 +696,27 @@ private fun RaftSideDock(
         }
     }
 }
+
+/**
+ * Self-build: a long press shares the diagnostics log files (iOS host, tag RaftShareLogs). Watched
+ * before the item's own click, which then does not fire.
+ */
+private fun Modifier.raftShareLogsOnLongPress(): Modifier =
+    pointerInput(Unit) {
+        awaitEachGesture {
+            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            val released =
+                withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+                    waitForUpOrCancellation(PointerEventPass.Initial)
+                }
+            if (released != null) return@awaitEachGesture
+            raftLogInfo("RaftShareLogs", "share_logs_request source=dock_settings")
+            do {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                event.changes.forEach { it.consume() }
+            } while (event.changes.any { it.pressed })
+        }
+    }
 
 @Composable
 private fun RaftSideDockAction(action: RaftSideAction) {

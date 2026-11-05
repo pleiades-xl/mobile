@@ -298,9 +298,9 @@ enum RaftIosOpenURL {
     }
 }
 
-/// Self-build (xuheng-li 2026-10-28): shake the phone, or long-press the server button, to share
-/// the app's diagnostics log files, the newest launches in full (the Settings export keeps only
-/// the last ~120 KB).
+/// Self-build (xuheng-li 2026-10-28): shake the phone, or long-press Settings in the side dock, to
+/// share the app's diagnostics log files, the newest launches in full (the Settings export keeps
+/// only the last ~120 KB).
 ///
 /// iOS hands the shake gesture to the first responder only, which Raft's views never pass on (and
 /// with nothing focused there is none), so the accelerometer detects the shake itself: three
@@ -342,7 +342,7 @@ enum RaftLogShare {
         let launches = ((try? files.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [])
             .filter { $0.lastPathComponent.hasPrefix("launch-") }
             .sorted { $0.lastPathComponent > $1.lastPathComponent }
-            .prefix(2)
+            .prefix(3)
         let out = files.temporaryDirectory.appendingPathComponent("raft-logs-\(Int(Date().timeIntervalSince1970))", isDirectory: true)
         try? files.createDirectory(at: out, withIntermediateDirectories: true)
         var copies: [URL] = []
