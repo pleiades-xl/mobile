@@ -62,6 +62,7 @@ import build.raft.designsystem.components.RaftMobileNavDefaults
 import build.raft.designsystem.components.RaftMobileNavItem
 import build.raft.designsystem.components.RaftAppRailDefaults
 import build.raft.designsystem.components.RaftAppRailItem
+import build.raft.designsystem.components.RaftAppRailToggleItem
 import build.raft.designsystem.components.RaftAppRail
 import build.raft.designsystem.components.RaftConversationKindIcon
 import build.raft.designsystem.components.RaftConversationKindGlyph
@@ -562,7 +563,7 @@ internal fun RaftNavigationRailTabBar(
     if (header != null) {
         val docked =
             raftSideColumnDock { controls ->
-                RaftSideDock(controls, items, onSelect, bottomItems, select, header, bottomSafeArea)
+                RaftSideDock(controls, items, onSelect, bottomItems, select, header, bottomSafeArea, sidebarToggle)
             }
         if (docked) return
     }
@@ -639,7 +640,8 @@ private fun raftRailSidebarToggleItem(toggle: RaftRailSidebarToggle): RaftAppRai
 
 /**
  * The rail as the side column (self-build): stacked against the bottom, away from the camera at
- * the top. Top to bottom: the server, Settings, the destinations, Search, then Back at the foot.
+ * the top. Top to bottom: the server, Settings, the destinations, the sidebar toggle (where a list
+ * column can be hidden), Search, then Back at the foot.
  * Help, Computers, Apps and the bell are left out; pages keep their own buttons in their headers.
  */
 @Composable
@@ -651,7 +653,9 @@ private fun RaftSideDock(
     onBottomItemSelect: (String) -> Unit,
     header: @Composable () -> Unit,
     bottomSafeArea: Dp,
+    sidebarToggle: RaftRailSidebarToggle?,
 ) {
+    val toggleItem = sidebarToggle?.let { raftRailSidebarToggleItem(it) }
     RaftDesignSystemTheme {
         val colors = RaftTheme.colors
         val seam: @Composable () -> Unit = {
@@ -686,6 +690,15 @@ private fun RaftSideDock(
                         .filter { it.key != AppShellRailSearchKey && RaftAppDestination.fromId(it.key)?.route != RaftNavRoute.Page }
                         .forEach { RaftNavigationRailTabItem(item = it, onSelect = onSelect) }
                     seam()
+                    toggleItem?.let {
+                        RaftAppRailToggleItem(
+                            label = it.label,
+                            checked = it.checked,
+                            onCheckedChange = it.onCheckedChange,
+                            icon = it.icon,
+                            shortcutLabel = it.shortcutLabel,
+                        )
+                    }
                     items.firstOrNull { it.key == AppShellRailSearchKey }?.let { RaftNavigationRailTabItem(item = it, onSelect = onSelect) }
                     controls.primary.forEach { RaftSideDockAction(it) }
                 }
