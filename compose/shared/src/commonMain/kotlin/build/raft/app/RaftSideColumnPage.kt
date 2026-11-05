@@ -36,6 +36,7 @@ import build.raft.designsystem.components.RaftSideActionColumn
 import build.raft.designsystem.components.RaftSideActionColumnDefaults
 import build.raft.designsystem.components.RaftSideActionColumnSide
 import build.raft.designsystem.components.RaftSideColumnKeepOut
+import build.raft.designsystem.gesture.raftKeepsEdgeTouches
 
 // iPhone Duo (raft-design #859, page-structure "Foldable phones" and "Frame insets"): on the outer
 // screen, and on the inner screen held sideways, the system keeps a column on the camera's side.
@@ -200,7 +201,10 @@ internal fun RaftSideColumnScaffold(
                 .absolutePadding(left = left, right = right)
                 // The column is the system's safe area on its side: what the page pads for it, the
                 // column already keeps (the rest of a wider safe area still pads).
-                .consumeWindowInsets(PaddingValues.Absolute(left = left, right = right)),
+                .consumeWindowInsets(PaddingValues.Absolute(left = left, right = right))
+                // Self-build: with the rail docked on the right, content reaches the left edge, where
+                // the edge back gesture would hold its taps (Back is in the dock).
+                .then(if (column && onRight && host.dock != null) Modifier.raftKeepsEdgeTouches() else Modifier),
         ) {
             // The column is a frame inset (page-structure "Frame insets"): menus keep 8dp from it and
             // tooltips flip away from it. Physical, never mirrored. The camera sits inside the column's
