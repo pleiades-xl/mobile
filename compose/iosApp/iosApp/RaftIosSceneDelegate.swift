@@ -71,7 +71,6 @@ final class RaftIosSceneDelegate: UIResponder, UIWindowSceneDelegate {
             window.overrideUserInterfaceStyle = UIUserInterfaceStyle(
                 rawValue: Int(RaftAppAppearanceRuntime.shared.hostStyleCode)
             ) ?? .unspecified
-            RaftShakeDetector.shared.start()
             self.window = window
             RaftIosAppearanceHost.attach()
             window.makeKeyAndVisible()
