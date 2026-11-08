@@ -686,9 +686,14 @@ enum RaftImagePasteHook {
     private static func hookFirstResponder() {
         firstResponder = nil
         UIApplication.shared.sendAction(#selector(UIResponder.raftCaptureFirstResponder), to: nil, from: nil, for: nil)
-        guard let responder = firstResponder, !(responder is UITextView), !(responder is UITextField) else { return }
+        guard let responder = firstResponder else {
+            RaftIosDiagnosticsRecordCriticalSynchronously("RaftImagePaste", "no first responder")
+            return
+        }
         let cls: AnyClass = type(of: responder)
         guard hooked.insert(ObjectIdentifier(cls)).inserted else { return }
+        // The composer's editor is a native text view (Compose's iOS text input); hooking its class also
+        // covers other fields of that class, where an image-only paste was a no-op anyway.
         RaftIosDiagnosticsRecordCriticalSynchronously("RaftImagePaste", "hook class=\(NSStringFromClass(cls))")
 
         let canSel = #selector(UIResponder.canPerformAction(_:withSender:))
