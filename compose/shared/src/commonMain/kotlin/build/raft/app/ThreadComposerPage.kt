@@ -3334,6 +3334,26 @@ internal fun ThreadComposerContentLeaf(
                                         contentDescription = stringResource(Res.string.composer_attach_file),
                                         onClick = { onEvent("attachFile", null, null, null) }
                                     )
+                                    // Self-build (runzhou-tao 2026-11-08): phones have no paste shortcut for an
+                                    // image on the clipboard (a screenshot's "Copy and Delete"); while there is
+                                    // one, this button attaches it, as desktop's paste does.
+                                    if (!raftPlatformHasFinePointer()) {
+                                        var clipboardImage by remember { mutableStateOf(false) }
+                                        LaunchedEffect(Unit) {
+                                            while (true) {
+                                                clipboardImage = raftPlatformClipboardHasAttachments()
+                                                delay(1_500)
+                                            }
+                                        }
+                                        if (clipboardImage) {
+                                            ComposerIconButton(
+                                                icon = RaftLucideIconName.Clipboard,
+                                                enabled = composerEnabled,
+                                                contentDescription = "Paste image",
+                                                onClick = { onEvent(ThreadComposerPasteAttachmentsAction, null, null, null) }
+                                            )
+                                        }
+                                    }
                                 }
                             }
                             Row(

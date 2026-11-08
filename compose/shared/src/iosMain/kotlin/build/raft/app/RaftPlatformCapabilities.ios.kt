@@ -10,6 +10,17 @@ import platform.CoreFoundation.kCFStringEncodingUTF8
 import platform.Foundation.NSNumber
 import platform.Foundation.NSProcessInfo
 import platform.Foundation.valueForKey
+import platform.UIKit.UIApplication
+import platform.UIKit.UIImage
+import platform.UIKit.UIImagePNGRepresentation
+import platform.UIKit.UIPasteboard
+import platform.Foundation.NSCachesDirectory
+import platform.Foundation.NSFileManager
+import platform.Foundation.NSSearchPathForDirectoriesInDomains
+import platform.Foundation.NSURL
+import platform.Foundation.NSUUID
+import platform.Foundation.NSUserDomainMask
+import platform.Foundation.writeToFile
 import androidx.lifecycle.Lifecycle
 import build.raft.app.components.RaftPullToRefreshStyle
 import build.raft.app.data.PlatformFile
@@ -64,9 +75,34 @@ internal actual fun raftPlatformShortcutsUseCommand(): Boolean = true
 
 internal actual fun raftPlatformSupportsInAppBrowser(): Boolean = true
 
-internal actual fun raftPlatformClipboardHasAttachments(): Boolean = false
+// Self-build (runzhou-tao 2026-11-08): an image on the clipboard (a screenshot's "Copy and Delete")
+// pastes into the composer, as on desktop. Checking does not read the image, so no paste prompt.
+internal actual fun raftPlatformClipboardHasAttachments(): Boolean = UIPasteboard.generalPasteboard.hasImages
 
-internal actual fun raftPlatformReadClipboardAttachments(): List<PlatformFile> = emptyList()
+@OptIn(ExperimentalForeignApi::class)
+internal actual fun raftPlatformReadClipboardAttachments(): List<PlatformFile> {
+    val images = UIPasteboard.generalPasteboard.images.orEmpty().filterIsInstance<UIImage>()
+    if (images.isEmpty()) return emptyList()
+    // Where the picker keeps composer attachments, so upload and compression accept the file.
+    val caches = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, true).firstOrNull() as? String
+        ?: return emptyList()
+    val directory = "$caches/Slock/PickedAttachments"
+    NSFileManager.defaultManager.createDirectoryAtPath(directory, true, null, null)
+    return images.mapNotNull { image ->
+        val data = UIImagePNGRepresentation(image) ?: return@mapNotNull null
+        val id = NSUUID().UUIDString
+        val path = "$directory/pasted-$id.png"
+        if (!data.writeToFile(path, true)) return@mapNotNull null
+        PlatformFile(
+            id = id,
+            fileName = "Pasted image.png",
+            mimeType = "image/png",
+            sizeBytes = data.length.toLong(),
+            fileRef = NSURL.fileURLWithPath(path).absoluteString,
+            source = ThreadComposerClipboardImageSource,
+        )
+    }
+}
 
 internal actual fun raftPlatformComposerMinimumBottomPaddingDp(): Float = 0f
 
