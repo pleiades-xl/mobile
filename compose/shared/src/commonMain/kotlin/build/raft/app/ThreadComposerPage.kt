@@ -51,6 +51,7 @@ import build.raft.app.model.MemberProfile
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.compositionLocalOf
@@ -3151,11 +3152,23 @@ internal fun ThreadComposerContentLeaf(
                     // IME dismiss→reopen cycle on iOS.
                     key(state.instanceId) {
                         val sourceSessionId = editorSessionId
+                        val platformClipboard = LocalClipboard.current
+                        val imagePasteClipboard = remember(platformClipboard) { RaftImagePasteClipboard(platformClipboard) }
+                        CompositionLocalProvider(LocalClipboard provides imagePasteClipboard) {
                         TextField(
                             value = fieldValue,
                             placeholder = localizedThreadComposerPlaceholder(state.placeholder),
                             autoFocus = shouldAutoFocus,
-                            onValueChange = onValueChange@ { next ->
+                            onValueChange = onValueChange@ { pasted ->
+                                // Self-build: Paste with only an image on the clipboard inserted the
+                                // marker ([RaftImagePasteClipboard]); attach the image instead.
+                                val next =
+                                    if (pasted.text.contains(RaftImagePasteMarker)) {
+                                        onEvent(ThreadComposerPasteAttachmentsAction, null, null, null)
+                                        pasted.withoutImagePasteMarker()
+                                    } else {
+                                        pasted
+                                    }
                                 if (submittedEchoFence.shouldIgnore(sourceSessionId, next)) {
                                     return@onValueChange
                                 }
@@ -3263,6 +3276,7 @@ internal fun ThreadComposerContentLeaf(
                                     onEvent(ThreadComposerPasteAttachmentsAction, null, null, null)
                                 }
                         )
+                        }
                     }
                     if (state.hookLabels.isNotEmpty()) {
                         Text(
