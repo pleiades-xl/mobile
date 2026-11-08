@@ -307,21 +307,44 @@ enum RaftIosOpenURL {
 final class RaftShakeDetector {
     static let shared = RaftShakeDetector()
     private let motion = CMMotionManager()
-    private var peaks: [TimeInterval] = []
+    private var swings: [TimeInterval] = []
+    private var lastSwing: CMAcceleration?
+    private var quietUntil: TimeInterval = 0
     private var lastShare: TimeInterval = 0
 
     func start() {
-        guard motion.isAccelerometerAvailable, !motion.isAccelerometerActive else { return }
-        motion.accelerometerUpdateInterval = 1.0 / 30.0
-        motion.startAccelerometerUpdates(to: .main) { [weak self] data, _ in
-            guard let self, let a = data?.acceleration else { return }
-            guard (a.x * a.x + a.y * a.y + a.z * a.z).squareRoot() > 1.8 else { return }
-            let now = Date().timeIntervalSince1970
-            self.peaks = self.peaks.filter { now - $0 < 0.8 } + [now]
-            guard self.peaks.count >= 3, now - self.lastShare > 3 else { return }
-            self.peaks.removeAll()
+        let center = NotificationCenter.default
+        center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.resume()
+        }
+        center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.motion.stopDeviceMotionUpdates()
+        }
+        resume()
+    }
+
+    /// Opening, unfolding or picking up the phone is not a shake (xuheng-li 2026-11-08): nothing counts for 1.5 s
+    /// after the app becomes active, and a shake is 4 hard back-and-forth swings of the hand (gravity removed) in 1 s.
+    private func resume() {
+        guard motion.isDeviceMotionAvailable, !motion.isDeviceMotionActive else { return }
+        swings.removeAll()
+        lastSwing = nil
+        quietUntil = ProcessInfo.processInfo.systemUptime + 1.5
+        motion.deviceMotionUpdateInterval = 1.0 / 50.0
+        motion.startDeviceMotionUpdates(to: .main) { [weak self] data, _ in
+            guard let self, let data, data.timestamp > self.quietUntil else { return }
+            let a = data.userAcceleration
+            let g = (a.x * a.x + a.y * a.y + a.z * a.z).squareRoot()
+            guard g > 1.0 else { return }
+            // Still the same swing until the hand pulls the other way.
+            if let b = self.lastSwing, a.x * b.x + a.y * b.y + a.z * b.z > 0 { return }
+            let now = data.timestamp
+            self.lastSwing = a
+            self.swings = self.swings.filter { now - $0 < 1 } + [now]
+            guard self.swings.count >= 4, now - self.lastShare > 3 else { return }
+            self.swings.removeAll()
             self.lastShare = now
-            RaftIosDiagnosticsRecordCriticalSynchronously("RaftShakeShare", "shake_share source=accelerometer")
+            RaftIosDiagnosticsRecordCriticalSynchronously("RaftShakeShare", String(format: "shake_share source=motion g=%.1f", g))
             RaftLogShare.confirm()
         }
     }
