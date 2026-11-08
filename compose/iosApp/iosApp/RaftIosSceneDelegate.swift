@@ -322,12 +322,35 @@ final class RaftShakeDetector {
             self.peaks.removeAll()
             self.lastShare = now
             RaftIosDiagnosticsRecordCriticalSynchronously("RaftShakeShare", "shake_share source=accelerometer")
-            RaftLogShare.present()
+            RaftLogShare.confirm()
         }
     }
 }
 
 enum RaftLogShare {
+    /// A shake asks first (xuheng-li 2026-11-08): a stray shake must not open the share sheet.
+    static func confirm() {
+        guard let presenter = topViewController(), !(presenter is UIAlertController),
+              !(presenter is UIActivityViewController) else { return }
+        let alert = UIAlertController(
+            title: "Share diagnostic logs?",
+            message: "The app's recent logs, to send to whoever is helping you.",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Share", style: .default) { _ in present() })
+        presenter.present(alert, animated: true)
+    }
+
+    /// The front view controller of the scene in use (iPhone Duo has a scene per screen).
+    static func topViewController() -> UIViewController? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+        var presenter = scene?.keyWindow?.rootViewController
+        while let next = presenter?.presentedViewController { presenter = next }
+        return presenter
+    }
+
     /// The diagnostics queue writes entries asynchronously: wait a moment so the latest ones (the
     /// taps just before the share) are in the files.
     static func present() {
@@ -351,11 +374,7 @@ enum RaftLogShare {
                 if (try? files.copyItem(at: file, to: copy)) != nil { copies.append(copy) }
             }
         }
-        // iPhone Duo has a scene per screen: present on the one in use, not the folded-away one.
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
-        var presenter = scene?.keyWindow?.rootViewController
-        while let next = presenter?.presentedViewController { presenter = next }
+        let presenter = topViewController()
         RaftIosDiagnosticsRecordCriticalSynchronously(
             "RaftShareLogs",
             "share_logs_present files=\(copies.count) presenter=\(presenter.map { String(describing: type(of: $0)) } ?? "none")"
