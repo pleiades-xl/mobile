@@ -1,5 +1,8 @@
 package build.raft.app
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.Clipboard
 import androidx.compose.ui.platform.NativeClipboard
@@ -31,4 +34,12 @@ internal fun TextFieldValue.withoutImagePasteMarker(): TextFieldValue {
     val at = text.indexOf(RaftImagePasteMarker)
     if (at < 0) return this
     return TextFieldValue(text.replace(RaftImagePasteMarker, ""), TextRange(at))
+}
+
+/**
+ * System paste requests (the keyboard's paste, the edit menu of the native editor view) that found
+ * only an image on the clipboard; the focused composer attaches it. Counted by the iOS host.
+ */
+internal object RaftImagePasteRequests {
+    var count by mutableIntStateOf(0)
 }

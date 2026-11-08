@@ -58,6 +58,7 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.referentialEqualityPolicy
 import androidx.compose.runtime.remember
@@ -3152,6 +3153,14 @@ internal fun ThreadComposerContentLeaf(
                     // IME dismiss→reopen cycle on iOS.
                     key(state.instanceId) {
                         val sourceSessionId = editorSessionId
+                        // The keyboard's paste with only an image on the clipboard ([RaftImagePasteRequests]).
+                        val imagePasteRequests = RaftImagePasteRequests.count
+                        var handledImagePaste by remember { mutableIntStateOf(imagePasteRequests) }
+                        LaunchedEffect(imagePasteRequests) {
+                            if (imagePasteRequests == handledImagePaste) return@LaunchedEffect
+                            handledImagePaste = imagePasteRequests
+                            if (focused) onEvent(ThreadComposerPasteAttachmentsAction, null, null, null)
+                        }
                         val platformClipboard = LocalClipboard.current
                         val imagePasteClipboard = remember(platformClipboard) { RaftImagePasteClipboard(platformClipboard) }
                         CompositionLocalProvider(LocalClipboard provides imagePasteClipboard) {

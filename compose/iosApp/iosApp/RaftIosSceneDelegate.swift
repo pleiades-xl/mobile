@@ -59,6 +59,7 @@ final class RaftIosSceneDelegate: UIResponder, UIWindowSceneDelegate {
                 rawValue: Int(RaftAppAppearanceRuntime.shared.hostStyleCode)
             ) ?? .unspecified
             RaftShakeDetector.shared.start()
+            RaftImagePasteHook.install()
             self.window = window
             RaftIosAppearanceHost.attach()
             window.makeKeyAndVisible()
@@ -661,4 +662,67 @@ final class RaftVoiceSession {
 struct RaftVoiceError: LocalizedError {
     let errorDescription: String?
     init(_ message: String) { errorDescription = message }
+}
+
+/// Self-build (runzhou-tao, xuheng-li 2026-11-08): the keyboard's "Paste from …" (and any other
+/// system paste) into the composer with only an image on the clipboard attaches the image. The
+/// editor view is Compose's, which pastes text only; its class gets `paste:` hooked the first time
+/// it brings up the keyboard.
+enum RaftImagePasteHook {
+    private static var hooked = Set<ObjectIdentifier>()
+    fileprivate static weak var firstResponder: UIResponder?
+
+    static func install() {
+        NotificationCenter.default.addObserver(
+            forName: UIResponder.keyboardWillShowNotification, object: nil, queue: .main
+        ) { _ in hookFirstResponder() }
+    }
+
+    private static var imageOnly: Bool {
+        let board = UIPasteboard.general
+        return board.hasImages && !board.hasStrings
+    }
+
+    private static func hookFirstResponder() {
+        firstResponder = nil
+        UIApplication.shared.sendAction(#selector(UIResponder.raftCaptureFirstResponder), to: nil, from: nil, for: nil)
+        guard let responder = firstResponder, !(responder is UITextView), !(responder is UITextField) else { return }
+        let cls: AnyClass = type(of: responder)
+        guard hooked.insert(ObjectIdentifier(cls)).inserted else { return }
+        RaftIosDiagnosticsRecordCriticalSynchronously("RaftImagePaste", "hook class=\(NSStringFromClass(cls))")
+
+        let canSel = #selector(UIResponder.canPerformAction(_:withSender:))
+        if let method = class_getInstanceMethod(cls, canSel) {
+            typealias Can = @convention(c) (AnyObject, Selector, Selector, Any?) -> Bool
+            let original = unsafeBitCast(method_getImplementation(method), to: Can.self)
+            let replacement: @convention(block) (AnyObject, Selector, Any?) -> Bool = { view, action, sender in
+                if action == #selector(UIResponderStandardEditActions.paste(_:)) && imageOnly { return true }
+                return original(view, canSel, action, sender)
+            }
+            let imp = imp_implementationWithBlock(replacement)
+            if !class_addMethod(cls, canSel, imp, method_getTypeEncoding(method)) { method_setImplementation(method, imp) }
+        }
+
+        let pasteSel = #selector(UIResponderStandardEditActions.paste(_:))
+        typealias Paste = @convention(c) (AnyObject, Selector, Any?) -> Void
+        let original = class_getInstanceMethod(cls, pasteSel).map { unsafeBitCast(method_getImplementation($0), to: Paste.self) }
+        let replacement: @convention(block) (AnyObject, Any?) -> Void = { view, sender in
+            if imageOnly {
+                RaftIosDiagnosticsRecordCriticalSynchronously("RaftImagePaste", "system_paste image")
+                RaftImagePasteBridgeKt.raftRequestImagePaste()
+                return
+            }
+            original?(view, pasteSel, sender)
+        }
+        let imp = imp_implementationWithBlock(replacement)
+        if let method = class_getInstanceMethod(cls, pasteSel) {
+            if !class_addMethod(cls, pasteSel, imp, method_getTypeEncoding(method)) { method_setImplementation(method, imp) }
+        } else {
+            class_addMethod(cls, pasteSel, imp, "v@:@")
+        }
+    }
+}
+
+extension UIResponder {
+    @objc fileprivate func raftCaptureFirstResponder() { RaftImagePasteHook.firstResponder = self }
 }
