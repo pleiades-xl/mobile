@@ -565,6 +565,8 @@ final class RaftIosAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
         )
         RaftIosNetworkPathMonitor.shared.start()
         RaftIosImagePaste.install()
+        // Self-build: here, not in the scene delegate, whose window path does not run (SwiftUI owns the window).
+        RaftShakeDetector.shared.start()
         UNUserNotificationCenter.current().delegate = self
         RaftIosPushHost.registerNotificationCategories()
         // osPermission rides the push registration; a change in Settings re-registers on return.
