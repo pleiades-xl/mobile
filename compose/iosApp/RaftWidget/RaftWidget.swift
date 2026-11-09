@@ -42,6 +42,7 @@ struct Row: Codable, Hashable {
     var unread: Int
     var mention: Bool
     var url: URL?
+    var kind = "channel"
 }
 
 struct Snapshot: Codable {
@@ -53,8 +54,8 @@ struct Snapshot: Codable {
     static let sample = Snapshot(
         rows: [
             Row(title: "#general", preview: "Alice: Shipping it today", time: .now, unread: 2, mention: true),
-            Row(title: "Bob", preview: "Bob: Sounds good", time: .now, unread: 1, mention: false),
-            Row(title: "#design › New icons", preview: "Carol: Updated the set", time: .now, unread: 0, mention: false),
+            Row(title: "Bob", preview: "Bob: Sounds good", time: .now, unread: 1, mention: false, kind: "dm"),
+            Row(title: "#design › New icons", preview: "Carol: Updated the set", time: .now, unread: 0, mention: false, kind: "thread"),
         ],
         unread: 3,
         mentions: 1
@@ -171,7 +172,9 @@ enum Raft {
         if thread { title += " › " + s("parentMessagePreview") }
         if kind == "task", let n = i["taskNumber"] as? Int { title = "task #\(n) \(s("taskTitle"))" }
         let sender = thread ? s("latestActivitySenderName") : s("lastMessageSenderName")
-        let text = thread ? s("latestActivityPreview") : s("lastMessagePreview")
+        let raw = thread ? s("latestActivityPreview") : s("lastMessagePreview")
+        // Previews are markdown; show the words.
+        let text = (try? AttributedString(markdown: raw)).map { String($0.characters) } ?? raw
         var link = "raft:///s/\(slug)/\(dm ? "dm" : "channel")/\(channel)"
         if thread { link += "?thread=\(channel)%3A\(s("parentMessageId"))" }
         return Row(
@@ -180,7 +183,8 @@ enum Raft {
             time: date(thread ? s("lastActivityAt") : s("lastMessageAt")),
             unread: i["unreadCount"] as? Int ?? 0,
             mention: i["hasMention"] as? Bool ?? false,
-            url: URL(string: link)
+            url: URL(string: link),
+            kind: thread || kind == "task" ? kind : dm ? "dm" : "channel"
         )
     }
 
@@ -246,53 +250,107 @@ struct Provider: TimelineProvider {
     }
 }
 
+// MARK: Look: Raft's yellow and ink, outlined like the app's icon tiles.
+
+extension Color {
+    static let raftYellow = Color(red: 1, green: 0.831, blue: 0.251)
+    static let raftInk = Color(red: 0.078, green: 0.067, blue: 0.067)
+}
+
+/// A yellow tile with an ink outline holding [symbol]; plain grey when not [lit].
+struct Tile: View {
+    var symbol: String
+    var size: CGFloat = 26
+    var lit = true
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: size * 0.28)
+            .fill(lit ? Color.raftYellow : Color(.tertiarySystemFill))
+            .overlay(RoundedRectangle(cornerRadius: size * 0.28).strokeBorder(lit ? Color.raftInk : .clear, lineWidth: 1.5))
+            .overlay(Image(systemName: symbol).font(.system(size: size * 0.46, weight: .bold))
+                .foregroundStyle(lit ? Color.raftInk : Color.secondary))
+            .frame(width: size, height: size)
+    }
+}
+
+/// A count on yellow, outlined: unread messages, or `@` when they mention you.
+struct Badge: View {
+    var text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .heavy, design: .rounded))
+            .foregroundStyle(Color.raftInk)
+            .padding(.horizontal, 6)
+            .frame(minWidth: 20, minHeight: 18)
+            .background(Capsule().fill(Color.raftYellow))
+            .overlay(Capsule().strokeBorder(Color.raftInk, lineWidth: 1.2))
+    }
+}
+
 struct RaftWidgetView: View {
     @Environment(\.widgetFamily) var family
     var entry: Entry
 
     var body: some View {
-        Group {
-            if entry.snap.signedOut {
-                ConnectView()
-            } else if family == .systemSmall {
-                small
-            } else {
-                list(family == .systemLarge ? 7 : 3)
-            }
+        InboxView(snap: entry.snap, family: family)
+            .containerBackground(Color(.systemBackground), for: .widget)
+    }
+}
+
+struct InboxView: View {
+    var snap: Snapshot
+    var family: WidgetFamily
+
+    var body: some View {
+        if snap.signedOut {
+            ConnectView()
+        } else if family == .systemSmall {
+            small
+        } else {
+            list(family == .systemLarge ? 8 : 3)
         }
-        .containerBackground(Color(.systemBackground), for: .widget)
+    }
+
+    var header: some View {
+        HStack(spacing: 7) {
+            Tile(symbol: "bubble.left.and.bubble.right.fill", size: 22)
+            Text("Raft").font(.system(size: 15, weight: .bold, design: .rounded))
+            Spacer()
+            if snap.unread > 0 { Badge(text: "\(snap.unread) unread") }
+        }
     }
 
     var small: some View {
-        let first = entry.snap.rows.first { $0.unread > 0 }
-        return VStack(alignment: .leading, spacing: 2) {
-            Text("Raft").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            Spacer(minLength: 0)
-            Text("\(entry.snap.unread)").font(.system(size: 40, weight: .semibold)).minimumScaleFactor(0.5)
-            Text(entry.snap.mentions > 0 ? "unread · \(entry.snap.mentions) @you" : "unread").font(.caption)
-            if let first {
-                Text(first.title).font(.caption2.weight(.semibold)).lineLimit(1).padding(.top, 4)
-                Text(first.preview).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+        let unread = snap.rows.filter { $0.unread > 0 }
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Tile(symbol: "bubble.left.and.bubble.right.fill", size: 22)
+                Spacer()
+                if snap.mentions > 0 { Badge(text: "@ \(snap.mentions)") }
             }
+            Spacer(minLength: 0)
+            Text("\(snap.unread)")
+                .font(.system(size: 44, weight: .heavy, design: .rounded))
+                .minimumScaleFactor(0.5)
+                .lineLimit(1)
+            Text("unread").font(.system(size: 13, weight: .semibold, design: .rounded)).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(unread.prefix(2), id: \.self) { Text($0.title).font(.system(size: 12, weight: .semibold)).lineLimit(1) }
+            }
+            .padding(.top, 6)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .widgetURL(first?.url ?? URL(string: "raft://"))
+        .widgetURL(unread.first?.url ?? URL(string: "raft://"))
     }
 
     func list(_ count: Int) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Raft").font(.subheadline.weight(.semibold))
-                Spacer()
-                if entry.snap.unread > 0 {
-                    Text("\(entry.snap.unread) unread").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            if entry.snap.rows.isEmpty {
+        VStack(alignment: .leading, spacing: 7) {
+            header
+            if snap.rows.isEmpty {
                 Spacer()
                 Text("No conversations yet").font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity)
             }
-            ForEach(entry.snap.rows.prefix(count), id: \.self) { r in
+            ForEach(snap.rows.prefix(count), id: \.self) { r in
                 Link(destination: r.url ?? URL(string: "raft://")!) { row(r) }
             }
             Spacer(minLength: 0)
@@ -300,34 +358,39 @@ struct RaftWidgetView: View {
     }
 
     func row(_ r: Row) -> some View {
-        HStack(alignment: .center, spacing: 6) {
+        HStack(spacing: 9) {
+            Tile(symbol: symbol(r.kind), size: 28, lit: r.unread > 0)
             VStack(alignment: .leading, spacing: 1) {
-                Text(r.title).font(.subheadline.weight(r.unread > 0 ? .semibold : .regular)).lineLimit(1)
-                Text(r.preview).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(r.title).font(.system(size: 14, weight: r.unread > 0 ? .bold : .medium)).lineLimit(1)
+                Text(r.preview).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 4)
-            VStack(alignment: .trailing, spacing: 2) {
+            VStack(alignment: .trailing, spacing: 3) {
                 Text(Calendar.current.isDateInToday(r.time)
                      ? r.time.formatted(date: .omitted, time: .shortened)
                      : r.time.formatted(.dateTime.month(.abbreviated).day()))
-                    .font(.caption2).foregroundStyle(.secondary)
-                if r.unread > 0 {
-                    Text(r.mention ? "@" : "\(r.unread)")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(Color(.systemBackground))
-                        .padding(.horizontal, 6)
-                        .background(Capsule().fill(Color.primary))
-                }
+                    .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                if r.unread > 0 { Badge(text: r.mention ? "@" : "\(r.unread)") }
             }
+        }
+        .foregroundStyle(Color.primary)
+    }
+
+    func symbol(_ kind: String) -> String {
+        switch kind {
+        case "dm": "person.fill"
+        case "thread": "arrowshape.turn.up.left.fill"
+        case "task": "checklist"
+        default: "number"
         }
     }
 }
 
 struct ConnectView: View {
     var body: some View {
-        VStack(spacing: 6) {
-            Image(systemName: "bubble.left.and.bubble.right").font(.title2)
-            Text("Connect anyRaft").font(.headline)
+        VStack(spacing: 8) {
+            Tile(symbol: "bubble.left.and.bubble.right.fill", size: 36)
+            Text("Connect anyRaft").font(.system(size: 15, weight: .bold, design: .rounded))
             Text("Tap to sign in the widget").font(.caption).foregroundStyle(.secondary)
         }
         .multilineTextAlignment(.center)
@@ -392,35 +455,74 @@ struct BriefView: View {
     var entry: BriefEntry
 
     var body: some View {
-        let b = entry.brief
-        Group {
-            if b.signedOut {
-                ConnectView()
-            } else if b.missing {
-                VStack(spacing: 6) {
-                    Text("No conversation named “\(b.title)”").font(.subheadline.weight(.semibold))
-                    Text("Long-press the widget, Edit Widget, and name a channel or an agent.").font(.caption).foregroundStyle(.secondary)
-                }
-                .multilineTextAlignment(.center)
-            } else {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text(b.title).font(.caption.weight(.semibold))
-                        Spacer()
-                        Text("\(b.sender) · \(b.time.formatted(date: .omitted, time: .shortened))")
-                            .font(.caption2).foregroundStyle(.secondary)
-                    }
-                    Text((try? AttributedString(markdown: b.content, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-                         ?? AttributedString(b.content))
-                        .font(.footnote)
-                        .minimumScaleFactor(0.7)
-                    Spacer(minLength: 0)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .widgetURL(b.url)
+        BriefCard(brief: entry.brief)
+            .containerBackground(Color(.systemBackground), for: .widget)
+    }
+}
+
+/// The brief as a card: a line that is all bold is a heading, `- ` a bullet, the rest text.
+struct BriefCard: View {
+    var brief: Brief
+
+    var body: some View {
+        if brief.signedOut {
+            ConnectView()
+        } else if brief.missing {
+            VStack(spacing: 8) {
+                Tile(symbol: "text.page.fill", size: 32, lit: false)
+                Text("No conversation named “\(brief.title)”").font(.system(size: 14, weight: .bold))
+                Text("Long-press the widget, Edit Widget, and name a channel or an agent.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
+            .multilineTextAlignment(.center)
+        } else {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 7) {
+                    Tile(symbol: "sparkles", size: 22)
+                    Text(brief.title).font(.system(size: 15, weight: .bold, design: .rounded)).lineLimit(1)
+                    Spacer()
+                    Text(brief.time.formatted(date: .omitted, time: .shortened))
+                        .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                }
+                .padding(.bottom, 3)
+                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in block(line) }
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .widgetURL(brief.url)
         }
-        .containerBackground(Color(.systemBackground), for: .widget)
+    }
+
+    var lines: [String] {
+        brief.content.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    @ViewBuilder func block(_ line: String) -> some View {
+        if line.hasPrefix("**"), line.hasSuffix("**"), line.count > 4 {
+            HStack(spacing: 5) {
+                RoundedRectangle(cornerRadius: 1.5).fill(Color.raftYellow)
+                    .overlay(RoundedRectangle(cornerRadius: 1.5).strokeBorder(Color.raftInk, lineWidth: 1))
+                    .frame(width: 4, height: 12)
+                Text(line.dropFirst(2).dropLast(2)).font(.system(size: 12, weight: .heavy, design: .rounded))
+            }
+            .padding(.top, 4)
+        } else if line.hasPrefix("- ") {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Circle().fill(Color.secondary).frame(width: 4, height: 4).alignmentGuide(.firstTextBaseline) { $0[.bottom] + 3 }
+                inline(String(line.dropFirst(2)))
+            }
+            .padding(.leading, 9)
+        } else {
+            inline(line)
+        }
+    }
+
+    func inline(_ text: String) -> some View {
+        Text((try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+             ?? AttributedString(text))
+            .font(.system(size: 12.5))
+            .lineLimit(2)
+            .minimumScaleFactor(0.85)
     }
 }
 
