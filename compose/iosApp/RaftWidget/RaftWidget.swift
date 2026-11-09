@@ -1,3 +1,4 @@
+import AppIntents
 import SwiftUI
 import WidgetKit
 
@@ -101,14 +102,19 @@ enum Raft {
     }
 
     /// The newest conversations across all the servers.
-    static func snapshot() async throws -> Snapshot {
-        let token = try await accessToken()
+    /// The signed-in person's servers as (id, slug).
+    static func servers(_ token: String) async throws -> [(String, String)] {
         let (s, status) = try await request("servers", token: token)
         if status == 401 { throw SignedOut() }
-        let servers = (s as? [[String: Any]] ?? []).compactMap { sv -> (String, String)? in
+        return (s as? [[String: Any]] ?? []).compactMap { sv -> (String, String)? in
             guard let id = sv["id"] as? String, let slug = sv["slug"] as? String else { return nil }
             return (id, slug)
         }
+    }
+
+    static func snapshot() async throws -> Snapshot {
+        let token = try await TokenGate.shared.token()
+        let servers = try await Self.servers(token)
         var rows: [Row] = []
         var unread = 0
         await withTaskGroup(of: ([Row], Int).self) { group in
@@ -120,6 +126,30 @@ enum Raft {
         }
         rows.sort { $0.time > $1.time }
         return Snapshot(rows: Array(rows.prefix(8)), unread: unread, mentions: rows.filter { $0.mention && $0.unread > 0 }.count)
+    }
+
+    /// The newest message of the channel or DM named [name] (`#` and `@` optional), on any server.
+    static func brief(_ name: String) async throws -> Brief {
+        let token = try await TokenGate.shared.token()
+        let want = name.trimmingCharacters(in: CharacterSet(charactersIn: "#@ ")).lowercased()
+        for (id, slug) in try await servers(token) {
+            guard let r = try? await request("channels/inbox?filter=all&limit=50", token: token, server: id),
+                  let items = (r.0 as? [String: Any])?["items"] as? [[String: Any]],
+                  let item = items.first(where: { ($0["kind"] as? String) != "thread" && ($0["channelName"] as? String)?.lowercased() == want }),
+                  let channel = item["channelId"] as? String else { continue }
+            let (m, _) = try await request("messages/channel/\(channel)?limit=5", token: token, server: id)
+            let messages = (m as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+            guard let newest = messages.max(by: { ($0["createdAt"] as? String ?? "") < ($1["createdAt"] as? String ?? "") }) else { continue }
+            let dm = (item["kind"] as? String) == "dm" || (item["channelType"] as? String) == "dm"
+            return Brief(
+                title: dm ? item["channelName"] as? String ?? name : "#\(item["channelName"] as? String ?? name)",
+                sender: newest["senderName"] as? String ?? "",
+                time: date(newest["createdAt"] as? String ?? ""),
+                content: newest["content"] as? String ?? "",
+                url: URL(string: "raft:///s/\(slug)/\(dm ? "dm" : "channel")/\(channel)")
+            )
+        }
+        return Brief(title: name, missing: true)
     }
 
     static func inbox(id: String, slug: String, token: String) async -> ([Row], Int) {
@@ -163,31 +193,31 @@ enum Raft {
     }
 }
 
-/// One load at a time (two widgets on screen must not both spend the refresh token); the last good
-/// snapshot stands in when the network fails.
-actor Loader {
-    static let shared = Loader()
-    private var running: Task<Snapshot, Never>?
+/// One token refresh at a time: the refresh token rotates, so two widgets on screen must not both
+/// spend it.
+actor TokenGate {
+    static let shared = TokenGate()
+    private var running: Task<String, Error>?
 
-    func load() async -> Snapshot {
-        if let running { return await running.value }
-        let task = Task { await Self.fetch() }
+    func token() async throws -> String {
+        if let running { return try await running.value }
+        let task = Task { try await Raft.accessToken() }
         running = task
-        let s = await task.value
-        running = nil
-        return s
+        defer { running = nil }
+        return try await task.value
     }
+}
 
-    private static func fetch() async -> Snapshot {
-        do {
-            let s = try await Raft.snapshot()
-            UserDefaults.standard.set(try? JSONEncoder().encode(s), forKey: "snapshot")
-            return s
-        } catch is SignedOut {
-            return Snapshot(signedOut: true)
-        } catch {
-            return UserDefaults.standard.data(forKey: "snapshot").flatMap { try? JSONDecoder().decode(Snapshot.self, from: $0) } ?? Snapshot()
-        }
+/// [load]'s result, or when the network fails the last good one saved under [key].
+func cached<T: Codable>(_ key: String, signedOut: T, _ load: () async throws -> T) async -> T? {
+    do {
+        let v = try await load()
+        UserDefaults.standard.set(try? JSONEncoder().encode(v), forKey: key)
+        return v
+    } catch is SignedOut {
+        return signedOut
+    } catch {
+        return UserDefaults.standard.data(forKey: key).flatMap { try? JSONDecoder().decode(T.self, from: $0) }
     }
 }
 
@@ -201,14 +231,18 @@ struct Provider: TimelineProvider {
 
     func getSnapshot(in context: Context, completion: @escaping (Entry) -> Void) {
         if context.isPreview { return completion(placeholder(in: context)) }
-        Task { completion(Entry(date: .now, snap: await Loader.shared.load())) }
+        Task { completion(Entry(date: .now, snap: await load())) }
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<Entry>) -> Void) {
         Task {
-            let entry = Entry(date: .now, snap: await Loader.shared.load())
+            let entry = Entry(date: .now, snap: await load())
             completion(Timeline(entries: [entry], policy: .after(.now.addingTimeInterval(15 * 60))))
         }
+    }
+
+    func load() async -> Snapshot {
+        await cached("snapshot", signedOut: Snapshot(signedOut: true)) { try await Raft.snapshot() } ?? Snapshot()
     }
 }
 
@@ -219,13 +253,7 @@ struct RaftWidgetView: View {
     var body: some View {
         Group {
             if entry.snap.signedOut {
-                VStack(spacing: 6) {
-                    Image(systemName: "bubble.left.and.bubble.right").font(.title2)
-                    Text("Connect anyRaft").font(.headline)
-                    Text("Tap to sign in the widget").font(.caption).foregroundStyle(.secondary)
-                }
-                .multilineTextAlignment(.center)
-                .widgetURL(URL(string: "raft://widget/connect"))
+                ConnectView()
             } else if family == .systemSmall {
                 small
             } else {
@@ -295,12 +323,120 @@ struct RaftWidgetView: View {
     }
 }
 
-@main
+struct ConnectView: View {
+    var body: some View {
+        VStack(spacing: 6) {
+            Image(systemName: "bubble.left.and.bubble.right").font(.title2)
+            Text("Connect anyRaft").font(.headline)
+            Text("Tap to sign in the widget").font(.caption).foregroundStyle(.secondary)
+        }
+        .multilineTextAlignment(.center)
+        .widgetURL(URL(string: "raft://widget/connect"))
+    }
+}
+
 struct RaftWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: "RaftInbox", provider: Provider()) { RaftWidgetView(entry: $0) }
             .configurationDisplayName("Raft")
             .description("Your latest conversations.")
             .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+    }
+}
+
+// MARK: Brief (runzhou-tao 2026-11-09): a daily brief or dashboard an agent writes into a conversation.
+
+struct Brief: Codable {
+    var title: String
+    var sender = ""
+    var time = Date.distantPast
+    var content = ""
+    var url: URL?
+    var missing = false
+    var signedOut = false
+}
+
+struct BriefSource: WidgetConfigurationIntent {
+    static var title: LocalizedStringResource = "Brief"
+    static var description = IntentDescription("The newest message of a channel, or of your DM with an agent.")
+    @Parameter(title: "Channel or agent", default: "brief") var source: String
+}
+
+struct BriefEntry: TimelineEntry {
+    var date: Date
+    var brief: Brief
+}
+
+struct BriefProvider: AppIntentTimelineProvider {
+    func placeholder(in context: Context) -> BriefEntry {
+        BriefEntry(date: .now, brief: Brief(title: "#brief", sender: "Brief", time: .now,
+                                            content: "**Today**\n3 tasks in review, 2 mentions waiting.\n\n**Highlights**\nShipped the widget."))
+    }
+
+    func snapshot(for configuration: BriefSource, in context: Context) async -> BriefEntry {
+        context.isPreview ? placeholder(in: context) : BriefEntry(date: .now, brief: await load(configuration.source))
+    }
+
+    func timeline(for configuration: BriefSource, in context: Context) async -> Timeline<BriefEntry> {
+        Timeline(entries: [BriefEntry(date: .now, brief: await load(configuration.source))],
+                 policy: .after(.now.addingTimeInterval(15 * 60)))
+    }
+
+    func load(_ source: String) async -> Brief {
+        await cached("brief:\(source)", signedOut: Brief(title: source, signedOut: true)) { try await Raft.brief(source) }
+            ?? Brief(title: source, missing: true)
+    }
+}
+
+struct BriefView: View {
+    var entry: BriefEntry
+
+    var body: some View {
+        let b = entry.brief
+        Group {
+            if b.signedOut {
+                ConnectView()
+            } else if b.missing {
+                VStack(spacing: 6) {
+                    Text("No conversation named “\(b.title)”").font(.subheadline.weight(.semibold))
+                    Text("Long-press the widget, Edit Widget, and name a channel or an agent.").font(.caption).foregroundStyle(.secondary)
+                }
+                .multilineTextAlignment(.center)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text(b.title).font(.caption.weight(.semibold))
+                        Spacer()
+                        Text("\(b.sender) · \(b.time.formatted(date: .omitted, time: .shortened))")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Text((try? AttributedString(markdown: b.content, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+                         ?? AttributedString(b.content))
+                        .font(.footnote)
+                        .minimumScaleFactor(0.7)
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .widgetURL(b.url)
+            }
+        }
+        .containerBackground(Color(.systemBackground), for: .widget)
+    }
+}
+
+struct RaftBriefWidget: Widget {
+    var body: some WidgetConfiguration {
+        AppIntentConfiguration(kind: "RaftBrief", intent: BriefSource.self, provider: BriefProvider()) { BriefView(entry: $0) }
+            .configurationDisplayName("Raft Brief")
+            .description("A daily brief or dashboard an agent writes into a channel or DM.")
+            .supportedFamilies([.systemMedium, .systemLarge])
+    }
+}
+
+@main
+struct RaftWidgets: WidgetBundle {
+    var body: some Widget {
+        RaftWidget()
+        RaftBriefWidget()
     }
 }
