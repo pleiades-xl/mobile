@@ -7,6 +7,9 @@ import FoundationModels
 import Speech
 import AVFoundation
 import CoreMotion
+import AuthenticationServices
+import CryptoKit
+import WidgetKit
 
 // task #471: scene plumbing for iPad multi-window.
 //
@@ -285,6 +288,7 @@ enum RaftIosMessageLinkOpen {
 /// environment's web link and queues like a Universal Link. Anything else is ignored, as before.
 enum RaftIosOpenURL {
     static func accept(_ url: URL, shellInstanceId: String? = nil, source: String) {
+        if RaftWidgetConnect.shared.accept(url) { return }
         if RaftIosMobileOAuthHost.shared.acceptCallbackURL(url, shellInstanceId: shellInstanceId, source: source) {
             return
         }
@@ -302,8 +306,7 @@ enum RaftIosOpenURL {
 /// only the last ~120 KB).
 ///
 /// iOS hands the shake gesture to the first responder only, which Raft's views never pass on (and
-/// with nothing focused there is none), so the accelerometer detects the shake itself: three
-/// readings over 1.8 g within 0.8 s.
+/// with nothing focused there is none), so the motion sensor detects the shake itself.
 final class RaftShakeDetector {
     static let shared = RaftShakeDetector()
     private let motion = CMMotionManager()
@@ -702,4 +705,92 @@ final class RaftVoiceSession {
 struct RaftVoiceError: LocalizedError {
     let errorDescription: String?
     init(_ message: String) { errorDescription = message }
+}
+
+/// Self-build (runzhou-tao 2026-11-09): the Today-view widget (compose/iosApp/RaftWidget) signs in on
+/// its own, since the app's refresh token rotates and the two cannot share one. Tapping the signed-out
+/// widget opens `raft://widget/connect`: one web sign-in, whose tokens go to the shared keychain.
+final class RaftWidgetConnect: NSObject, ASWebAuthenticationPresentationContextProviding {
+    static let shared = RaftWidgetConnect()
+    private var session: ASWebAuthenticationSession?
+
+    func accept(_ url: URL) -> Bool {
+        guard url.scheme == "raft", url.host == "widget" else { return false }
+        Task { @MainActor in await connect() }
+        return true
+    }
+
+    @MainActor private func connect() async {
+        let verifier = Self.base64URL(Data((0..<32).map { _ in UInt8.random(in: 0...255) }))
+        let challenge = Self.base64URL(Data(SHA256.hash(data: Data(verifier.utf8))))
+        do {
+            let start = try await Self.post("auth/app-login/start", ["returnUri": "raft://login/callback", "codeChallenge": challenge])
+            guard let login = (start["loginUrl"] as? String).flatMap(URL.init(string:)) else { throw URLError(.badServerResponse) }
+            let callback: URL = try await withCheckedThrowingContinuation { done in
+                let s = ASWebAuthenticationSession(url: login, callbackURLScheme: "raft") { url, error in
+                    if let url { done.resume(returning: url) } else { done.resume(throwing: error ?? URLError(.cancelled)) }
+                }
+                s.presentationContextProvider = self
+                s.prefersEphemeralWebBrowserSession = false
+                session = s
+                if !s.start() { done.resume(throwing: URLError(.cannotOpenFile)) }
+            }
+            guard let code = URLComponents(url: callback, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "code" })?.value else { throw URLError(.userAuthenticationRequired) }
+            let tokens = try await Self.post("auth/app-login/complete", ["code": code, "codeVerifier": verifier])
+            guard let access = tokens["accessToken"] as? String, let refresh = tokens["refreshToken"] as? String,
+                  let data = try? JSONEncoder().encode(["accessToken": access, "refreshToken": refresh]) else {
+                throw URLError(.badServerResponse)
+            }
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: "raft.widget",
+                kSecAttrAccount as String: "session",
+                kSecAttrAccessGroup as String: "76682Q85WA.dev.vgent.raft.shared",
+            ]
+            SecItemDelete(query as CFDictionary)
+            var add = query
+            add[kSecValueData as String] = data
+            add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+            let status = SecItemAdd(add as CFDictionary, nil)
+            guard status == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
+            WidgetCenter.shared.reloadAllTimelines()
+            RaftIosDiagnosticsRecord("info", "RaftWidget", "connect result=ok")
+            Self.tell("The widget is connected.")
+        } catch {
+            RaftIosDiagnosticsRecord("info", "RaftWidget", "connect result=failed error=\(error)")
+            if (error as? ASWebAuthenticationSessionError)?.code != .canceledLogin {
+                Self.tell("Could not connect the widget: \(error.localizedDescription)")
+            }
+        }
+        session = nil
+    }
+
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        RaftLogShare.topViewController()?.view.window ?? ASPresentationAnchor()
+    }
+
+    private static func post(_ path: String, _ body: [String: String]) async throws -> [String: Any] {
+        var r = URLRequest(url: URL(string: "https://api.raft.build/api/" + path)!)
+        r.httpMethod = "POST"
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (d, resp) = try await URLSession.shared.data(for: r)
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else {
+            throw NSError(domain: "RaftWidget", code: status, userInfo: [NSLocalizedDescriptionKey: "\(path) failed (\(status))"])
+        }
+        return try JSONSerialization.jsonObject(with: d) as? [String: Any] ?? [:]
+    }
+
+    private static func base64URL(_ d: Data) -> String {
+        d.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private static func tell(_ message: String) {
+        let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        RaftLogShare.topViewController()?.present(alert, animated: true)
+    }
 }

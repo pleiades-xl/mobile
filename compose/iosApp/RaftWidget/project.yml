@@ -1,0 +1,23 @@
+# Self-build: the Today-view widget, built apart from the upstream Xcode project (xcodegen) and
+# put into the app's PlugIns by ~/ship.sh, so upstream merges never touch it.
+name: RaftWidget
+options:
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  RaftWidget:
+    type: app-extension
+    platform: iOS
+    sources: [RaftWidget.swift]
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: anyRaft
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: dev.vgent.raft.app.widget
+      SWIFT_VERSION: "5.0"
+      CODE_SIGNING_ALLOWED: "NO"
