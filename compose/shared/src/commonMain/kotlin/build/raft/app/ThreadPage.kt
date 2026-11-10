@@ -27441,8 +27441,9 @@ private fun ThreadLazyWindowStats.toDiagnosticsString(result: String): String =
  * column with system bar buttons (RaftSideActionHost): the channel page only for now. An action
  * without one (focus mode, a reply thread's follow) keeps the whole column ours.
  */
-internal fun threadHeaderSideColumnSystemSymbols(surfaceKind: String): Boolean =
-    surfaceKind == RaftThreadSurfaceKind.Channel
+// Self-build (runzhou-tao 2026-11-10): every conversation's column is the system's own buttons.
+@Suppress("UNUSED_PARAMETER")
+internal fun threadHeaderSideColumnSystemSymbols(surfaceKind: String): Boolean = true
 
 /**
  * Back in a conversation header. A channel / DM that is the detail pane of a split has the list on

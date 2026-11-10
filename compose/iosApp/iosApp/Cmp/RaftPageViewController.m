@@ -291,7 +291,18 @@ static NSString *RaftPageWindowId(NSString *controllerToken) {
 
 /// PROTOTYPE: the real bar shows for a native-bar page while one of its heads publishes.
 - (BOOL)raftShowsNativeNavBar {
-    return self.raftUsesNativeNavBar && !self.raftNativeNavBarHeadHidden;
+    return (self.raftUsesNativeNavBar && !self.raftNativeNavBarHeadHidden) || self.raftSideActionsShown;
+}
+
+- (void)setRaftSideActionsShown:(BOOL)raftSideActionsShown {
+    if (_raftSideActionsShown == raftSideActionsShown) {
+        return;
+    }
+    _raftSideActionsShown = raftSideActionsShown;
+    self.fd_prefersNavigationBarHidden = ![self raftShowsNativeNavBar];
+    if (self.navigationController.topViewController == self) {
+        [self.navigationController setNavigationBarHidden:![self raftShowsNativeNavBar] animated:NO];
+    }
 }
 
 - (void)setRaftNativeNavBarHeadHidden:(BOOL)raftNativeNavBarHeadHidden {

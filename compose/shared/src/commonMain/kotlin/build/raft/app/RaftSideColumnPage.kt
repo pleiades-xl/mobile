@@ -322,7 +322,7 @@ internal const val RaftSideColumnBackSystemSymbol = "chevron.backward"
 internal fun raftSideColumnBackAction(
     onBack: () -> Unit,
     enabled: Boolean = true,
-    systemSymbol: String? = null,
+    systemSymbol: String? = RaftSideColumnBackSystemSymbol,
 ): RaftSideAction =
     RaftSideAction(
         id = "back",
@@ -346,7 +346,7 @@ internal fun raftSideColumnLucideAction(
     attention: Boolean = false,
     attentionDescription: String? = null,
     priority: Int = 0,
-    systemSymbol: String? = null,
+    systemSymbol: String? = icon.raftSystemSymbol(),
 ): RaftSideAction =
     RaftSideAction(
         id = id,
@@ -358,3 +358,22 @@ internal fun raftSideColumnLucideAction(
         systemSymbol = systemSymbol,
         iconName = icon.wireName,
     ) { size -> RaftContentLucideIcon(icon, size = size) }
+
+/**
+ * Self-build (runzhou-tao 2026-11-10): the SF Symbol the iOS host draws for a column icon, so every
+ * page's column is the system's own buttons; null keeps the column drawing it (an icon not listed).
+ */
+internal fun RaftLucideIconName.raftSystemSymbol(): String? =
+    when (this) {
+        RaftLucideIconName.Search -> "magnifyingglass"
+        RaftLucideIconName.Settings -> "gearshape"
+        RaftLucideIconName.Bell -> "bell"
+        RaftLucideIconName.MapPin -> "mappin.and.ellipse"
+        RaftLucideIconName.Maximize2 -> "arrow.up.left.and.arrow.down.right"
+        RaftLucideIconName.Square -> "arrow.down.right.and.arrow.up.left"
+        RaftLucideIconName.MessageSquareDot -> "message.badge"
+        RaftLucideIconName.FollowThread -> "bell"
+        RaftLucideIconName.UnfollowThread -> "bell.slash"
+        RaftLucideIconName.PanelLeftOpen, RaftLucideIconName.PanelLeftClose -> "sidebar.left"
+        else -> null
+    }

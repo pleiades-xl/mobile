@@ -49,7 +49,21 @@ import shared
             hostPageData[RaftNativeNavBarHostIdPageDataKeyName] = hostId
             nativeNavBar = (hostId, bridge)
         }
+        // Self-build (runzhou-tao 2026-11-10): the iPhone Duo side column's buttons are the system's
+        // own bar buttons in the vertical bar (iOS 27.1), not drawn by the page.
+        hostPageData.removeValue(forKey: RaftIosSideActionHost.pageDataKey)
+        let sideActionBridge = RaftSideActionHostBridge()
+        let sideActionHostId = UUID().uuidString
+        if #available(iOS 27.1, *) {
+            RaftSideActionHostRegistry.shared.register(hostId: sideActionHostId, bridge: sideActionBridge)
+            hostPageData[RaftIosSideActionHost.pageDataKey] = sideActionHostId
+        }
         let container = RaftPageViewController(pageName: pageName, pageData: hostPageData)
+        if #available(iOS 27.1, *) {
+            container.raftSideActionHost = RaftIosSideActionHost(
+                controller: container, bridge: sideActionBridge, hostId: sideActionHostId
+            )
+        }
         if let nativeNavBar = nativeNavBar {
             container.raftUsesNativeNavBar = usesNativeNavBar
             let navHost = RaftNativeNavBarHost(
@@ -120,6 +134,89 @@ import shared
             return "{}"
         }
         return text
+    }
+}
+
+/// Self-build: a page's iPhone Duo side column (`RaftSideActionHostBridge`) as the page's navigation
+/// bar buttons, which iOS 27.1 puts in the Duo's vertical bar (`axisBehavior = .verticalPreferred`)
+/// beside the system tab bar: the system's own glass buttons. Back's group leads, the page's
+/// actions and the ⋯ trail; taps go back to the page by id.
+@available(iOS 27.1, *)
+final class RaftIosSideActionHost: NSObject, RaftSideActionHostListener {
+    static let pageDataKey = "slockSideActionHostId"
+
+    private weak var controller: RaftPageViewController?
+    private let bridge: RaftSideActionHostBridge
+    private let hostId: String
+
+    init(controller: RaftPageViewController, bridge: RaftSideActionHostBridge, hostId: String) {
+        self.controller = controller
+        self.bridge = bridge
+        self.hostId = hostId
+        super.init()
+        bridge.attachListener(listener: self)
+        bridge.setAvailable(available: true)
+    }
+
+    deinit {
+        bridge.detachListener()
+        RaftSideActionHostRegistry.shared.unregister(hostId: hostId, bridge: bridge)
+    }
+
+    func onSideActionColumnChanged(json: String) {
+        guard let controller,
+              let column = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
+        else { return }
+        let actions = column["actions"] as? [[String: Any]] ?? []
+        let byId = Dictionary(actions.map { ($0["id"] as? String ?? "", $0) }, uniquingKeysWith: { first, _ in first })
+        let pick = { (key: String) in (column[key] as? [String] ?? []).compactMap { byId[$0] } }
+        var trailing = pick("visibleActionIds").map(button)
+        let overflow = pick("overflowActionIds")
+        if !overflow.isEmpty {
+            let rows = overflow.map { action in
+                let id = action["id"] as? String ?? ""
+                return UIAction(
+                    title: action["label"] as? String ?? "",
+                    image: UIImage(systemName: action["systemSymbol"] as? String ?? ""),
+                    attributes: action["enabled"] as? Bool == false ? .disabled : []
+                ) { [weak self] _ in _ = self?.bridge.sideActionTapped(id: id) }
+            }
+            let more = UIBarButtonItem(title: nil, image: UIImage(systemName: "ellipsis"), primaryAction: nil, menu: UIMenu(children: rows))
+            more.accessibilityLabel = column["overflowLabel"] as? String
+            if column["overflowAttention"] as? Bool == true { more.badge = .indicator() }
+            trailing.append(more)
+        }
+        let leading = (column["primary"] as? [[String: Any]] ?? []).map(button)
+        (leading + trailing).forEach { $0.axisBehavior = .verticalPreferred }
+        let item = controller.navigationItem
+        item.hidesBackButton = true
+        item.leftBarButtonItems = leading
+        // rightBarButtonItems run from the trailing edge in: reversed, they read in listed order.
+        item.rightBarButtonItems = trailing.reversed()
+        item.verticalBarCompressionBehavior = .prefersBarItems
+        controller.raftSideActionsShown = true
+    }
+
+    func onSideActionColumnCleared() {
+        guard let controller else { return }
+        controller.navigationItem.leftBarButtonItems = nil
+        controller.navigationItem.rightBarButtonItems = nil
+        controller.navigationItem.hidesBackButton = false
+        controller.raftSideActionsShown = false
+    }
+
+    private func button(_ action: [String: Any]) -> UIBarButtonItem {
+        let id = action["id"] as? String ?? ""
+        let item = UIBarButtonItem(
+            title: nil,
+            image: UIImage(systemName: action["systemSymbol"] as? String ?? ""),
+            primaryAction: UIAction { [weak self] _ in _ = self?.bridge.sideActionTapped(id: id) },
+            menu: nil
+        )
+        item.accessibilityLabel = action["label"] as? String
+        item.isEnabled = action["enabled"] as? Bool ?? true
+        if action["attention"] as? Bool == true { item.badge = .indicator() }
+        return item
     }
 }
 
