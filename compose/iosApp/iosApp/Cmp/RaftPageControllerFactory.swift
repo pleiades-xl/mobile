@@ -170,14 +170,19 @@ final class RaftIosSideActionHost: NSObject, RaftSideActionHostListener {
         let actions = column["actions"] as? [[String: Any]] ?? []
         let byId = Dictionary(actions.map { ($0["id"] as? String ?? "", $0) }, uniquingKeysWith: { first, _ in first })
         let pick = { (key: String) in (column[key] as? [String] ?? []).compactMap { byId[$0] } }
+        let leading = (column["primary"] as? [[String: Any]] ?? []).map(button)
         var visible = pick("visibleActionIds")
         var overflow = pick("overflowActionIds")
         // The shell's system tab bar shares the vertical bar, and the system does not make room
-        // between the two (the buttons overlapped the tabs): beside it the page keeps two buttons,
-        // the ⋯ included.
-        if controller.raftIsAppShellPage, visible.count + (overflow.isEmpty ? 0 : 1) > 2 {
-            overflow = Array(visible.dropFirst()) + overflow
-            visible = Array(visible.prefix(1))
+        // between the two (the buttons overlapped the tabs): beside it the page keeps the buttons
+        // that fit, about one per 60pt of the window's height with the tabs counted, the ⋯ at least.
+        if let tabBar = controller.children.lazy.compactMap({ $0 as? RaftIosTabBarController }).first {
+            let height = controller.view.window?.bounds.height ?? controller.view.bounds.height
+            let room = max(1, Int((height - 90) / 60) - tabBar.shownTabCount - leading.count)
+            if visible.count + (overflow.isEmpty ? 0 : 1) > room {
+                overflow = Array(visible.dropFirst(room - 1)) + overflow
+                visible = Array(visible.prefix(room - 1))
+            }
         }
         var trailing = visible.map(button)
         if !overflow.isEmpty {
@@ -194,7 +199,6 @@ final class RaftIosSideActionHost: NSObject, RaftSideActionHostListener {
             if column["overflowAttention"] as? Bool == true { more.badge = MainActor.assumeIsolated { .indicator() } }
             trailing.append(more)
         }
-        let leading = (column["primary"] as? [[String: Any]] ?? []).map(button)
         (leading + trailing).forEach { $0.axisBehavior = .verticalPreferred }
         let item = controller.navigationItem
         item.hidesBackButton = true
