@@ -47,6 +47,10 @@ final class RaftIosTabBarController: UIViewController {
         pageName == "compose_slock_app_shell"
     }
 
+    /// Self-build: how many tabs the bar shows, the server tab included (the Duo side column's
+    /// buttons share the vertical bar with them).
+    var shownTabCount: Int { systemTabBarController.tabs.count }
+
     /// pageData key carrying `hostId` to the shared page (identity only).
     static var hostIdPageDataKey: String {
         RaftNativeTabBarKt.RaftNativeTabBarHostIdPageDataKey
