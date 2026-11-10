@@ -252,6 +252,13 @@ fun RaftSideActionColumn(
                         )
                     }
                 }
+                // Self-build (runzhou-tao 2026-11-10): the buttons sit on round glass, as the system
+                // tab bar's under them: one capsule for Back's group, one for the actions and the ⋯.
+                val step = metrics.item + metrics.gap
+                raftSideRuns(plan.primaryTops, step).forEach { (top, count) -> RaftSideGlass(top, count) }
+                raftSideRuns((plan.shownTops + listOfNotNull(plan.overflowTop)).sorted(), step).forEach { (top, count) ->
+                    RaftSideGlass(top, count)
+                }
                 primary.forEachIndexed { i, action ->
                     key(action.id) { RaftSideActionItem(action, Modifier.raftSideSlot(plan.primaryTops[i])) }
                 }
@@ -268,6 +275,27 @@ fun RaftSideActionColumn(
 
 /** A full-width row [top] px down the column; its button is centred in it. */
 private fun Modifier.raftSideSlot(top: Int): Modifier = absoluteOffset { IntOffset(0, top) }.fillMaxWidth()
+
+/** Runs of adjacent slots ([step] px apart) in [tops]: each run's first top and its length. */
+internal fun raftSideRuns(tops: List<Int>, step: Int): List<Pair<Int, Int>> =
+    buildList {
+        tops.forEach { top ->
+            val last = lastOrNull()
+            if (last != null && top == last.first + last.second * step) set(size - 1, last.first to last.second + 1) else add(top to 1)
+        }
+    }
+
+/** The glass under [count] adjacent buttons from [top] px: a circle for one, a capsule for more. */
+@Composable
+private fun RaftSideGlass(top: Int, count: Int) {
+    val pad = 2.dp
+    val width = RaftSideActionColumnDefaults.ItemSize + pad * 2
+    val height = RaftSideActionColumnDefaults.ItemSize * count + RaftSideActionColumnDefaults.ItemGap * (count - 1) + pad * 2
+    val colors = RaftTheme.colors
+    Box(Modifier.absoluteOffset { IntOffset(0, top - pad.roundToPx()) }.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+        Box(Modifier.size(width, height).raftOverlaySurface(colors.layerPopover, colors.lineSeam, RaftTheme.isDark, width / 2))
+    }
+}
 
 @Composable
 private fun RaftSideActionItem(action: RaftSideAction, modifier: Modifier) {

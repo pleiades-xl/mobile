@@ -7646,7 +7646,8 @@ private fun RaftAppShellReadyContent(
         }
     val mainRouteSurface: @Composable () -> Unit = {
         if (systemSideBar) {
-            // The system's side column holds the wide history's Back, as with the rail.
+            // The system's side column holds the wide history's Back, as with the rail, and the
+            // rail's sidebar toggle under it.
             raftSideColumnFallbackBack(
                 raftSideColumnBackAction(
                     onBack = {
@@ -7654,7 +7655,20 @@ private fun RaftAppShellReadyContent(
                         navigateWideHistory(RaftWideNavDirection.Back, source = "side_column")
                     },
                     enabled = wideNavHistory.canGoBack,
-                )
+                ),
+                toggle =
+                    collapsibleColumn?.let { column ->
+                        val hidden = sidebarCollapse.isHidden(column)
+                        raftSideColumnLucideAction(
+                            id = "sidebar-toggle",
+                            label = stringResource(if (hidden) Res.string.rail_expand_sidebar else Res.string.rail_collapse_sidebar),
+                            icon = if (hidden) RaftLucideIconName.PanelLeftOpen else RaftLucideIconName.PanelLeftClose,
+                            onClick = {
+                                sidebarCollapse.setHidden(column, !hidden)
+                                bridge.log("app_shell_sidebar_toggle column=$column hidden=${!hidden} from=side_column")
+                            },
+                        )
+                    },
             )
         }
         CompositionLocalProvider(
