@@ -170,8 +170,16 @@ final class RaftIosSideActionHost: NSObject, RaftSideActionHostListener {
         let actions = column["actions"] as? [[String: Any]] ?? []
         let byId = Dictionary(actions.map { ($0["id"] as? String ?? "", $0) }, uniquingKeysWith: { first, _ in first })
         let pick = { (key: String) in (column[key] as? [String] ?? []).compactMap { byId[$0] } }
-        var trailing = pick("visibleActionIds").map(button)
-        let overflow = pick("overflowActionIds")
+        var visible = pick("visibleActionIds")
+        var overflow = pick("overflowActionIds")
+        // The shell's system tab bar shares the vertical bar, and the system does not make room
+        // between the two (the buttons overlapped the tabs): beside it the page keeps two buttons,
+        // the ⋯ included.
+        if controller.raftIsAppShellPage, visible.count + (overflow.isEmpty ? 0 : 1) > 2 {
+            overflow = Array(visible.dropFirst()) + overflow
+            visible = Array(visible.prefix(1))
+        }
+        var trailing = visible.map(button)
         if !overflow.isEmpty {
             let rows = overflow.map { action in
                 let id = action["id"] as? String ?? ""
@@ -193,7 +201,6 @@ final class RaftIosSideActionHost: NSObject, RaftSideActionHostListener {
         item.leftBarButtonItems = leading
         // rightBarButtonItems run from the trailing edge in: reversed, they read in listed order.
         item.rightBarButtonItems = trailing.reversed()
-        item.verticalBarCompressionBehavior = .prefersBarItems
         controller.raftSideActionsShown = true
     }
 
