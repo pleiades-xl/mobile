@@ -174,11 +174,11 @@ final class RaftIosSideActionHost: NSObject, RaftSideActionHostListener {
         var visible = pick("visibleActionIds")
         var overflow = pick("overflowActionIds")
         // The shell's system tab bar shares the vertical bar, and the system does not make room
-        // between the two (the buttons overlapped the tabs): beside it the page keeps the buttons
-        // that fit, about one per 60pt of the window's height with the tabs counted, the ⋯ at least.
+        // between the two (the buttons overlapped the tabs, also on the tabs' own navigation
+        // bars): beside it the buttons and the tabs (the server's included) keep to eight slots,
+        // the ⋯ at least. On runzhou's Duo the fourth button met the first of five tabs.
         if let tabBar = controller.children.lazy.compactMap({ $0 as? RaftIosTabBarController }).first {
-            let height = controller.view.window?.bounds.height ?? controller.view.bounds.height
-            let room = max(1, Int((height - 90) / 60) - tabBar.shownTabCount - leading.count)
+            let room = max(1, 8 - tabBar.shownTabCount - leading.count)
             if visible.count + (overflow.isEmpty ? 0 : 1) > room {
                 overflow = Array(visible.dropFirst(room - 1)) + overflow
                 visible = Array(visible.prefix(room - 1))
