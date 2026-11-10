@@ -51,12 +51,12 @@ import shared
         }
         // Self-build (runzhou-tao 2026-11-10): the iPhone Duo side column's buttons are the system's
         // own bar buttons in the vertical bar (iOS 27.1), not drawn by the page.
-        hostPageData.removeValue(forKey: RaftIosSideActionHost.pageDataKey)
+        hostPageData.removeValue(forKey: raftSideActionHostPageDataKey)
         let sideActionBridge = RaftSideActionHostBridge()
         let sideActionHostId = UUID().uuidString
         if #available(iOS 27.1, *) {
             RaftSideActionHostRegistry.shared.register(hostId: sideActionHostId, bridge: sideActionBridge)
-            hostPageData[RaftIosSideActionHost.pageDataKey] = sideActionHostId
+            hostPageData[raftSideActionHostPageDataKey] = sideActionHostId
         }
         let container = RaftPageViewController(pageName: pageName, pageData: hostPageData)
         if #available(iOS 27.1, *) {
@@ -141,10 +141,10 @@ import shared
 /// bar buttons, which iOS 27.1 puts in the Duo's vertical bar (`axisBehavior = .verticalPreferred`)
 /// beside the system tab bar: the system's own glass buttons. Back's group leads, the page's
 /// actions and the ⋯ trail; taps go back to the page by id.
+private let raftSideActionHostPageDataKey = "slockSideActionHostId"
+
 @available(iOS 27.1, *)
 final class RaftIosSideActionHost: NSObject, RaftSideActionHostListener {
-    static let pageDataKey = "slockSideActionHostId"
-
     private weak var controller: RaftPageViewController?
     private let bridge: RaftSideActionHostBridge
     private let hostId: String
@@ -183,7 +183,7 @@ final class RaftIosSideActionHost: NSObject, RaftSideActionHostListener {
             }
             let more = UIBarButtonItem(title: nil, image: UIImage(systemName: "ellipsis"), primaryAction: nil, menu: UIMenu(children: rows))
             more.accessibilityLabel = column["overflowLabel"] as? String
-            if column["overflowAttention"] as? Bool == true { more.badge = .indicator() }
+            if column["overflowAttention"] as? Bool == true { more.badge = MainActor.assumeIsolated { .indicator() } }
             trailing.append(more)
         }
         let leading = (column["primary"] as? [[String: Any]] ?? []).map(button)
@@ -215,7 +215,7 @@ final class RaftIosSideActionHost: NSObject, RaftSideActionHostListener {
         )
         item.accessibilityLabel = action["label"] as? String
         item.isEnabled = action["enabled"] as? Bool ?? true
-        if action["attention"] as? Bool == true { item.badge = .indicator() }
+        if action["attention"] as? Bool == true { item.badge = MainActor.assumeIsolated { .indicator() } }
         return item
     }
 }
