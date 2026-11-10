@@ -303,6 +303,7 @@ static NSString *RaftPageWindowId(NSString *controllerToken) {
     if (self.navigationController.topViewController == self) {
         [self.navigationController setNavigationBarHidden:![self raftShowsNativeNavBar] animated:NO];
     }
+    [self raftPublishWindowInsets];
 }
 
 - (void)setRaftNativeNavBarHeadHidden:(BOOL)raftNativeNavBarHeadHidden {
@@ -565,7 +566,11 @@ static NSString *RaftPageWindowId(NSString *controllerToken) {
         presented.presentationController.presentedView != nil &&
         !CGRectEqualToRect(presented.presentationController.presentedView.frame, window.bounds) &&
         [RaftIosWindowInsetsPublisher isSheetStyle:presented.modalPresentationStyle];
-    NSDictionary *payload = [_raftWindowInsetsPublisher nextPayloadWithInsets:view.safeAreaInsets
+    // Self-build: the bar that holds the side column's buttons (RaftIosSideActionHost) lives in the
+    // vertical bar, so its top band is not the page's: the page keeps the navigation controller's.
+    UIEdgeInsets insets = self.raftSideActionsShown && self.navigationController != nil
+        ? self.navigationController.view.safeAreaInsets : view.safeAreaInsets;
+    NSDictionary *payload = [_raftWindowInsetsPublisher nextPayloadWithInsets:insets
                                                                         scale:scale
                                                               statusBarHidden:statusBarHidden
                                                              presentedAsSheet:presentedAsSheet
