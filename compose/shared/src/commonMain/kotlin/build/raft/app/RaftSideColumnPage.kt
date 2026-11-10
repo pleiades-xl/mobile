@@ -148,6 +148,9 @@ internal class RaftSideColumnHostState {
     /** Back for a page whose own header has none: the wide layout's history (the inner screen). */
     internal var fallbackBack by mutableStateOf<RaftSideAction?>(null)
 
+    /** Self-build: the shell's sidebar toggle, under Back in the column (the system's side bar has no rail). */
+    internal var shellToggle by mutableStateOf<RaftSideAction?>(null)
+
     /**
      * Self-build (xuheng-li 2026-10-30): the wide layout's rail, drawn as the column instead of the
      * page's buttons, which it places among its own ([raftSideColumnDock]).
@@ -158,7 +161,8 @@ internal class RaftSideColumnHostState {
         get() {
             val latest = entries.lastOrNull()?.controls ?: RaftSideColumnControls()
             val back = fallbackBack
-            return if (latest.primary.isEmpty() && back != null) latest.copy(primary = listOf(back)) else latest
+            val primary = latest.primary.ifEmpty { listOfNotNull(back) } + listOfNotNull(shellToggle)
+            return latest.copy(primary = primary)
         }
 
     internal fun add(entry: Entry) {
@@ -274,10 +278,18 @@ internal fun raftSideColumnControls(
  * layout's detail pane, whose way back is the shell's history). True when the column shows it.
  */
 @Composable
-internal fun raftSideColumnFallbackBack(back: RaftSideAction): Boolean {
+internal fun raftSideColumnFallbackBack(back: RaftSideAction, toggle: RaftSideAction? = null): Boolean {
     val host = LocalRaftSideColumnHost.current ?: return false
-    SideEffect { host.fallbackBack = back }
-    DisposableEffect(host) { onDispose { host.fallbackBack = null } }
+    SideEffect {
+        host.fallbackBack = back
+        host.shellToggle = toggle
+    }
+    DisposableEffect(host) {
+        onDispose {
+            host.fallbackBack = null
+            host.shellToggle = null
+        }
+    }
     return true
 }
 
