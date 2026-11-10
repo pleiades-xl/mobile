@@ -49,6 +49,7 @@ final class RaftIosTabBarController: UIViewController {
 
     /// Self-build: how many tabs the bar shows, the server tab included (the Duo side column's
     /// buttons share the vertical bar with them).
+    @available(iOS 18.0, *)
     var shownTabCount: Int { systemTabBarController.tabs.count }
 
     /// pageData key carrying `hostId` to the shared page (identity only).
