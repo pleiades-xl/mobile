@@ -142,15 +142,40 @@ enum Raft {
             let messages = (m as? [String: Any])?["messages"] as? [[String: Any]] ?? []
             guard let newest = messages.max(by: { ($0["createdAt"] as? String ?? "") < ($1["createdAt"] as? String ?? "") }) else { continue }
             let dm = (item["kind"] as? String) == "dm" || (item["channelType"] as? String) == "dm"
+            let (c, _) = try await request("channels", token: token, server: id)
+            let channels = Dictionary((c as? [[String: Any]] ?? []).compactMap { ch -> (String, String)? in
+                guard let n = ch["name"] as? String, let cid = ch["id"] as? String else { return nil }
+                return (n.lowercased(), cid)
+            }, uniquingKeysWith: { a, _ in a })
             return Brief(
                 title: dm ? item["channelName"] as? String ?? name : "#\(item["channelName"] as? String ?? name)",
                 sender: newest["senderName"] as? String ?? "",
                 time: date(newest["createdAt"] as? String ?? ""),
-                content: newest["content"] as? String ?? "",
+                content: linked(newest["content"] as? String ?? "", slug: slug, channels: channels),
                 url: URL(string: "raft:///s/\(slug)/\(dm ? "dm" : "channel")/\(channel)")
             )
         }
         return Brief(title: name, missing: true)
+    }
+
+    /// [content] with web permalinks opening in the app, and `#channel` references (also the
+    /// `#channel:<msg>` agents write; the API takes only full message ids, so those open the channel)
+    /// as links to their channel.
+    static func linked(_ content: String, slug: String, channels: [String: String]) -> String {
+        func refs(_ s: Substring) -> String {
+            String(s).replacing(/#([A-Za-z][A-Za-z0-9_-]*)(?::[0-9a-fA-F]{8})?/) { m in
+                guard let cid = channels[String(m.1).lowercased()] else { return String(m.0) }
+                return "[\(m.0)](raft:///s/\(slug)/channel/\(cid))"
+            }
+        }
+        // Links already written stay as they are.
+        var out = ""
+        var rest = Substring(content.replacingOccurrences(of: "https://app.raft.build/s/", with: "raft:///s/"))
+        while let m = rest.firstMatch(of: /\[[^\]]*\]\([^)]*\)/) {
+            out += refs(rest[..<m.range.lowerBound]) + m.0
+            rest = rest[m.range.upperBound...]
+        }
+        return out + refs(rest)
     }
 
     static func inbox(id: String, slug: String, token: String) async -> ([Row], Int) {
@@ -486,6 +511,17 @@ enum Block: Hashable {
     case divider
     case text(String)
 
+    /// The first link in this block: tapping the block opens it.
+    var link: URL? {
+        let text: String
+        switch self {
+        case .title(let t), .section(let t), .bullet(let t), .check(_, let t), .callout(let t), .progress(_, _, let t), .text(let t): text = t
+        case .stats(let cells): text = cells.joined(separator: " ")
+        case .divider: return nil
+        }
+        return text.firstMatch(of: /\]\(([a-z-]+:[^)\s]+)\)/).flatMap { URL(string: String($0.1)) }
+    }
+
     static func parse(_ content: String) -> [Block] {
         content.split(separator: "\n").compactMap { raw in
             let l = raw.trimmingCharacters(in: .whitespaces)
@@ -556,11 +592,11 @@ struct BriefCard: View {
             let rest = Array(blocks.dropFirst(top.count))
             VStack(alignment: .leading, spacing: 6) {
                 header
-                ForEach(Array(top.enumerated()), id: \.offset) { _, b in view(b) }
+                ForEach(Array(top.enumerated()), id: \.offset) { _, b in linkedView(b) }
                 HStack(alignment: .top, spacing: 20) {
                     ForEach(Array(split(rest).enumerated()), id: \.offset) { _, col in
                         VStack(alignment: .leading, spacing: 6) {
-                            ForEach(Array(col.enumerated()), id: \.offset) { _, b in view(b) }
+                            ForEach(Array(col.enumerated()), id: \.offset) { _, b in linkedView(b) }
                         }
                         .frame(maxWidth: .infinity, alignment: .topLeading)
                     }
@@ -588,6 +624,22 @@ struct BriefCard: View {
         let starts = blocks.indices.filter { if case .section = blocks[$0] { $0 > 0 } else { false } }
         guard let cut = starts.min(by: { abs($0 * 2 - blocks.count) < abs($1 * 2 - blocks.count) }) else { return [blocks] }
         return [Array(blocks[..<cut]), Array(blocks[cut...])]
+    }
+
+    @ViewBuilder func linkedView(_ b: Block) -> some View {
+        if let url = b.link {
+            Link(destination: url) {
+                HStack(spacing: 4) {
+                    view(b)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
+                }
+                .multilineTextAlignment(.leading)
+            }
+            .foregroundStyle(Color.primary)
+        } else {
+            view(b)
+        }
     }
 
     @ViewBuilder func view(_ b: Block) -> some View {
