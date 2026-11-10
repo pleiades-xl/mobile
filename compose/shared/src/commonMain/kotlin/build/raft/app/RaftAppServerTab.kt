@@ -217,6 +217,9 @@ internal fun RaftAppServerMenuOverlay(
         dismissActivationDelayMillis = RaftFloatingOverlayClickTriggeredDismissDelayMillis,
     ) { _ ->
         RaftDesignSystemTheme {
+            // Self-build: on iPhone Duo's inner screen the system tab bar's panel opens beside the
+            // bar, not across the whole screen.
+            val besideBar = anchor == RaftServerMenuAnchor.BottomBar && LocalRaftSideColumnPosture.current.duoInner
             RaftMobileNavServerPopover(
                 state = state,
                 modifier = if (anchor == RaftServerMenuAnchor.RailHeader && !railInSideColumn) Modifier.padding(start = RaftAppRailOuterWidth) else Modifier,
@@ -228,13 +231,19 @@ internal fun RaftAppServerMenuOverlay(
                         RaftServerMenuAnchor.TopBar -> Alignment.TopStart
                         // Self-build: the rail sits in the side column at the end (RaftSideDock).
                         RaftServerMenuAnchor.RailHeader -> if (railInSideColumn) Alignment.TopEnd else Alignment.TopStart
-                        RaftServerMenuAnchor.BottomBar -> Alignment.BottomCenter
+                        RaftServerMenuAnchor.BottomBar -> if (besideBar) Alignment.BottomEnd else Alignment.BottomCenter
                     },
             ) {
                 RaftMobileNavServerPopoverContent(
                     modifier =
                         Modifier
-                            .then(if (anchor != RaftServerMenuAnchor.BottomBar) Modifier.width(RaftServerMenuTopBarWidth) else Modifier)
+                            .then(
+                                when {
+                                    anchor != RaftServerMenuAnchor.BottomBar -> Modifier.width(RaftServerMenuTopBarWidth)
+                                    besideBar -> Modifier.width(360.dp)
+                                    else -> Modifier
+                                }
+                            )
                             .raftFloatingContentClickTarget(),
                     paneTitle = panelTitle,
                 ) {
