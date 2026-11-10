@@ -693,6 +693,8 @@ private fun RaftSideDock(
                         .filter { it.key != AppShellRailSearchKey && RaftAppDestination.fromId(it.key)?.route != RaftNavRoute.Page }
                         .forEach { RaftNavigationRailTabItem(item = it, onSelect = onSelect) }
                     seam()
+                    // The toggle keeps its place where there is no list to collapse (Tasks, Members),
+                    // so the bottom-aligned tabs above it do not move (runzhou-tao 2026-11-10).
                     toggleItem?.let {
                         RaftAppRailToggleItem(
                             label = it.label,
@@ -701,7 +703,7 @@ private fun RaftSideDock(
                             icon = it.icon,
                             shortcutLabel = it.shortcutLabel,
                         )
-                    }
+                    } ?: Spacer(Modifier.size(RaftAppRailDefaults.ItemSize))
                     items.firstOrNull { it.key == AppShellRailSearchKey }?.let { RaftNavigationRailTabItem(item = it, onSelect = onSelect) }
                     controls.primary.forEach { RaftSideDockAction(it) }
                 }
