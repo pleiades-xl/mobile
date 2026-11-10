@@ -126,7 +126,7 @@ enum Raft {
             }
         }
         rows.sort { $0.time > $1.time }
-        return Snapshot(rows: Array(rows.prefix(8)), unread: unread, mentions: rows.filter { $0.mention && $0.unread > 0 }.count)
+        return Snapshot(rows: Array(rows.prefix(16)), unread: unread, mentions: rows.filter { $0.mention && $0.unread > 0 }.count)
     }
 
     /// The newest message of the channel or DM named [name] (`#` and `@` optional), on any server.
@@ -308,7 +308,7 @@ struct InboxView: View {
         } else if family == .systemSmall {
             small
         } else {
-            list(family == .systemLarge ? 8 : 3)
+            list(columns: family == .systemExtraLarge ? 2 : 1)
         }
     }
 
@@ -343,17 +343,27 @@ struct InboxView: View {
         .widgetURL(unread.first?.url ?? URL(string: "raft://"))
     }
 
-    func list(_ count: Int) -> some View {
+    /// As many rows as the widget's height holds (a row is about 36 points), in [columns] columns.
+    func list(columns: Int) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             header
             if snap.rows.isEmpty {
                 Spacer()
                 Text("No conversations yet").font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity)
             }
-            ForEach(snap.rows.prefix(count), id: \.self) { r in
-                Link(destination: r.url ?? URL(string: "raft://")!) { row(r) }
+            GeometryReader { g in
+                let count = max(1, Int(g.size.height / 36))
+                HStack(alignment: .top, spacing: 20) {
+                    ForEach(0..<columns, id: \.self) { c in
+                        VStack(alignment: .leading, spacing: 7) {
+                            ForEach(snap.rows.dropFirst(c * count).prefix(count), id: \.self) { r in
+                                Link(destination: r.url ?? URL(string: "raft://")!) { row(r) }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .top)
+                    }
+                }
             }
-            Spacer(minLength: 0)
         }
     }
 
@@ -403,7 +413,7 @@ struct RaftWidget: Widget {
         StaticConfiguration(kind: "RaftInbox", provider: Provider()) { RaftWidgetView(entry: $0) }
             .configurationDisplayName("Raft")
             .description("Your latest conversations.")
-            .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+            .supportedFamilies(withTallest([.systemSmall, .systemMedium, .systemLarge, .systemExtraLarge]))
     }
 }
 
@@ -452,17 +462,82 @@ struct BriefProvider: AppIntentTimelineProvider {
 }
 
 struct BriefView: View {
+    @Environment(\.widgetFamily) var family
     var entry: BriefEntry
 
     var body: some View {
-        BriefCard(brief: entry.brief)
+        BriefCard(brief: entry.brief, columns: family == .systemExtraLarge ? 2 : 1)
             .containerBackground(Color(.systemBackground), for: .widget)
     }
 }
 
-/// The brief as a card: a line that is all bold is a heading, `- ` a bullet, the rest text.
+/// One piece of a brief (the format briefers write, plain markdown so it also reads well in chat):
+/// `# title`, `| 6 unread | 2 @you |` stat tiles, `## 🔔 section` (a leading emoji becomes its tile;
+/// a line that is all `**bold**` is a section too), `- item`, `- [ ] todo` / `- [x] done`,
+/// `> callout`, `[3/9] label` progress, `---` divider; inline `**bold**`, `==highlight==`, links.
+enum Block: Hashable {
+    case title(String)
+    case stats([String])
+    case section(String)
+    case bullet(String)
+    case check(Bool, String)
+    case callout(String)
+    case progress(Int, Int, String)
+    case divider
+    case text(String)
+
+    static func parse(_ content: String) -> [Block] {
+        content.split(separator: "\n").compactMap { raw in
+            let l = raw.trimmingCharacters(in: .whitespaces)
+            if l.isEmpty { return nil }
+            if l == "---" || l == "***" { return .divider }
+            if l.hasPrefix("# ") { return .title(String(l.dropFirst(2))) }
+            if l.hasPrefix("## ") || l.hasPrefix("### ") { return .section(l.drop { $0 == "#" }.trimmingCharacters(in: .whitespaces)) }
+            if l.count > 4, l.hasPrefix("**"), l.hasSuffix("**"), !l.dropFirst(2).dropLast(2).contains("**") {
+                return .section(String(l.dropFirst(2).dropLast(2)))
+            }
+            if l.hasPrefix("|") {
+                return .stats(l.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+            }
+            if l.hasPrefix("- [ ] ") { return .check(false, String(l.dropFirst(6))) }
+            if l.hasPrefix("- [x] ") || l.hasPrefix("- [X] ") { return .check(true, String(l.dropFirst(6))) }
+            if l.hasPrefix("- ") || l.hasPrefix("• ") { return .bullet(String(l.dropFirst(2))) }
+            if l.hasPrefix(">") { return .callout(l.dropFirst().trimmingCharacters(in: .whitespaces)) }
+            if let m = l.firstMatch(of: /^\[(\d+)\/(\d+)\]\s*(.*)$/), let done = Int(m.1), let total = Int(m.2), total > 0 {
+                return .progress(done, total, String(m.3))
+            }
+            return .text(l)
+        }
+    }
+}
+
+/// The leading emoji of [s] and the rest, or nil and [s].
+func leadingEmoji(_ s: String) -> (String?, String) {
+    // Digits, # and * count as emoji too: only pictographs (above Latin-1) do here.
+    guard let first = s.first, let scalar = first.unicodeScalars.first,
+          scalar.properties.isEmojiPresentation || (scalar.properties.isEmoji && scalar.value > 0xFF) else { return (nil, s) }
+    return (String(first), s.dropFirst().trimmingCharacters(in: .whitespaces))
+}
+
+/// Inline markdown plus `==highlight==` (yellow, like a marker pen).
+func inline(_ text: String) -> AttributedString {
+    var out = AttributedString()
+    for (i, part) in text.components(separatedBy: "==").enumerated() {
+        var piece = (try? AttributedString(markdown: part, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+            ?? AttributedString(part)
+        if i % 2 == 1 {
+            piece.backgroundColor = .raftYellow
+            piece.foregroundColor = .raftInk
+        }
+        out += piece
+    }
+    return out
+}
+
+/// The brief as a card, decorated by [Block]; two columns on the extra large widget.
 struct BriefCard: View {
     var brief: Brief
+    var columns = 1
 
     var body: some View {
         if brief.signedOut {
@@ -476,16 +551,20 @@ struct BriefCard: View {
             }
             .multilineTextAlignment(.center)
         } else {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 7) {
-                    Tile(symbol: "sparkles", size: 22)
-                    Text(brief.title).font(.system(size: 15, weight: .bold, design: .rounded)).lineLimit(1)
-                    Spacer()
-                    Text(brief.time.formatted(date: .omitted, time: .shortened))
-                        .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+            let blocks = Block.parse(brief.content)
+            let top = Array(blocks.prefix { if case .section = $0 { false } else { true } })
+            let rest = Array(blocks.dropFirst(top.count))
+            VStack(alignment: .leading, spacing: 6) {
+                header
+                ForEach(Array(top.enumerated()), id: \.offset) { _, b in view(b) }
+                HStack(alignment: .top, spacing: 20) {
+                    ForEach(Array(split(rest).enumerated()), id: \.offset) { _, col in
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(col.enumerated()), id: \.offset) { _, b in view(b) }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
                 }
-                .padding(.bottom, 3)
-                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in block(line) }
                 Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -493,36 +572,111 @@ struct BriefCard: View {
         }
     }
 
-    var lines: [String] {
-        brief.content.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-    }
-
-    @ViewBuilder func block(_ line: String) -> some View {
-        if line.hasPrefix("**"), line.hasSuffix("**"), line.count > 4 {
-            HStack(spacing: 5) {
-                RoundedRectangle(cornerRadius: 1.5).fill(Color.raftYellow)
-                    .overlay(RoundedRectangle(cornerRadius: 1.5).strokeBorder(Color.raftInk, lineWidth: 1))
-                    .frame(width: 4, height: 12)
-                Text(line.dropFirst(2).dropLast(2)).font(.system(size: 12, weight: .heavy, design: .rounded))
-            }
-            .padding(.top, 4)
-        } else if line.hasPrefix("- ") {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Circle().fill(Color.secondary).frame(width: 4, height: 4).alignmentGuide(.firstTextBaseline) { $0[.bottom] + 3 }
-                inline(String(line.dropFirst(2)))
-            }
-            .padding(.leading, 9)
-        } else {
-            inline(line)
+    var header: some View {
+        HStack(spacing: 7) {
+            Tile(symbol: "sparkles", size: 22)
+            Text(brief.title).font(.system(size: 15, weight: .bold, design: .rounded)).lineLimit(1)
+            Spacer()
+            Text(brief.time.formatted(date: .omitted, time: .shortened))
+                .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
         }
     }
 
-    func inline(_ text: String) -> some View {
-        Text((try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-             ?? AttributedString(text))
-            .font(.system(size: 12.5))
-            .lineLimit(2)
-            .minimumScaleFactor(0.85)
+    /// [blocks] in [columns] columns, each break at the section nearest an even share.
+    func split(_ blocks: [Block]) -> [[Block]] {
+        guard columns > 1, blocks.count > 1 else { return [blocks] }
+        let starts = blocks.indices.filter { if case .section = blocks[$0] { $0 > 0 } else { false } }
+        guard let cut = starts.min(by: { abs($0 * 2 - blocks.count) < abs($1 * 2 - blocks.count) }) else { return [blocks] }
+        return [Array(blocks[..<cut]), Array(blocks[cut...])]
+    }
+
+    @ViewBuilder func view(_ b: Block) -> some View {
+        switch b {
+        case .title(let t):
+            Text(inline(t)).font(.system(size: 17, weight: .heavy, design: .rounded)).lineLimit(1).minimumScaleFactor(0.8)
+        case .stats(let cells):
+            HStack(spacing: 6) {
+                ForEach(Array(cells.prefix(4).enumerated()), id: \.offset) { _, cell in stat(cell) }
+            }
+        case .section(let t):
+            let (emoji, rest) = leadingEmoji(t)
+            HStack(spacing: 6) {
+                if let emoji {
+                    RoundedRectangle(cornerRadius: 5).fill(Color.raftYellow)
+                        .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.raftInk, lineWidth: 1.2))
+                        .overlay(Text(emoji).font(.system(size: 11)))
+                        .frame(width: 20, height: 20)
+                } else {
+                    RoundedRectangle(cornerRadius: 1.5).fill(Color.raftYellow)
+                        .overlay(RoundedRectangle(cornerRadius: 1.5).strokeBorder(Color.raftInk, lineWidth: 1))
+                        .frame(width: 4, height: 13)
+                }
+                Text(inline(rest)).font(.system(size: 12.5, weight: .heavy, design: .rounded)).lineLimit(1)
+            }
+            .padding(.top, 3)
+        case .bullet(let t):
+            let (emoji, rest) = leadingEmoji(t)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                if let emoji { Text(emoji).font(.system(size: 11)) } else {
+                    Circle().fill(Color.secondary).frame(width: 4, height: 4).alignmentGuide(.firstTextBaseline) { $0[.bottom] + 3 }
+                }
+                body(rest)
+            }
+            .padding(.leading, 6)
+        case .check(let done, let t):
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: done ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(done ? Color.secondary : Color.primary)
+                body(t).strikethrough(done).foregroundStyle(done ? .secondary : .primary)
+            }
+            .padding(.leading, 6)
+        case .callout(let t):
+            body(t)
+                .padding(.horizontal, 8).padding(.vertical, 5)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Color.raftYellow.opacity(0.28)))
+                .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Color.raftInk, lineWidth: 1.2))
+        case .progress(let done, let total, let label):
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    body(label)
+                    Spacer()
+                    Text("\(done)/\(total)").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundStyle(.secondary)
+                }
+                GeometryReader { g in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color(.tertiarySystemFill))
+                        Capsule().fill(Color.raftYellow)
+                            .overlay(Capsule().strokeBorder(Color.raftInk, lineWidth: 1.2))
+                            .frame(width: max(8, g.size.width * CGFloat(min(done, total)) / CGFloat(total)))
+                    }
+                }
+                .frame(height: 8)
+            }
+        case .divider:
+            Rectangle().fill(Color.secondary.opacity(0.3)).frame(height: 1).padding(.vertical, 2)
+        case .text(let t):
+            body(t)
+        }
+    }
+
+    /// A stat tile: the leading number big, the words under it.
+    func stat(_ cell: String) -> some View {
+        let parts = cell.split(separator: " ", maxSplits: 1).map(String.init)
+        return VStack(alignment: .leading, spacing: 0) {
+            Text(parts.first ?? "").font(.system(size: 20, weight: .heavy, design: .rounded)).lineLimit(1).minimumScaleFactor(0.6)
+            Text(parts.count > 1 ? parts[1] : "").font(.system(size: 10.5, weight: .semibold)).lineLimit(1)
+        }
+        .foregroundStyle(Color.raftInk)
+        .padding(.horizontal, 8).padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.raftYellow))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.raftInk, lineWidth: 1.5))
+    }
+
+    func body(_ t: String) -> Text {
+        Text(inline(t)).font(.system(size: 12.5))
     }
 }
 
@@ -531,8 +685,14 @@ struct RaftBriefWidget: Widget {
         AppIntentConfiguration(kind: "RaftBrief", intent: BriefSource.self, provider: BriefProvider()) { BriefView(entry: $0) }
             .configurationDisplayName("Raft Brief")
             .description("A daily brief or dashboard an agent writes into a channel or DM.")
-            .supportedFamilies([.systemMedium, .systemLarge])
+            .supportedFamilies(withTallest([.systemMedium, .systemLarge, .systemExtraLarge]))
     }
+}
+
+/// [families] and, from iOS 27, the tall extra large size (the biggest on an iPhone Duo's inner screen).
+func withTallest(_ families: [WidgetFamily]) -> [WidgetFamily] {
+    if #available(iOS 27, *) { return families + [.systemExtraLargePortrait] }
+    return families
 }
 
 @main
