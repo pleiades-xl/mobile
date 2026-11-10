@@ -4152,6 +4152,9 @@ private fun RaftAppShellReadyContent(
             desktopModeEnabled = desktopModeOnLargeScreen,
             paneState = shellScope.adaptivePane
         )
+    // Self-build (xuheng-li, runzhou-tao 2026-11-10): on iPhone Duo's inner screen held sideways the
+    // side column shows the system tab bar and the server tab, as on the outer screen, not the rail.
+    val systemSideBar = navRailActive && LocalRaftSideColumnPosture.current.sideColumn && raftNativeTabBarBridge() != null
     // The wide layout's profile and Artifact columns (RaftWideSideColumns.kt, #189 steps 3-4): they belong to the
     // conversation picked, and reopen as pages when the window leaves the wide layout.
     val sideColumns = rememberRaftWideSideColumns(adaptiveWorkspaceState?.selection?.identity, navRailActive, tab = selectedTab)
@@ -4353,7 +4356,7 @@ private fun RaftAppShellReadyContent(
             selectedTab = selectedTab,
             selectedHomeDestination = selectedHomeDestination,
             navRailActive = navRailActive,
-        ) && !navRailActive &&
+        ) && (!navRailActive || systemSideBar) &&
             !appShellAdaptiveDetailCoversTabRoot(
                 desktopModeOnLargeScreen = desktopModeOnLargeScreen,
                 selectedTab = selectedTab,
@@ -5149,7 +5152,7 @@ private fun RaftAppShellReadyContent(
                 entries =
                     raftServerMenuEntriesFor(
                         serverMenuModel.entries,
-                        wide = navRailActive,
+                        wide = navRailActive && !systemSideBar,
                         guest = serverMenuContent.snapshot.server.role.equals("guest", ignoreCase = true),
                         artifacts = serverMenuArtifactsShown,
                     ),
@@ -5314,6 +5317,18 @@ private fun RaftAppShellReadyContent(
             }
         }
     val mainRouteSurface: @Composable () -> Unit = {
+        if (systemSideBar) {
+            // The system's side column holds the wide history's Back, as with the rail.
+            raftSideColumnFallbackBack(
+                raftSideColumnBackAction(
+                    onBack = {
+                        appShellTopBar.bellOpen.value = false
+                        navigateWideHistory(RaftWideNavDirection.Back, source = "side_column")
+                    },
+                    enabled = wideNavHistory.canGoBack,
+                )
+            )
+        }
         CompositionLocalProvider(
             LocalRaftAppShellTopBar provides appShellTopBar.takeIf { navRailActive },
             LocalRaftWorkingNow provides workingNowSource,
@@ -5390,6 +5405,16 @@ private fun RaftAppShellReadyContent(
                     surface = RaftNavSurface.MobileTabBar,
                     wasActive = appShellPhoneBottomBarSelectedKey(selectedTab) == key,
                 )
+                if (systemSideBar) {
+                    // The wide layout's Search is the rail's inline Search; a tab closes it.
+                    appShellTopBar.bellOpen.value = false
+                    if (key == "search") {
+                        if (railInlineSecondaryDestination == AppShellRailSearchKey) railInlineSearchFocusRequest += 1
+                        railInlineSecondaryDestination = AppShellRailSearchKey
+                        return@RaftAppShellSurface
+                    }
+                    railInlineSecondaryDestination = null
+                }
                 onAppShellTabSelected(key)
             },
             networkStatus = hostNetworkStatus,
@@ -5412,7 +5437,7 @@ private fun RaftAppShellReadyContent(
             interactionLocked = false,
             modalHostState = appShellModalHostState,
             leadingNavigation =
-                if (navRailActive) {
+                if (navRailActive && !systemSideBar) {
                     // task #31: Web LeftRail parity — icon-only tabs, settings pinned to the bottom.
                     // artin task #8: the top bar holds the server and Search, so the rail has
                     // neither (web LeftRail with the top bar).
@@ -5672,7 +5697,7 @@ private fun RaftAppShellReadyContent(
             shellOverlay =
                 if (navRailActive) {
                     {
-                        serverMenuOverlay(true)
+                        if (!systemSideBar) serverMenuOverlay(true)
                         RaftAppTopBarNotificationOverlay(
                             appShellTopBar,
                             raftAppShellTopBarMenuTopInset(shellScope.topSafeArea),
@@ -5703,7 +5728,7 @@ private fun RaftAppShellReadyContent(
                     // The wide top bar clears the status bar: the pages under it start at its seam.
                     @Suppress("NAME_SHADOWING")
                     val shellScope = if (navRailActive && !railWithoutTopBar) shellScope.copy(topSafeArea = 0.dp) else shellScope
-                    if (!navRailActive && showAppShellBottomTabs) serverMenuOverlay(false)
+                    if ((!navRailActive || systemSideBar) && showAppShellBottomTabs) serverMenuOverlay(false)
                     serverSwitcherInviteServerId?.let { inviteServerId ->
                         val inviteMembersDataSource =
                             remember(memberRepository, settingsRepository, appShellServerMembersStore) {
