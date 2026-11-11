@@ -16,6 +16,9 @@ interface RaftCmpNavigator {
 
     /** Closes the page hosting this composition (Android: finish the Activity; iOS: pop/dismiss). */
     fun closePage()
+
+    /** Self-build: [closePage] without the transition (iOS); hosts without one just close. */
+    fun closePageWithoutAnimation() = closePage()
 }
 
 /**
