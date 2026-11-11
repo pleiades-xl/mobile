@@ -335,6 +335,7 @@ internal fun RaftLucideIconName.raftSystemSymbol(): String? =
         RaftLucideIconName.Settings -> "gearshape"
         RaftLucideIconName.Bell -> "bell"
         RaftLucideIconName.MapPin -> "mappin.and.ellipse"
+        RaftLucideIconName.List -> "list.bullet"
         RaftLucideIconName.Maximize2 -> "arrow.up.left.and.arrow.down.right"
         RaftLucideIconName.Square -> "arrow.down.right.and.arrow.up.left"
         RaftLucideIconName.MessageSquareDot -> "message.badge"
