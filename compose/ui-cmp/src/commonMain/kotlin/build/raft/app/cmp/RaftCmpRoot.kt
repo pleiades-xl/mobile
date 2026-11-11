@@ -177,6 +177,11 @@ private class RaftPageCoverNavigator(
         guard?.cancelPending()
         platform.closePage()
     }
+
+    override fun closePageWithoutAnimation() {
+        guard?.cancelPending()
+        platform.closePageWithoutAnimation()
+    }
 }
 
 @Composable
