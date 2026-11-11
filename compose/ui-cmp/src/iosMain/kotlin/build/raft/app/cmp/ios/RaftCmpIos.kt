@@ -107,6 +107,8 @@ interface RaftCmpIosNavigator {
     @OptIn(ExperimentalObjCName::class)
     @ObjCName("currentTopPage")
     fun currentTopPage(): RaftCmpIosTopPage?
+
+    fun closePageWithoutAnimation()
 }
 
 /** Implemented by the iOS page container (`RaftPageViewController`): page -> host notifications. */
@@ -501,4 +503,6 @@ private class IosNavigator(private val navigator: RaftCmpIosNavigator) : RaftCmp
 
     override fun topPage(): RaftCmpPageArgs? =
         navigator.currentTopPage()?.let { RaftCmpPageArgs.fromJsonText(it.pageName, it.pageDataJson) }
+
+    override fun closePageWithoutAnimation() = navigator.closePageWithoutAnimation()
 }

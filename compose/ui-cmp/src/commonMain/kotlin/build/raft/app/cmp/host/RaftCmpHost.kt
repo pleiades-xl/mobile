@@ -17,6 +17,9 @@ interface RaftCmpNavigator {
     /** Closes the page hosting this composition (Android: finish the Activity; iOS: pop/dismiss). */
     fun closePage()
 
+    /** Self-build: [closePage] without the transition (iOS); hosts without one just close. */
+    fun closePageWithoutAnimation() = closePage()
+
     /**
      * What an [openPage] of [pageName] with [pageData] does to the page's open guard
      * ([RaftPageOpenGuard]): [RaftPageOpenTransition.Timed] (the default) holds its fixed push
