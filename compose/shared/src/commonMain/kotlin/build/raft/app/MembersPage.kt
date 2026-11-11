@@ -7837,6 +7837,8 @@ private fun MembersHumanDetailHeader(
     val colors = RaftTheme.colors
     val typography = RaftTheme.typography
     val messageLabel = stringResource(Res.string.member_label_message)
+    // iPhone Duo (raft-design #859): beside the system's side column Back is the column's.
+    val backInColumn = raftSideColumnControls(back = raftSideColumnBackAction(onBack))
     RaftTopPageHeader(
         title = member.displayName,
         // PROTOTYPE (native nav bar): the @handle under the name, Message as the bar button.
@@ -7849,12 +7851,12 @@ private fun MembersHumanDetailHeader(
             },
         nativeOnBack = onBack,
         backgroundColor = RaftColor.Canvas,
-        contentStartPadding = MembersHumanHeaderEdgeInset,
+        contentStartPadding = if (backInColumn) RaftTopPageHeaderContentStartPadding else MembersHumanHeaderEdgeInset,
         contentEndPadding = if (canMessage) MembersHumanHeaderEdgeInset else RaftTopPageHeaderContentEndPadding,
         contentSpacing = MembersHumanHeaderContentSpacing,
         showBodyTopBanner = false,
         titleLeadingContent = {
-            RaftPaneAwareBackButton(onClick = onBack)
+            if (!backInColumn) RaftPaneAwareBackButton(onClick = onBack)
             MembersStickerAvatar(member, RaftAvatarSize.Md, memberAvatarResolver)
         },
         titleContent = {
@@ -7995,6 +7997,8 @@ internal fun MembersDetailHeader(
         }
         return
     }
+    // iPhone Duo (raft-design #859): beside the system's side column Back is the column's.
+    val backInColumn = raftSideColumnControls(back = raftSideColumnBackAction(onBack))
     // raft-ui ProfilePanelHeader on a phone: a 56dp head on `layer-canvas` with a `line-seam`
     // under it; Back, the 35dp avatar, the title (`text-headline` bold) over one line of
     // meta (`text-caption`, `foreground-hint`), then 44dp ghost PanelActions 2dp apart.
@@ -8013,11 +8017,14 @@ internal fun MembersDetailHeader(
                     // 56 with a finger, 44 under a mouse or trackpad (sizing v12, raft-ui 0.65 desktop density).
                     .height(RaftTheme.controls.headHeight - RaftStroke.Hairline)
                     // 3dp for a finger's 44dp buttons; 8dp for the 28dp bar buttons (sizing v12).
-                    .padding(horizontal = RaftBackButtonDefaults.EdgeInset - 2.dp),
+                    .padding(
+                        start = if (backInColumn) RaftTopPageHeaderContentStartPadding else RaftBackButtonDefaults.EdgeInset - 2.dp,
+                        end = RaftBackButtonDefaults.EdgeInset - 2.dp,
+                    ),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(RaftAppSpacing.Sm)
             ) {
-                RaftPaneAwareBackButton(onClick = onBack)
+                if (!backInColumn) RaftPaneAwareBackButton(onClick = onBack)
                 // The web's panel head shows the avatar only; it is changed from the profile hero.
                 MembersRaftAvatar(
                     member = member,

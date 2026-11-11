@@ -491,15 +491,19 @@ internal fun TaskPendingConversationPage(
     // The conversation page's canvas, so its composer dock sits on the same ground as there.
     // A press anywhere on the page outside the pulled-down head puts it back up, the composer included.
     Column(modifier.fillMaxSize().background(colors.layerCanvas).taskHeadFloatOutsidePress(headScrollState)) {
-        // The conversation page's top bar (ThreadPage's header for a task conversation).
+        // The conversation page's top bar (ThreadPage's header for a task conversation). iPhone
+        // Duo (raft-design #859): beside the system's side column Back is the column's.
+        val backInColumn = raftSideColumnControls(back = raftSideColumnBackAction({ if (!sending) onBack() }))
         RaftTopPageHeader(
             title = task.taskRefTitle(),
             backgroundColor = RaftColor.Canvas,
             topSafeAreaOverride = WindowInsets.safeDrawing.asPaddingValues().calculateTopPadding(),
-            contentStartPadding = RaftBackButtonDefaults.EdgeInset,
+            contentStartPadding = if (backInColumn) RaftTopPageHeaderContentStartPadding else RaftBackButtonDefaults.EdgeInset,
             contentSpacing = ThreadHeaderContentSpacing,
             titleLeadingContent = {
-                RaftBackButton(onClick = { if (!sending) onBack() }, label = stringResource(Res.string.common_back))
+                if (!backInColumn) {
+                    RaftBackButton(onClick = { if (!sending) onBack() }, label = stringResource(Res.string.common_back))
+                }
             },
             titleContent = { TaskConversationBarTitle(chrome, Modifier.weight(1f)) },
         )
