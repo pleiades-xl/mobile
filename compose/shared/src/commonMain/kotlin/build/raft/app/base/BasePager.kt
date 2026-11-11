@@ -85,13 +85,14 @@ internal abstract class BasePager : ComposeContainer() {
                 RaftPageLayersContent(layers = layers, content = content)
             }
             // Self-build: while a conversation is handed to the shell ([RaftWideHandoff]), the visible
-            // page over the shell closes, and each page under it as it reappears.
+            // page over the shell closes, and each page under it as it reappears. On an unfold they
+            // close without the slide: the conversation shows up in the detail pane instead.
             val handoff = RaftWideHandoff.pending
             LaunchedEffect(handoff, raftPageVisible) {
                 if (handoff != null && raftPageVisible && RaftWideHandoff.closesPages &&
                     raftSearchTabHandoffRole == RaftSearchTabHandoffRole.PopToShell
                 ) {
-                    acquireModule<RouterModule>(RouterModule.MODULE_NAME).closePage()
+                    acquireModule<RouterModule>(RouterModule.MODULE_NAME).closePage(animated = !RaftWideHandoff.waitForWide)
                 }
             }
         }

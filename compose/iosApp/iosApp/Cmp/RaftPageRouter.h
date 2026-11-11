@@ -15,6 +15,7 @@ NS_ASSUME_NONNULL_BEGIN
               controller:(UIViewController *)controller;
 
 - (void)closePage:(UIViewController *)controller;
+- (void)closePage:(UIViewController *)controller animated:(BOOL)animated;
 
 @end
 
