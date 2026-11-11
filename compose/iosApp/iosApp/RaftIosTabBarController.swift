@@ -59,7 +59,8 @@ final class RaftIosTabBarController: UIViewController {
 
     let hostId: String
     private let content: UIViewController
-    private let bridge: RaftNativeTabBarBridge
+    /// nil for a mirror (below).
+    private let bridge: RaftNativeTabBarBridge?
     private let systemTabBarController = RaftIosSystemTabBarController()
     /// The live tab bar of [window], for the host facts that measure it (the iPhone Duo side
     /// column needs how much of the strip the bar takes). The bar is not in the window's own
@@ -112,8 +113,24 @@ final class RaftIosTabBarController: UIViewController {
     static weak var scriptCurrent: RaftIosTabBarController?
 
     func scriptSelectTab(_ key: String) -> Bool {
-        bridge.selectTab(key: key)
+        bridge?.selectTab(key: key) ?? false
     }
+
+    /// Self-build (xuheng-li 2026-11-11): on iPhone Duo a page pushed over the shell keeps the
+    /// shell's tabs in the side column, as the inner screen does: a mirror of the shell's bar,
+    /// shown only beside a side column. A tap closes the pages over the shell and selects there.
+    init(mirroring content: UIViewController) {
+        self.content = content
+        self.bridge = nil
+        self.hostId = ""
+        self.keepsEdgeTouches = { _ in false }
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    /// The shell's bar and its latest state, which mirrors show.
+    private static weak var shell: RaftIosTabBarController?
+    private static var shellState: RaftNativeTabBarState?
+    private static let shellStateDidChange = Notification.Name("RaftIosTabBarController.shellStateDidChange")
 
     /// [bridge] must already be registered under [hostId]; this controller unregisters it.
     init(
@@ -135,6 +152,7 @@ final class RaftIosTabBarController: UIViewController {
     }
 
     deinit {
+        guard let bridge else { return }
         bridge.detachListener()
         RaftNativeTabBarRegistry.shared.unregister(hostId: hostId, bridge: bridge)
     }
@@ -179,7 +197,9 @@ final class RaftIosTabBarController: UIViewController {
         tabs.didMove(toParent: self)
         overlayView.tabBar = tabs.tabBar
         overlayView.barHost = tabs.view
-        RaftIosTabBarController.setLiveTabBarProvider { [weak tabs] in tabs?.tabBar }
+        if bridge != nil {
+            RaftIosTabBarController.setLiveTabBarProvider { [weak tabs] in tabs?.tabBar }
+        }
         tabs.tabBar.tintColor = .label
         applyAppearance()
         NotificationCenter.default.addObserver(
@@ -190,9 +210,21 @@ final class RaftIosTabBarController: UIViewController {
         )
         applyVisibility(false, animated: false)
 
+        guard let bridge else {
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(shellStateDidChange), name: Self.shellStateDidChange, object: nil
+            )
+            shellStateDidChange()
+            return
+        }
         // Replays the current shared state.
         bridge.attachListener(listener: stateListener)
         RaftIosTabBarController.scriptCurrent = self
+        RaftIosTabBarController.shell = self
+    }
+
+    @objc private func shellStateDidChange() {
+        if let state = Self.shellState { apply(state) }
     }
 
     /// The bar takes the app's theme choice itself. Inherited from the window alone, an app set
@@ -209,6 +241,8 @@ final class RaftIosTabBarController: UIViewController {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        // A mirror shows only beside a side column, which the window decides (fold, rotation).
+        if bridge == nil { shellStateDidChange() }
         reportBand()
         keepRailTouches()
         if #available(iOS 26.1, *), ProcessInfo.processInfo.isiOSAppOnVision, let window = view.window {
@@ -231,6 +265,11 @@ final class RaftIosTabBarController: UIViewController {
     // MARK: - Shared state -> UIKit
 
     fileprivate func apply(_ state: RaftNativeTabBarState) {
+        if bridge != nil {
+            Self.shellState = state
+            NotificationCenter.default.post(name: Self.shellStateDidChange, object: nil)
+        }
+        let shown = state.visible && (bridge != nil || RaftIosSideColumnIsActive(view.window))
         if RaftNativeNavProto.realScene != nil {
             print("RAFT_PROTO_TABS keys=\(state.items.map(\.key).joined(separator: ",")) selected=\(state.selectedKey ?? "-")")
         }
@@ -253,7 +292,7 @@ final class RaftIosTabBarController: UIViewController {
             let avatar = panelKey.flatMap { key in state.items.first { $0.key == key }?.avatar }
             tabs.apply(specs, panelImage: serverAvatar(avatar), to: systemTabBarController)
             tabs.select(state.selectedKey, in: systemTabBarController)
-            applyVisibility(state.visible && !keys.isEmpty, animated: view.window != nil)
+            applyVisibility(shown && !keys.isEmpty, animated: view.window != nil)
             return
         }
         if RaftIosTabBarItemMapping.needsRebuild(currentKeys: tabKeys, nextKeys: keys) {
@@ -274,7 +313,7 @@ final class RaftIosTabBarController: UIViewController {
            systemTabBarController.selectedIndex != index {
             systemTabBarController.selectedIndex = index
         }
-        applyVisibility(state.visible && !keys.isEmpty, animated: view.window != nil)
+        applyVisibility(shown && !keys.isEmpty, animated: view.window != nil)
     }
 
     /// The server's decoded avatar, converted once per published image.
@@ -326,7 +365,7 @@ final class RaftIosTabBarController: UIViewController {
             )
         }
         reportedBand = band
-        bridge.updateBand(edge: band.edge.rawValue, points: Double(band.points))
+        bridge?.updateBand(edge: band.edge.rawValue, points: Double(band.points))
     }
 }
 
@@ -375,6 +414,12 @@ extension RaftIosTabBarController: UITabBarControllerDelegate {
         }
         if searchAction {
             RaftIosDiagnosticsRecord("info", "RaftIosTabBar", "search_action_tap")
+        }
+        guard let bridge else {
+            // A mirror: back to the shell, which then selects the tab (or opens the server panel).
+            navigationController?.popToRootViewController(animated: true)
+            DispatchQueue.main.async { _ = Self.shell?.bridge?.selectTab(key: key) }
+            return
         }
         if !bridge.selectTab(key: key) {
             RaftIosDiagnosticsRecord("warn", "RaftIosTabBar", "tab_tap_unhandled key=\(key)")
