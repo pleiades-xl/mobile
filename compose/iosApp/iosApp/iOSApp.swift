@@ -324,7 +324,7 @@ enum RaftIosPushHost {
         // Self-build: a relayed push (Raft Web Push) carries only its message link; it opens like a
         // Universal Link, on every path a tap arrives by (warm tap, cold launch).
         if let url = userInfo["url"] as? String, userInfo["serverId"] == nil {
-            let accepted = RaftMessageLinkIngress.shared.accept(url: url, source: "push_relay_\(source)", configuredWebUrl: nil)
+            let accepted = RaftIosMessageLinkOpen.accept(url, source: "push_relay_\(source)")
             RaftIosDiagnosticsRecord("info", "SlockIosPush", "relay_notification_open accepted=\(accepted) source=\(source)")
             return
         }
