@@ -128,6 +128,8 @@ private class RaftPageCoverNavigator(
     }
 
     override fun closePage() = platform.closePage()
+
+    override fun closePageWithoutAnimation() = platform.closePageWithoutAnimation()
 }
 
 @Composable
