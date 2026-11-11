@@ -243,6 +243,7 @@ final class RaftIosTabBarController: UIViewController {
         super.viewDidLayoutSubviews()
         // A mirror shows only beside a side column, which the window decides (fold, rotation).
         if bridge == nil { shellStateDidChange() }
+        reconcileVisibility()
         reportBand()
         keepRailTouches()
         if #available(iOS 26.1, *), ProcessInfo.processInfo.isiOSAppOnVision, let window = view.window {
@@ -327,6 +328,15 @@ final class RaftIosTabBarController: UIViewController {
             }
         }
         return serverAvatarImage
+    }
+
+    /// Self-build: UIKit can leave the bar hidden when it is shown during a window resize (an
+    /// iPhone Duo unfold uncovering the shell): show it again.
+    private func reconcileVisibility() {
+        guard #available(iOS 18.0, *), let visible = tabBarVisible,
+              systemTabBarController.isTabBarHidden == visible else { return }
+        RaftIosDiagnosticsRecord("info", "RaftIosTabBar", "tab_bar_reconciled visible=\(visible)")
+        systemTabBarController.setTabBarHidden(!visible, animated: false)
     }
 
     private func applyVisibility(_ visible: Bool, animated: Bool) {
