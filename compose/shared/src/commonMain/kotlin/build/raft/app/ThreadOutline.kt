@@ -77,6 +77,7 @@ import build.raft.app.data.ThreadOutlineItem
 import build.raft.app.markdown.markdownToPreviewText
 import build.raft.app.resources.*
 import build.raft.designsystem.components.RaftPopoverSurface
+import build.raft.designsystem.haptics.rememberRaftHaptics
 import build.raft.designsystem.components.RaftTooltip
 import build.raft.designsystem.text.RaftText
 import build.raft.designsystem.theme.RaftPointerInput
@@ -538,8 +539,13 @@ internal fun ThreadOutlineRail(
     // Self-build (xuheng-li 2026-11-11): on a touch screen, a drag along the rail scrubs the
     // thread: the list jumps to the message under the finger, its preview beside it.
     var scrub by remember(state) { mutableStateOf<Pair<ThreadOutlineItem, Float>?>(null) }
+    val haptics = rememberRaftHaptics()
     val onScrub: (ThreadOutlineItem?, Float) -> Unit = { item, y ->
-        if (item != null && item.id != scrub?.first?.id) jumpTo(item.id)
+        if (item != null && item.id != scrub?.first?.id) {
+            // A tick per message passed, as a picker wheel's (xuheng-li 2026-11-11).
+            haptics.tick()
+            jumpTo(item.id)
+        }
         scrub = item?.let { it to y }
     }
     // A finger's card is a transient overlay: Back closes it first.
