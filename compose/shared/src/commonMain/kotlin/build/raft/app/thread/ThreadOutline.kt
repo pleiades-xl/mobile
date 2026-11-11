@@ -7,7 +7,11 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -531,6 +535,13 @@ internal fun ThreadOutlineRail(
         if (!finePointer || !pointerInside) open = false
         onJump(messageId)
     }
+    // Self-build (xuheng-li 2026-11-11): on a touch screen, a drag along the rail scrubs the
+    // thread: the list jumps to the message under the finger, its preview beside it.
+    var scrub by remember(state) { mutableStateOf<Pair<ThreadOutlineItem, Float>?>(null) }
+    val onScrub: (ThreadOutlineItem?, Float) -> Unit = { item, y ->
+        if (item != null && item.id != scrub?.first?.id) jumpTo(item.id)
+        scrub = item?.let { it to y }
+    }
     // A finger's card is a transient overlay: Back closes it first.
     RaftBackHandler(enabled = open && !finePointer, label = "thread_outline_card", onBack = { open = false })
 
@@ -582,7 +593,9 @@ internal fun ThreadOutlineRail(
                     onTickClick = { messageId -> if (finePointer) jumpTo(messageId) else open = true },
                     onOpen = { open = true },
                     openLabel = openLabel,
+                    onScrub = if (finePointer) null else onScrub,
                 )
+                scrub?.let { (item, y) -> ThreadOutlineScrubPreview(item, formatTime(item.createdAt), y) }
             }
         }
     }
@@ -598,8 +611,11 @@ private fun ThreadOutlineTicks(
     onTickClick: (String) -> Unit,
     onOpen: () -> Unit,
     openLabel: String,
+    /** A finger dragging along the rail: the item under it and its y in the rail, null on lift. */
+    onScrub: ((ThreadOutlineItem?, Float) -> Unit)? = null,
 ) {
     val railHeight = minOf(ThreadOutlineTickRow * items.size, ThreadOutlineRailMaxHeight)
+    val latestItems by rememberUpdatedState(items)
     val railState = rememberLazyListState()
     val visibleTicks = (railHeight / ThreadOutlineTickRow).toInt().coerceAtLeast(1)
     // The rail follows the list: where the reader is stays in its middle (web).
@@ -623,7 +639,29 @@ private fun ThreadOutlineTicks(
                         true
                     }
                 }
-                .then(if (finePointer) Modifier.focusable() else Modifier),
+                .then(if (finePointer) Modifier.focusable() else Modifier)
+                .then(
+                    if (onScrub == null) {
+                        Modifier
+                    } else {
+                        // The whole thread along the rail's height, so a short rail still reaches every message.
+                        Modifier.pointerInput(Unit) {
+                            fun at(y: Float): ThreadOutlineItem? {
+                                val all = latestItems.ifEmpty { return null }
+                                return all[(y / size.height * all.size).toInt().coerceIn(0, all.lastIndex)]
+                            }
+                            detectVerticalDragGestures(
+                                onDragStart = { onScrub(at(it.y), it.y) },
+                                onDragEnd = { onScrub(null, 0f) },
+                                onDragCancel = { onScrub(null, 0f) },
+                            ) { change, _ ->
+                                change.consume()
+                                val y = change.position.y.coerceIn(0f, size.height.toFloat())
+                                onScrub(at(y), y)
+                            }
+                        }
+                    }
+                ),
         userScrollEnabled = finePointer,
     ) {
         itemsIndexed(items, key = { _, item -> item.id }) { index, item ->
@@ -650,6 +688,33 @@ private fun ThreadOutlineTicks(
                 ThreadOutlineTick(own = item.senderId in ownSenderIds, current = index == currentIndex, hovered = hovered)
             }
         }
+    }
+}
+
+/** Self-build: the scrubbed message beside the rail, at the finger's height [y] (px in the rail). */
+@Composable
+private fun BoxScope.ThreadOutlineScrubPreview(item: ThreadOutlineItem, time: String, y: Float) {
+    val colors = RaftTheme.colors
+    RaftPopoverSurface(
+        modifier =
+            Modifier
+                .align(Alignment.TopEnd)
+                .offset { IntOffset(-(ThreadOutlineRailWidth + 8.dp).roundToPx(), y.toInt() - 24.dp.roundToPx()) },
+        width = 240.dp,
+    ) {
+        RaftText(
+            text = threadOutlineItemText(item),
+            style = RaftTheme.typography.callout,
+            color = colors.foreground,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        RaftText(
+            text = listOf(item.senderName, time).filter { it.isNotBlank() }.joinToString(" · "),
+            style = RaftTheme.typography.caption,
+            color = colors.foregroundMuted,
+            maxLines = 1,
+        )
     }
 }
 
