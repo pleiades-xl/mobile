@@ -287,6 +287,10 @@ static NSString *RaftPageWindowId(NSString *controllerToken) {
     // page keeps it hidden and draws its own head, as before.
     [self.navigationController setNavigationBarHidden:![self raftShowsNativeNavBar]
                                              animated:self.raftUsesNativeNavBar ? animated : NO];
+    // Self-build: a page uncovered after the window changed size (iPhone Duo unfold) lays out for
+    // the new size during the pop, not only once it has appeared.
+    _raftAdaptivePanePublishingActive = YES;
+    [self raftPublishAdaptivePaneForCurrentBounds:@"willAppear"];
 }
 
 /// PROTOTYPE: the real bar shows for a native-bar page while one of its heads publishes.
