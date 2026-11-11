@@ -5705,7 +5705,12 @@ private fun RaftAppShellReadyContent(
     LaunchedEffect(wideHandoff, pageVisible, desktopModeOnLargeScreen, readyServerId) {
         val launchPayload = wideHandoff ?: return@LaunchedEffect
         if (!pageVisible) return@LaunchedEffect
-        val inDetail = openLaunchPayloadInAdaptiveDetail(launchPayload) != null
+        // Already the detail pane's conversation (it was open there before the fold): nothing to open.
+        val shownIdentity = readyServerId?.let(launchPayload::toRaftAdaptiveDetailIdentity)
+        val alreadyShown =
+            desktopModeOnLargeScreen && shownIdentity != null &&
+                adaptiveWorkspaceStore.snapshot().workspace?.selection?.identity == shownIdentity
+        val inDetail = alreadyShown || openLaunchPayloadInAdaptiveDetail(launchPayload) != null
         if (!inDetail && RaftWideHandoff.waitForWide) delay(1_500)
         RaftWideHandoff.clear()
         if (!inDetail) pager.openStandaloneThreadLaunchPayload(launchPayload, navigationStoreScope)
