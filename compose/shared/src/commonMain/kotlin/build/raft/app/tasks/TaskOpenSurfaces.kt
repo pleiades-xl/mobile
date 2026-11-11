@@ -912,15 +912,23 @@ internal fun TaskPendingConversationPage(
         // column (web TaskConversationBar on a desktop) the column's Expand and Close end it and it has no Back, as
         // the conversation's own head there; as a page of its own Back leads it.
         val taskColumnHead = LocalRaftTaskColumnHead.current
+        // iPhone Duo (raft-design #859): beside the system's side column Back is the column's.
+        val backInColumn =
+            raftSideColumnControls(back = raftSideColumnBackAction({ if (!sending) onBack() }), enabled = taskColumnHead == null)
         RaftTopPageHeader(
             title = task.taskRefTitle(),
             backgroundColor = RaftColor.Canvas,
             topSafeAreaOverride = if (useHostSafeArea) null else WindowInsets.safeDrawing.asPaddingValues().calculateTopPadding(),
-            contentStartPadding = if (taskColumnHead == null) RaftBackButtonDefaults.EdgeInset else ThreadSplitDetailEdgeInset,
+            contentStartPadding =
+                when {
+                    taskColumnHead != null -> ThreadSplitDetailEdgeInset
+                    backInColumn -> RaftTopPageHeaderContentStartPadding
+                    else -> RaftBackButtonDefaults.EdgeInset
+                },
             contentEndPadding = if (taskColumnHead == null) RaftTopPageHeaderContentEndPadding else RaftBackButtonDefaults.EdgeInset,
             contentSpacing = ThreadHeaderContentSpacing,
             titleLeadingContent =
-                if (taskColumnHead == null) {
+                if (taskColumnHead == null && !backInColumn) {
                     { RaftBackButton(onClick = { if (!sending) onBack() }, label = stringResource(Res.string.common_back)) }
                 } else {
                     null

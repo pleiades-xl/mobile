@@ -135,11 +135,13 @@ internal fun MembersHumanDetailHeader(
     val colors = RaftTheme.colors
     val typography = RaftTheme.typography
     val messageLabel = stringResource(Res.string.member_label_message)
-    val showsBack =
+    val backHere =
         raftMembersDetailShowsBack(
             sidePaneShowsBack = raftSidePaneShowsBack(),
             inWideSplit = LocalRaftMembersWideSplitDetail.current,
         )
+    // iPhone Duo (raft-design #859): beside the system's side column Back is the column's.
+    val showsBack = backHere && !raftSideColumnControls(back = raftSideColumnBackAction(onBack), enabled = backHere)
     val paneCloses = LocalRaftSidePanePage.current != null
     val headRowTabs = LocalRaftPaneGridHeadTabs.current
     val messageButton: @Composable () -> Unit = {
@@ -298,11 +300,13 @@ internal fun MembersDetailHeader(
     val nativeMoreLabel = stringResource(Res.string.tab_more)
     val nativeBar = LocalRaftNativeNavBar.current
     val headRowTabs = LocalRaftPaneGridHeadTabs.current
-    val showsBack =
+    val backHere =
         raftMembersDetailShowsBack(
             sidePaneShowsBack = raftSidePaneShowsBack(),
             inWideSplit = LocalRaftMembersWideSplitDetail.current,
         )
+    // iPhone Duo (raft-design #859): beside the system's side column Back is the column's.
+    val showsBack = backHere && !raftSideColumnControls(back = raftSideColumnBackAction(onBack), enabled = backHere)
     if (
         headRowTabs == null &&
         nativeBar != null &&
