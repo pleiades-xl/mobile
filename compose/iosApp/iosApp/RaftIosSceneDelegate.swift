@@ -135,7 +135,7 @@ final class RaftIosSceneDelegate: UIResponder, UIWindowSceneDelegate {
     /// Safari view: `UIApplication.open` on our own Universal Link could route it straight back.
     private func acceptBrowsingWebActivity(_ activity: NSUserActivity, source: String) {
         guard let url = activity.webpageURL else { return }
-        if RaftIosMessageLinkOpen.accept(url.absoluteString, source: "ios_\(source)") {
+        if RaftMessageLinkIngress.shared.accept(url: url.absoluteString, source: "ios_\(source)", configuredWebUrl: nil) {
             RaftIosDiagnosticsRecord("info", "RaftMessageLink", "universal_link_accepted source=\(source)")
             return
         }
@@ -250,39 +250,6 @@ extension UIColor {
     }
 }
 
-/// Self-build: a message link (a notification, a Universal Link, a `raft://` link) opens from the
-/// app shell. A shell covered by other pages does not recompose, so it took the link only once
-/// they closed, when the user pressed Back, and the app then jumped to it; the pages close first.
-enum RaftIosMessageLinkOpen {
-    static func accept(_ url: String, source: String) -> Bool {
-        let accepted = RaftMessageLinkIngress.shared.accept(url: url, source: source, configuredWebUrl: nil)
-        if accepted { DispatchQueue.main.async(execute: popToShell) }
-        return accepted
-    }
-
-    private static func popToShell() {
-        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
-            for window in scene.windows {
-                guard let navigation = navigationController(in: window.rootViewController) else { continue }
-                navigation.presentedViewController?.dismiss(animated: false)
-                if navigation.viewControllers.count > 1 {
-                    RaftIosDiagnosticsRecord("info", "RaftMessageLink", "message_link_pop_to_shell pages=\(navigation.viewControllers.count - 1)")
-                    navigation.popToRootViewController(animated: false)
-                }
-            }
-        }
-    }
-
-    private static func navigationController(in controller: UIViewController?) -> UINavigationController? {
-        guard let controller else { return nil }
-        if let navigation = controller as? UINavigationController { return navigation }
-        for child in controller.children {
-            if let found = navigationController(in: child) { return found }
-        }
-        return nil
-    }
-}
-
 /// A URL opened into the app (`raft://…`): a sign-in callback, else a Raft Desktop message link
 /// (`raft:///s/{slug}/channel/{cid}?msg={mid}`), which the shared ingress turns into the Developer
 /// environment's web link and queues like a Universal Link. Anything else is ignored, as before.
@@ -292,7 +259,11 @@ enum RaftIosOpenURL {
         if RaftIosMobileOAuthHost.shared.acceptCallbackURL(url, shellInstanceId: shellInstanceId, source: source) {
             return
         }
-        let accepted = RaftIosMessageLinkOpen.accept(url.absoluteString, source: "ios_\(source)")
+        let accepted = RaftMessageLinkIngress.shared.accept(
+            url: url.absoluteString,
+            source: "ios_\(source)",
+            configuredWebUrl: nil
+        )
         RaftIosDiagnosticsRecord(
             "info",
             "RaftMessageLink",
