@@ -235,9 +235,13 @@ private fun ProvideRaftIosKeyboardInsets(content: @Composable () -> Unit) {
             hardwareKeyboard = RaftIosHardwareKeyboardState.connected,
             overlapPoints = tracker.overlapPoints,
         )
+    // Self-build: settled with no keyboard frame over this view, there is no keyboard. CMP's own
+    // value can be stale: a page uncovered in the middle of an iPhone Duo unfold kept a 9pt
+    // "keyboard" (its old, taller bounds below the new screen), which hid the shell's tabs.
+    val noKeyboardFrame = insets.imeAnimationRunning && tracker.overlapPoints <= 0.0
     val noKeyboard = remember { raftIosAppOnMacImeInsets() }
     CompositionLocalProvider(
-        LocalRaftHostImeInsets provides if (ignoresFrame) noKeyboard else insets,
+        LocalRaftHostImeInsets provides if (ignoresFrame || noKeyboardFrame) noKeyboard else insets,
         content = content,
     )
 }
