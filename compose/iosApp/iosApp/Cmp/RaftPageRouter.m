@@ -100,7 +100,15 @@ static BOOL RaftRouterBool(id value) {
 - (void)closePage:(UIViewController *)controller animated:(BOOL)animated {
     UINavigationController *navigationController = controller.navigationController;
     if (navigationController && navigationController.viewControllers.count > 1) {
-        [navigationController popViewControllerAnimated:animated];
+        if (animated) {
+            [navigationController popViewControllerAnimated:YES];
+        } else {
+            // Inside a window resize (iPhone Duo unfold) a plain non-animated pop still slides.
+            [UIView performWithoutAnimation:^{
+                [navigationController popViewControllerAnimated:NO];
+                [navigationController.view layoutIfNeeded];
+            }];
+        }
         return;
     }
     if (controller.presentingViewController) {
