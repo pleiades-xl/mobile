@@ -109,6 +109,9 @@ import shared
                 hostId: nativeTabBar.hostId,
                 keepsEdgeTouches: { point in page.keepsEdgeTouches(x: Double(point.x), y: Double(point.y)) }
             )
+        } else if #available(iOS 26.0, *) {
+            // Self-build: on iPhone Duo the shell's tabs stay in the side column over pushed pages.
+            content = RaftIosTabBarController(mirroring: page.viewController)
         } else {
             content = page.viewController
         }
