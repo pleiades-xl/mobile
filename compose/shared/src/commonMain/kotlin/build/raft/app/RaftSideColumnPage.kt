@@ -1,7 +1,5 @@
 package build.raft.app
 
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.foundation.layout.width
 import build.raft.designsystem.components.LocalRaftFrameInsets
 import build.raft.designsystem.components.RaftFrameInsets
 import androidx.compose.foundation.background
@@ -36,7 +34,6 @@ import build.raft.designsystem.components.RaftSideActionColumn
 import build.raft.designsystem.components.RaftSideActionColumnDefaults
 import build.raft.designsystem.components.RaftSideActionColumnSide
 import build.raft.designsystem.components.RaftSideColumnKeepOut
-import build.raft.designsystem.gesture.raftKeepsEdgeTouches
 
 // iPhone Duo (raft-design #859, page-structure "Foldable phones" and "Frame insets"): on the outer
 // screen, and on the inner screen held sideways, the system keeps a column on the camera's side.
@@ -150,12 +147,6 @@ internal class RaftSideColumnHostState {
     /** Self-build: the shell's sidebar toggle, under Back in the column (the system's side bar has no rail). */
     internal var shellToggle by mutableStateOf<RaftSideAction?>(null)
 
-    /**
-     * Self-build (xuheng-li 2026-10-30): the wide layout's rail, drawn as the column instead of the
-     * page's buttons, which it places among its own ([raftSideColumnDock]).
-     */
-    internal var dock by mutableStateOf<(@Composable (RaftSideColumnControls) -> Unit)?>(null)
-
     val controls: RaftSideColumnControls
         get() {
             val latest = entries.lastOrNull()?.controls ?: RaftSideColumnControls()
@@ -204,10 +195,7 @@ internal fun RaftSideColumnScaffold(
                 .absolutePadding(left = left, right = right)
                 // The column is the system's safe area on its side: what the page pads for it, the
                 // column already keeps (the rest of a wider safe area still pads).
-                .consumeWindowInsets(PaddingValues.Absolute(left = left, right = right))
-                // Self-build: with the rail docked on the right, content reaches the left edge, where
-                // the edge back gesture would hold its taps (Back is in the dock).
-                .then(if (column && onRight && host.dock != null) Modifier.raftKeepsEdgeTouches() else Modifier),
+                .consumeWindowInsets(PaddingValues.Absolute(left = left, right = right)),
         ) {
             // The column is a frame inset (page-structure "Frame insets"): menus keep 8dp from it and
             // tooltips flip away from it. Physical, never mirrored. The camera sits inside the column's
@@ -222,7 +210,6 @@ internal fun RaftSideColumnScaffold(
         }
         if (!column) return@Box
         val controls = host.controls
-        val dock = host.dock
         Box(
             Modifier
                 .align(if (onRight) AbsoluteAlignment.TopRight else AbsoluteAlignment.TopLeft)
@@ -230,19 +217,15 @@ internal fun RaftSideColumnScaffold(
                 // The column is transparent over the page's paper, not the frame.
                 .background(RaftColor.Canvas),
         ) {
-            if (dock != null) {
-                Box(Modifier.width(posture.stripWidth).fillMaxHeight()) { dock(controls) }
-            } else {
-                RaftSideActionColumn(
-                    primary = controls.primary,
-                    actions = controls.actions,
-                    side = posture.stripEdge,
-                    width = posture.stripWidth,
-                    // Back or the tab bar, never both: a page with Back has no tab bar under it.
-                    bottomReserved = if (controls.primary.isEmpty()) posture.nativeTabBarHeight else 0.dp,
-                    keepOut = posture.keepOut,
-                )
-            }
+            RaftSideActionColumn(
+                primary = controls.primary,
+                actions = controls.actions,
+                side = posture.stripEdge,
+                width = posture.stripWidth,
+                // Back or the tab bar, never both: a page with Back has no tab bar under it.
+                bottomReserved = if (controls.primary.isEmpty()) posture.nativeTabBarHeight else 0.dp,
+                keepOut = posture.keepOut,
+            )
         }
     }
 }
@@ -259,9 +242,7 @@ internal fun raftSideColumnControls(
     enabled: Boolean = true,
 ): Boolean {
     val host = LocalRaftSideColumnHost.current
-    // Self-build: with the rail docked in the column, pages keep their own Back and actions in
-    // their headers (one gear, one Search); the column's Back is the wide history's.
-    if (host == null || host.dock != null || !enabled || !LocalRaftPageActive.current) return false
+    if (host == null || !enabled || !LocalRaftPageActive.current) return false
     val entry = remember(host) { RaftSideColumnHostState.Entry() }
     val controls = RaftSideColumnControls(primary = listOfNotNull(back), actions = actions)
     SideEffect { entry.controls = controls }
@@ -288,21 +269,6 @@ internal fun raftSideColumnFallbackBack(back: RaftSideAction, toggle: RaftSideAc
             host.fallbackBack = null
             host.shellToggle = null
         }
-    }
-    return true
-}
-
-/**
- * Self-build: draws [dock] as the enclosing side column, with the page's controls. True when there
- * is a column to draw it in; the caller then draws nothing in its own place.
- */
-@Composable
-internal fun raftSideColumnDock(dock: @Composable (RaftSideColumnControls) -> Unit): Boolean {
-    val host = LocalRaftSideColumnHost.current ?: return false
-    val current by rememberUpdatedState(dock)
-    DisposableEffect(host) {
-        host.dock = { controls -> current(controls) }
-        onDispose { host.dock = null }
     }
     return true
 }
