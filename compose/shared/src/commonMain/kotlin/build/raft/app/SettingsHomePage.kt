@@ -8432,9 +8432,7 @@ private fun RaftAppShellReadyContent(
                                 listPane = listPane,
                                 detailPane = detailPane,
                                 fillListWhenNothingPicked = fillListWhenNothingPicked,
-                                // Self-build: with nothing open a hidden list would leave only "Select a
-                                // conversation", with nothing to select from.
-                                collapsed = collapseColumn != null && sidebarCollapse.isHidden(collapseColumn) && selection != null,
+                                collapsed = collapseColumn != null && sidebarCollapse.isHidden(collapseColumn),
                                 // web `snap` "collapse": only where the rail's toggle can bring it back.
                                 onCollapsedChange =
                                     collapseColumn?.takeIf { it == collapsibleColumn }?.let { column ->
