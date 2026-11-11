@@ -231,6 +231,10 @@ class RaftNativeTabBarBridge {
     private fun emit() {
         val state = if (covers.isEmpty()) shellState else shellState.copy(visible = false)
         if (mutableState.value == state) return
+        raftLogInfo(
+            "RaftNativeTabBar",
+            "native_tab_state visible=${state.visible} covers=${covers.size} publisher=${publisherToken != null} items=${state.items.size}",
+        )
         mutableState.value = state
         listener?.onNativeTabBarStateChanged(state)
     }
