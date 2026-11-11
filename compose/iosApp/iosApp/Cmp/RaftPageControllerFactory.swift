@@ -259,6 +259,13 @@ private final class RaftCmpPageNavigator: NSObject, RaftCmpIosNavigator {
         }
     }
 
+    func closePageWithoutAnimation() {
+        onMain { [weak self] in
+            guard let self, let controller = self.controller else { return }
+            self.router.closePage(controller, animated: false)
+        }
+    }
+
     private func onMain(_ work: @escaping () -> Void) {
         if Thread.isMainThread {
             work()

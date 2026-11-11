@@ -94,13 +94,17 @@ static BOOL RaftRouterBool(id value) {
 }
 
 - (void)closePage:(UIViewController *)controller {
+    [self closePage:controller animated:YES];
+}
+
+- (void)closePage:(UIViewController *)controller animated:(BOOL)animated {
     UINavigationController *navigationController = controller.navigationController;
     if (navigationController && navigationController.viewControllers.count > 1) {
-        [navigationController popViewControllerAnimated:YES];
+        [navigationController popViewControllerAnimated:animated];
         return;
     }
     if (controller.presentingViewController) {
-        [controller dismissViewControllerAnimated:YES completion:nil];
+        [controller dismissViewControllerAnimated:animated completion:nil];
         return;
     }
     NSLog(@"[RaftPageRouter][warn] closePage no-op: missing navigation stack");
