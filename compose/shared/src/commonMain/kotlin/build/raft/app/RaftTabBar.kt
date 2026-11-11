@@ -1,10 +1,5 @@
 package build.raft.app
 
-import build.raft.designsystem.components.RaftSideAction
-import build.raft.designsystem.tokens.RaftStroke
-import build.raft.designsystem.theme.RaftTheme
-import build.raft.designsystem.theme.LocalRaftContentColor
-import androidx.compose.runtime.CompositionLocalProvider
 import build.raft.designsystem.components.raftSafeAreaHorizontalPadding
 import build.raft.app.resources.*
 import androidx.compose.runtime.Immutable
@@ -47,11 +42,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.pointerInput
 import build.raft.app.compat.json.JSONObject
 import build.raft.app.compat.pager.Pager
 import build.raft.designsystem.components.RaftUnreadCount
@@ -62,7 +52,6 @@ import build.raft.designsystem.components.RaftMobileNavDefaults
 import build.raft.designsystem.components.RaftMobileNavItem
 import build.raft.designsystem.components.RaftAppRailDefaults
 import build.raft.designsystem.components.RaftAppRailItem
-import build.raft.designsystem.components.RaftAppRailToggleItem
 import build.raft.designsystem.components.RaftAppRail
 import build.raft.designsystem.components.RaftConversationKindIcon
 import build.raft.designsystem.components.RaftConversationKindGlyph
@@ -561,15 +550,6 @@ internal fun RaftNavigationRailTabBar(
     // web LeftRail's order: the collapse `Toggle` ([sidebarToggle]), [footerTools] (the bell),
     // then the destinations (Help, Settings) as `Action`s.
     val select = onBottomItemSelect ?: onSelect
-    // Self-build (xuheng-li 2026-10-30): on iPhone Duo's inner screen held sideways the rail moves
-    // into the system's side column and its own column goes.
-    if (header != null) {
-        val docked =
-            raftSideColumnDock { controls ->
-                RaftSideDock(controls, items, onSelect, bottomItems, select, header, bottomSafeArea, sidebarToggle)
-            }
-        if (docked) return
-    }
     val attentionDescriptions = raftNavRailAttentionDescriptions()
     val toggleItem = sidebarToggle?.let { raftRailSidebarToggleItem(it) }
     RaftDesignSystemTheme {
@@ -640,111 +620,6 @@ private fun raftRailSidebarToggleItem(toggle: RaftRailSidebarToggle): RaftAppRai
         },
         shortcutLabel = toggle.shortcutLabel,
     )
-
-/**
- * The rail as the side column (self-build): stacked against the bottom, away from the camera at
- * the top. Top to bottom: the server, Settings, the destinations, the sidebar toggle (where a list
- * column can be hidden), Search, then Back at the foot.
- * Help, Computers, Apps and the bell are left out; pages keep their own buttons in their headers.
- */
-@Composable
-private fun RaftSideDock(
-    controls: RaftSideColumnControls,
-    items: List<RaftBottomTabItemPayload>,
-    onSelect: (String) -> Unit,
-    bottomItems: List<RaftBottomTabItemPayload>,
-    onBottomItemSelect: (String) -> Unit,
-    header: @Composable () -> Unit,
-    bottomSafeArea: Dp,
-    sidebarToggle: RaftRailSidebarToggle?,
-) {
-    val toggleItem = sidebarToggle?.let { raftRailSidebarToggleItem(it) }
-    RaftDesignSystemTheme {
-        val colors = RaftTheme.colors
-        val seam: @Composable () -> Unit = {
-            Box(
-                Modifier
-                    .padding(vertical = RaftAppRailDefaults.Inset)
-                    .width(RaftAppRailDefaults.ItemSize)
-                    .height(RaftStroke.Hairline)
-                    .background(colors.lineSeam)
-            )
-        }
-        Row(Modifier.fillMaxSize()) {
-            Box(Modifier.width(RaftStroke.Hairline).fillMaxHeight().background(colors.lineSeam))
-            Column(
-                Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .background(colors.layerFrame)
-                    .padding(bottom = RaftAppRailDefaults.Inset + bottomSafeArea),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(RaftAppRailDefaults.ItemGap, Alignment.Bottom),
-            ) {
-                CompositionLocalProvider(LocalRaftContentColor provides colors.foregroundOnFrame) {
-                    header()
-                    bottomItems
-                        .filter { RaftAppDestination.fromId(it.key)?.route != RaftNavRoute.Menu }
-                        .forEach {
-                            RaftNavigationRailTabItem(item = it, onSelect = onBottomItemSelect, modifier = Modifier.raftShareLogsOnLongPress())
-                        }
-                    seam()
-                    items
-                        .filter { it.key != AppShellRailSearchKey && RaftAppDestination.fromId(it.key)?.route != RaftNavRoute.Page }
-                        .forEach { RaftNavigationRailTabItem(item = it, onSelect = onSelect) }
-                    seam()
-                    // The toggle keeps its place where there is no list to collapse (Tasks, Members),
-                    // so the bottom-aligned tabs above it do not move (runzhou-tao 2026-11-10).
-                    toggleItem?.let {
-                        RaftAppRailToggleItem(
-                            label = it.label,
-                            checked = it.checked,
-                            onCheckedChange = it.onCheckedChange,
-                            icon = it.icon,
-                            shortcutLabel = it.shortcutLabel,
-                        )
-                    } ?: Spacer(Modifier.size(RaftAppRailDefaults.ItemSize))
-                    items.firstOrNull { it.key == AppShellRailSearchKey }?.let { RaftNavigationRailTabItem(item = it, onSelect = onSelect) }
-                    controls.primary.forEach { RaftSideDockAction(it) }
-                }
-            }
-        }
-    }
-}
-
-/**
- * Self-build: a long press shares the diagnostics log files (iOS host, tag RaftShareLogs). Watched
- * before the item's own click, which then does not fire.
- */
-private fun Modifier.raftShareLogsOnLongPress(): Modifier =
-    pointerInput(Unit) {
-        awaitEachGesture {
-            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-            val released =
-                withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
-                    waitForUpOrCancellation(PointerEventPass.Initial)
-                }
-            if (released != null) return@awaitEachGesture
-            raftLogInfo("RaftShareLogs", "share_logs_request source=dock_settings")
-            do {
-                val event = awaitPointerEvent(PointerEventPass.Initial)
-                event.changes.forEach { it.consume() }
-            } while (event.changes.any { it.pressed })
-        }
-    }
-
-@Composable
-private fun RaftSideDockAction(action: RaftSideAction) {
-    RaftAppRailItem(
-        label = action.label,
-        selected = false,
-        onClick = action.onClick,
-        icon = { action.icon(RaftAppRailDefaults.IconSize) },
-        enabled = action.enabled,
-        attention = action.attention,
-        attentionDescription = action.attentionDescription,
-    )
-}
 
 /** The screen-reader words for a rail item's dot, by its destination's badge source. */
 @Composable
