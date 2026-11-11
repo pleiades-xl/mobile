@@ -5597,18 +5597,22 @@ private fun RaftAppShellReadyContent(
     LaunchedEffect(wideHandoff, pageVisible, desktopModeOnLargeScreen, readyServerId) {
         val launchPayload = wideHandoff ?: return@LaunchedEffect
         if (!pageVisible) return@LaunchedEffect
-        // Already the detail pane's conversation (it was open there before the fold): nothing to open.
+        // In the detail pane once it is shown there: already its conversation (restored with the wide
+        // layout), or opened now. Right after an unfold the wide workspace may not exist yet: look
+        // again after a moment before pushing the page back.
         val shownIdentity = readyServerId?.let(launchPayload::toRaftAdaptiveDetailIdentity)
-        val selected = adaptiveWorkspaceStore.snapshot().workspace?.selection?.identity
-        val alreadyShown =
-            desktopModeOnLargeScreen && shownIdentity != null &&
-                selected?.serverId == shownIdentity.serverId && selected.threadId == shownIdentity.threadId
-        bridge.log(
-            "app_shell_handoff_check wide=$desktopModeOnLargeScreen shown=${shownIdentity?.threadId} " +
-                "selected=${selected?.threadId} alreadyShown=$alreadyShown"
-        )
-        val inDetail = alreadyShown || openLaunchPayloadInAdaptiveDetail(launchPayload) != null
-        if (!inDetail && RaftWideHandoff.waitForWide) delay(1_500)
+        fun shownInDetail(): Boolean {
+            val selected = adaptiveWorkspaceStore.snapshot().workspace?.selection?.identity
+            val already =
+                desktopModeOnLargeScreen && shownIdentity != null &&
+                    selected?.serverId == shownIdentity.serverId && selected.threadId == shownIdentity.threadId
+            return already || openLaunchPayloadInAdaptiveDetail(launchPayload) != null
+        }
+        var inDetail = shownInDetail()
+        if (!inDetail && RaftWideHandoff.waitForWide) {
+            delay(1_500)
+            inDetail = shownInDetail()
+        }
         RaftWideHandoff.clear()
         if (!inDetail) pager.openStandaloneThreadLaunchPayload(launchPayload, navigationStoreScope)
         bridge.log("app_shell_handoff threadId=${launchPayload.threadId.orEmpty()} inDetail=$inDetail")
