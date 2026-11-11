@@ -7,6 +7,7 @@ import build.raft.app.resources.*
 import build.raft.app.compat.ui.nativeEvent
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -151,6 +152,7 @@ internal fun RaftAppShellSurface(
     // Jasper 2026-10-20: the bottom bar steps aside while the keyboard is open (it would ride
     // on top of the keyboard or cover the focused field otherwise).
     val imeVisible = raftImeVisible()
+    LaunchedEffect(imeVisible) { raftLogInfo("RaftAppShell", "app_shell_ime visible=$imeVisible") }
     val bottomTabsShown = raftAppShellBottomTabsShown(showBottomTabs, imeVisible)
     val effectiveModalHostState = modalHostState ?: ownedModalHostState
     val bodyTopBanner: (@Composable () -> Unit)? =
