@@ -5717,8 +5717,10 @@ private fun RaftAppShellReadyContent(
             return already || openLaunchPayloadInAdaptiveDetail(launchPayload) != null
         }
         var inDetail = shownInDetail()
-        if (!inDetail && RaftWideHandoff.waitForWide) {
-            delay(1_500)
+        // As soon as the wide layout is there, within 1.5 s.
+        repeat(if (RaftWideHandoff.waitForWide) 15 else 0) {
+            if (inDetail) return@repeat
+            delay(100)
             inDetail = shownInDetail()
         }
         RaftWideHandoff.clear()
