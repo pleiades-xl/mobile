@@ -6723,12 +6723,6 @@ private fun RaftAppShellReadyContent(
                 selectedTab = selectedTab,
                 presentation = adaptiveWorkspaceState?.presentation,
             )
-    LaunchedEffect(showAppShellBottomTabs, systemSideBar, adaptiveWorkspaceState?.presentation, adaptivePane.layout) {
-        bridge.log(
-            "app_shell_bottom_tabs shown=$showAppShellBottomTabs systemSideBar=$systemSideBar " +
-                "presentation=${adaptiveWorkspaceState?.presentation} pane=${adaptivePane.layout}"
-        )
-    }
     // Every navigation surface's labels come from its destinations (RaftAppDestinations.kt).
     val phoneNavLabels = raftNavLabels(RaftNavPresentation.PhoneBar)
     val railNavLabels = raftNavLabels(RaftNavPresentation.Rail)
