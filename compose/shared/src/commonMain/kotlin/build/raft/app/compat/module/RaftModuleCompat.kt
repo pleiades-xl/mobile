@@ -137,8 +137,9 @@ class RouterModule : Module() {
         navigator.openPage(pageName, (pageData ?: JSONObject()).toJsonObject())
     }
 
-    fun closePage() {
-        pager?.host?.navigator?.closePage()
+    fun closePage(animated: Boolean = true) {
+        val navigator = pager?.host?.navigator ?: return
+        if (animated) navigator.closePage() else navigator.closePageWithoutAnimation()
     }
 
     companion object {

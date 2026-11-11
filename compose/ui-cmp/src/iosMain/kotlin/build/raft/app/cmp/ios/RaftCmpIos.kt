@@ -75,6 +75,8 @@ interface RaftCmpIosNavigator {
     fun openPage(pageName: String, pageDataJson: String)
 
     fun closePage()
+
+    fun closePageWithoutAnimation()
 }
 
 /** Implemented by the iOS page container (`RaftPageViewController`): page -> host notifications. */
@@ -312,4 +314,6 @@ private class IosNavigator(private val navigator: RaftCmpIosNavigator) : RaftCmp
     override fun openTransition(pageName: String, pageData: JsonObject) = RaftPageOpenTransition.Untimed
 
     override fun closePage() = navigator.closePage()
+
+    override fun closePageWithoutAnimation() = navigator.closePageWithoutAnimation()
 }
