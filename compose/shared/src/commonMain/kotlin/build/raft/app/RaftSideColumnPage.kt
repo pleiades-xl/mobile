@@ -345,5 +345,7 @@ internal fun RaftLucideIconName.raftSideColumnSystemSymbol(): String? =
         RaftLucideIconName.Square -> "arrow.down.right.and.arrow.up.left"
         RaftLucideIconName.MessageSquareDot -> "message.badge"
         RaftLucideIconName.Trash2 -> "trash"
+        // Self-build: the shell's sidebar toggle under Back on the inner screen.
+        RaftLucideIconName.PanelLeftOpen, RaftLucideIconName.PanelLeftClose -> "sidebar.left"
         else -> null
     }
