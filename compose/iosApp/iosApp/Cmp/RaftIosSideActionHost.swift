@@ -50,7 +50,7 @@ final class RaftIosSideActionHost: NSObject, RaftSideActionHostListener {
 
     func onSideActionColumnChanged(json: String) {
         guard let controller else { return }
-        guard let items = RaftIosSideActionItems.make(json: json, onTap: { [weak self] id in _ = self?.bridge.sideActionTapped(id: id) }) else {
+        guard let items = RaftIosSideActionItems.make(json: fittingBesideTabs(json, controller), onTap: { [weak self] id in _ = self?.bridge.sideActionTapped(id: id) }) else {
             handBackToPage(reason: "unreadable_column_or_symbol")
             return
         }
@@ -73,6 +73,28 @@ final class RaftIosSideActionHost: NSObject, RaftSideActionHostListener {
         controller.navigationItem.rightBarButtonItems = nil
         controller.navigationItem.hidesBackButton = false
         controller.raftSideActionsShown = false
+    }
+
+    /// Self-build (#4581 point 5): the shell's system tab bar shares the vertical bar, and the
+    /// system makes no room between the two (on runzhou's Duo the fourth button met the first of five
+    /// tabs). Beside it the buttons and the tabs, the server's included, keep to eight slots; the
+    /// visible actions that do not fit move into the ⋯.
+    private func fittingBesideTabs(_ json: String, _ controller: RaftPageViewController) -> String {
+        guard let tabBar = controller.children.lazy.compactMap({ $0 as? RaftIosTabBarController }).first,
+              var column = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
+        else { return json }
+        let visible = column["visibleActionIds"] as? [String] ?? []
+        let overflow = column["overflowActionIds"] as? [String] ?? []
+        let room = max(1, 8 - tabBar.shownTabCount - ((column["primary"] as? [Any])?.count ?? 0))
+        guard visible.count + (overflow.isEmpty ? 0 : 1) > room else { return json }
+        let moved = Array(visible.dropFirst(room - 1))
+        column["visibleActionIds"] = Array(visible.prefix(room - 1))
+        column["overflowActionIds"] = moved + overflow
+        let actions = column["actions"] as? [[String: Any]] ?? []
+        if actions.contains(where: { moved.contains($0["id"] as? String ?? "") && $0["attention"] as? Bool == true }) {
+            column["overflowAttention"] = true
+        }
+        return (try? JSONSerialization.data(withJSONObject: column)).flatMap { String(data: $0, encoding: .utf8) } ?? json
     }
 
     /// A column the system cannot draw (not JSON, a symbol this system lacks, no vertical bar
