@@ -1467,6 +1467,8 @@ private fun RaftAppShellReadyContent(
                 ?.takeIf { authGateState == SharedAuthGateState.Restoring }
                 ?.let { SharedAuthReadyPhase.CachedRestorePending }
     val readyServerId = selectedServerId?.trim()?.takeIf(String::isNotBlank) ?: readySession?.currentServerId
+    // Self-build: relayed pushes ask whether the app's own banner covers their server.
+    RaftMessageLinkIngress.currentServerSlug = readySession?.servers?.firstOrNull { it.id == readyServerId }?.slug
     val serverLastConversationRepository = ServerLastConversationRepository.App
     val serverLastConversationOwnerKey =
         messageBodyFontSizeOwnerKey(sharedStores.apiEnvironmentStore.current().apiBaseUrl, readySession?.user?.id.orEmpty())
